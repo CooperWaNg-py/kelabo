@@ -1,0 +1,414 @@
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { Link, useNavigate, useParams } from 'react-router-dom'
+import { api } from '../api'
+import { config } from '../config'
+import { useAuth, displayName } from '../auth'
+import { useToast } from '../components/Toaster'
+import { useConfirm } from '../components/ConfirmDialog'
+import { Drawer } from '../components/ui/Drawer'
+import { Button } from '../components/ui/Button'
+import { Icon } from '../components/ui/Icon'
+import { Modal } from '../components/ui/Modal'
+import { themeIcon, toggleTheme } from '../theme'
+import { useCapture } from '../capture/useCapture'
+import { useHiddenMute } from '../capture/useHiddenMute'
+import { useMicStream } from '../rtc/useMicStream'
+import { useCameraStream } from '../rtc/useCameraStream'
+import { useScreenShare } from '../rtc/useScreenShare'
+import { useRtc } from '../rtc/useRtc'
+import { useBoard } from '../room/useBoard'
+import { RoomShell } from '../room/RoomShell'
+import { DebugPanel } from '../board/DebugPanel'
+import { pushSettings } from '../settings'
+import { joinPrefs } from '../joinPrefs'
+import { useLeaveGuard } from '../useLeaveGuard'
+
+/**
+ * The kelabo route: everything the room needs, and nothing about how it looks.
+ *
+ * This file owns the four live connections — microphone, Deepgram capture,
+ * conference transport and the kelabo's single SSE stream — plus the kelabo
+ * record itself. `RoomShell` owns the entire presentation. The split matters
+ * more than it looks: the room can now rearrange itself as much as it likes
+ * without any risk of dropping a stream, because no layout decision reaches
+ * anything on this page.
+ */
+
+export default function Kelabo() {
+  const { id } = useParams()
+  const toast = useToast()
+  const confirm = useConfirm()
+  const navigate = useNavigate()
+  const { identity, loading: authLoading } = useAuth()
+
+  const [kelabo, setKelabo] = useState(null)
+  const [loadError, setLoadError] = useState(false)
+  const [ended, setEnded] = useState(false)
+  const [icon, setIcon] = useState(themeIcon())
+  const [finalOnly, setFinalOnly] = useState(localStorage.getItem('kelabo-final-only') === '1')
+  const [sttLang, setSttLang] = useState(localStorage.getItem('kelabo-stt-lang') || 'en')
+  // Speaker diarization always starts off for each kelabo — opt in per kelabo.
+  const [diarize, setDiarize] = useState(false)
+  // Silence skipping is on unless explicitly turned off: it is what keeps the
+  // Deepgram bill proportional to speech instead of kelabo length.
+  const [vad, setVad] = useState(localStorage.getItem('kelabo-vad') !== '0')
+  // Auto-mute on tab switch is off unless asked for — see useHiddenMute for
+  // why this is a preference and not simply the behavior.
+  const [muteHidden, setMuteHidden] = useState(localStorage.getItem('kelabo-mute-hidden') === '1')
+  const [debugEnabled, setDebugEnabled] = useState(localStorage.getItem('kelabo-debug') === '1')
+  const [debugOpen, setDebugOpen] = useState(debugEnabled)
+  const [debugEntries, setDebugEntries] = useState([])
+  const [debugFullscreen, setDebugFullscreen] = useState(false)
+  const debugEnabledRef = useRef(debugEnabled)
+  const startAttemptedRef = useRef(false)
+
+  // Read once, on the way in. These are decisions made before the kelabo (the
+  // device check, or the saved default) and the room's own controls own them
+  // from here — re-reading would fight the person using those controls.
+  const [entry] = useState(joinPrefs)
+
+  const mode = localStorage.getItem('kelabo-mode') || 'audio-board'
+  const boardOnly = mode === 'board-only'
+  // Same precedence as everywhere else: the user's chosen name beats the
+  // server identity, which is only ever the email local-part.
+  const me = localStorage.getItem('kelabo-name') || displayName(identity)
+
+  const [streamStatus, setStreamStatus] = useState('connecting')
+  // Live agent presence from the SSE `agent` event (docs 16). `null` until one
+  // arrives, at which point it supersedes whatever the META said at page load.
+  const [agent, setAgent] = useState(null)
+  // `gateStats()` is a getter, not state — sampled while the drawer is open so
+  // the VAD readout stays live without re-rendering the room every frame.
+  const [gateStats, setGateStats] = useState(null)
+
+  const handleEnded = useCallback(() => setEnded(true), [])
+  const onDebugEvent = useCallback(entry => {
+    if (!debugEnabledRef.current) return
+    setDebugEntries(prev => [...prev.slice(-99), entry])
+  }, [])
+
+  const micEnabled = !boardOnly && !ended && !!kelabo
+  const onCall = !boardOnly && !ended
+  // One getUserMedia for the whole kelabo, shared by the Deepgram pipeline and
+  // the conference transport (see spa/src/rtc/useMicStream.js). Echo
+  // cancellation is never turned off here: without it every remote voice coming
+  // out of the speakers is picked up again by this mic and transcribed a second
+  // time under this participant's name.
+  const mic = useMicStream({ enabled: micEnabled, deviceId: entry.micDevice })
+  // The camera is opt-in and independent of the mic: it starts off, and turning
+  // it off releases the device rather than sending black frames.
+  const cam = useCameraStream({ enabled: onCall && !!kelabo, initialOn: entry.camera })
+  // Sharing is off until asked for, and the browser's own "Stop sharing" bar
+  // is authoritative — see useScreenShare.
+  const screen = useScreenShare({ enabled: onCall && !!kelabo })
+
+  const capture = useCapture({
+    kelaboId: id,
+    enabled: micEnabled,
+    finalOnly,
+    startedAt: kelabo?.startedAt,
+    language: sttLang,
+    diarize,
+    displayName: me,
+    // The participant identity from the server, NOT the signed-in email: a guest
+    // has no email, so comparing against `identity.email` left it empty and every
+    // guest saw their own utterances echoed back as though a second person had
+    // said them. Hosts are always signed in, which is why this only showed up
+    // for non-host participants.
+    myIdentity: kelabo?.me || identity?.email || '',
+    stream: mic.stream,
+    micError: mic.error,
+    vad,
+    startMuted: entry.muted,
+  })
+
+  // Muting because the tab went to the background mutes the call as well as the
+  // transcript — `capture.muted` is what useRtc gates the outgoing track on —
+  // which is the whole point: nobody hears the other thing you are doing.
+  const hiddenMuteHeld = useHiddenMute({
+    enabled: muteHidden && micEnabled,
+    muted: capture.muted,
+    mute: capture.mute,
+    unmute: capture.unmute,
+  })
+
+  const call = useRtc({
+    kelaboId: id,
+    enabled: onCall && !!kelabo,
+    stream: mic.stream,
+    videoStream: cam.stream,
+    screenStream: screen.stream,
+    muted: capture.muted,
+    streamLive: streamStatus === 'live',
+  })
+
+  // The kelabo's one EventSource. Everything the server pushes rides it —
+  // contributions, transcript echo, LLM debug, conference signalling — so it is
+  // mounted here, once, above every view that reads from it.
+  const board = useBoard({
+    kelaboId: id,
+    ended,
+    onEnded: handleEnded,
+    onRename: capture.renameSpeaker,
+    onUtterance: capture.addRemoteUtterance,
+    onDebug: onDebugEvent,
+    onRtc: call.onServerEvent,
+    onAgent: setAgent,
+    onStreamStatus: setStreamStatus,
+    authorName: me,
+  })
+
+  useEffect(() => {
+    api.getKelabo(id)
+      .then(m => {
+        setKelabo(m)
+        if (m.status === 'ended') setEnded(true)
+      })
+      .catch(() => setLoadError(true))
+  }, [id])
+
+  // Only while the drawer is open: sampling a getter every second for a panel
+  // nobody is looking at is pure waste.
+  useEffect(() => {
+    if (!debugOpen) return undefined
+    const sample = () => setGateStats(capture.gateStats())
+    sample()
+    const t = setInterval(sample, 1000)
+    return () => clearInterval(t)
+  }, [debugOpen]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    const load = () => {
+      api.getKelabo(id)
+        .then(m => {
+          setKelabo(prev => ({ ...prev, ...m }))
+          if (m.status === 'ended') setEnded(true)
+        })
+        .catch(() => {})
+    }
+    const t = setInterval(load, 10000)
+    return () => clearInterval(t)
+  }, [id])
+
+  useEffect(() => {
+    if (ended && capture.state !== 'ended' && capture.state !== 'idle') capture.stop()
+  }, [ended]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const onFinalOnlyChange = v => {
+    setFinalOnly(v)
+    localStorage.setItem('kelabo-final-only', v ? '1' : '0')
+    pushSettings()
+  }
+
+  const onSttLangChange = v => {
+    setSttLang(v)
+    localStorage.setItem('kelabo-stt-lang', v)
+    pushSettings()
+  }
+
+  const onMuteHiddenChange = v => {
+    setMuteHidden(v)
+    localStorage.setItem('kelabo-mute-hidden', v ? '1' : '0')
+    pushSettings()
+  }
+
+  const onVadChange = v => {
+    setVad(v)
+    localStorage.setItem('kelabo-vad', v ? '1' : '0')
+    pushSettings()
+  }
+
+  const toggleDebug = () => {
+    const on = !debugOpen
+    setDebugOpen(on)
+    setDebugEnabled(on)
+    debugEnabledRef.current = on
+    localStorage.setItem('kelabo-debug', on ? '1' : '0')
+    if (!on) {
+      setDebugEntries([])
+      // Don't leave the panel full-screen for the next time it opens.
+      setDebugFullscreen(false)
+    }
+  }
+
+  const hostIdentity = kelabo?.hostIdentity
+  const isHost = !!(identity && hostIdentity && identity.email === hostIdentity)
+
+  useEffect(() => {
+    if (authLoading || !kelabo || kelabo.hostJoinedAt || startAttemptedRef.current) return
+    startAttemptedRef.current = true
+    if (isHost) {
+      api.startKelabo(id)
+        .then(r => setKelabo(prev => (prev ? { ...prev, hostJoinedAt: r.hostJoinedAt } : prev)))
+        .catch(() => {})
+    } else {
+      navigate(`/m/${id}/lobby`, { replace: true })
+    }
+  }, [authLoading, kelabo, isHost, id]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // `agent` is the live SSE state; the kelabo META is the value at page load.
+  // Live wins, because it is the one that changes while someone is watching —
+  // and an agent dropping mid-kelabo used to be entirely invisible (docs 16).
+  const agentPresent = agent ? agent.attached : !!kelabo?.isDeveloperPresent
+  const agentLabel = agent?.label || agent?.runtime || kelabo?.agentLabel || kelabo?.agentRuntime || ''
+  const participantCount = kelabo?.participantCount ?? (kelabo?.participants || []).length
+
+  const copyInvite = async () => {
+    try { await navigator.clipboard.writeText(`${config.portalUrl}/join/${id}`) } catch {}
+    toast('Invite link copied')
+  }
+
+  const generateMinutes = async () => {
+    try {
+      await api.generateMinutes(id)
+      toast('Minutes requested — they will appear on the record')
+    } catch {
+      toast('Could not generate minutes right now')
+    }
+  }
+
+  const leave = () => {
+    navigate(identity ? '/' : '/login')
+  }
+
+  /**
+   * Going back out of a live kelabo, with a question first.
+   *
+   * `Leave` in the top-right is unambiguous and stays one click. This is for
+   * every other way out — the back arrow, and the browser's own Back — where
+   * the intent is "return to the previous page" and quitting the kelabo is a
+   * side effect the person did not necessarily ask for. Once it has ended there
+   * is nothing left to quit, so it just navigates.
+   */
+  const confirmLeave = useCallback(async () => {
+    if (ended) return true
+    return confirm({
+      title: 'Leave this kelabo?',
+      body: isHost
+        ? 'The kelabo carries on without you and everyone else stays in it. To finish it for everyone, use End kelabo instead.'
+        : 'The kelabo carries on without you. You can come back from the same link.',
+      confirmLabel: 'Leave',
+      cancelLabel: 'Stay',
+      icon: 'logout',
+      danger: false,
+    })
+  }, [confirm, ended, isHost])
+
+  const back = async () => {
+    if (await confirmLeave()) leave()
+  }
+
+  // The browser's own Back gets the same question the arrow does (notes #2).
+  useLeaveGuard({ enabled: !ended, confirm: confirmLeave, onLeave: leave })
+
+  const endKelabo = async () => {
+    const ok = await confirm({
+      title: 'End kelabo?',
+      body: `The kelabo ends for all ${participantCount || ''} participants. The agent will generate minutes and the record will be archived.`,
+      confirmLabel: 'End kelabo',
+    })
+    if (!ok) return
+    try {
+      await api.endKelabo(id)
+      toast('Kelabo ended — minutes generating…')
+      setEnded(true)
+    } catch {
+      toast('Could not end the kelabo')
+    }
+  }
+
+  return (
+    <>
+      <RoomShell
+        kelabo={loadError ? { title: 'Kelabo' } : kelabo}
+        kelaboId={id}
+        me={me}
+        isHost={isHost}
+        ended={ended}
+        boardOnly={boardOnly}
+        agentPresent={agentPresent}
+        agentLabel={agentLabel}
+        participantCount={participantCount}
+        capture={capture}
+        call={call}
+        mic={mic}
+        cam={cam}
+        screen={screen}
+        board={board}
+        diarize={diarize}
+        stt={{
+          lang: sttLang,
+          onLang: onSttLangChange,
+          diarize,
+          onDiarize: setDiarize,
+          vad,
+          onVad: onVadChange,
+          finalOnly,
+          onFinalOnly: onFinalOnlyChange,
+        }}
+        micPrefs={{
+          muteHidden,
+          onMuteHidden: onMuteHiddenChange,
+          held: hiddenMuteHeld,
+        }}
+        debugOn={debugEnabled}
+        onToggleDebug={toggleDebug}
+        onCopyInvite={copyInvite}
+        onGenerateMinutes={generateMinutes}
+        onLeave={leave}
+        onBack={back}
+        onEndKelabo={endKelabo}
+        onToggleTheme={() => { toggleTheme(); setIcon(themeIcon()); pushSettings() }}
+        themeIcon={icon}
+      />
+
+      {ended && (
+        <Modal
+          open
+          label="Kelabo ended"
+          badge={<span className="modal-icon modal-icon-neutral"><Icon name="check" /></span>}
+          title="Kelabo ended"
+          actions={
+            <>
+              {identity && (
+                <Button as={Link} variant="primary" to={`/kelabos/${id}`}>Open kelabo</Button>
+              )}
+              <Button as={Link} variant="ghost" to={identity ? '/' : '/login'}>{identity ? 'Back home' : 'Back to sign in'}</Button>
+            </>
+          }
+        >
+          <p className="modal-body">
+            This kelabo has ended
+            {board.contributions.length
+              ? ` with ${board.contributions.length} board contribution${board.contributions.length === 1 ? '' : 's'}`
+              : ''}.
+            {identity ? ' The record and minutes will be archived shortly.' : ''}
+          </p>
+        </Modal>
+      )}
+
+      <Drawer
+        open={debugOpen}
+        onClose={toggleDebug}
+        title="LLM debug"
+        titleChip={<span className="chip chip-accent">{debugEntries.length}</span>}
+        fullscreen={debugFullscreen}
+        onToggleFullscreen={setDebugFullscreen}
+      >
+        {/* Mounted only while debug is on. `Drawer` renders its children
+            whether or not it is open, and the Transcript ledger draws a row per
+            message straight off the live transcript — so leaving it mounted
+            behind a closed drawer meant rebuilding forty rows every time anyone
+            said a word, for a panel nobody was looking at. */}
+        {debugEnabled && (
+          <DebugPanel
+            entries={debugEntries}
+            onClear={() => setDebugEntries([])}
+            gateStats={gateStats}
+            messages={capture.messages}
+          />
+        )}
+      </Drawer>
+    </>
+  )
+}

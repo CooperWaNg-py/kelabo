@@ -1,0 +1,189 @@
+import { SSE_EVENT_AGENT, SSE_EVENT_CONTRIBUTION, SSE_EVENT_DEBUG, SSE_EVENT_ENDED, SSE_EVENT_RENAME, SSE_EVENT_RTC, SSE_EVENT_UTTERANCE } from "@kelabo/contracts";
+import { putContrib } from "./db.js";
+
+const PING_INTERVAL_MS = 25_000;
+
+export function setCorsHeaders(c, res) {
+  res.setHeader("Access-Control-Allow-Origin", c.config.portalUrl);
+  res.setHeader("Access-Control-Allow-Credentials", "true");
+  res.setHeader("Access-Control-Allow-Headers", "content-type, authorization");
+  // PUT is needed by /rtc/sfu/renegotiate and /rtc/sfu/tracks/close.
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, OPTIONS");
+  res.setHeader("Vary", "Origin");
+}
+
+export function createSseHub(c) {
+  const pingTimer = setInterval(() => {
+    for (const [kelaboId, subs] of c.state.sseSubscribers) {
+      for (const sub of subs) writeRaw(sub.res, `: ping\n\n`);
+      if (!subs.size) c.state.sseSubscribers.delete(kelaboId);
+    }
+  }, PING_INTERVAL_MS);
+  pingTimer.unref?.();
+  c.shutdownHooks.push(async () => clearInterval(pingTimer));
+
+  // A subscriber is { res, participantId } rather than a bare response: mesh
+  // signalling has to reach exactly one participant, and a peer that drops its
+  // stream must be removed from the call roster.
+  function subscribe(kelaboId, res, participantId = "") {
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache, no-transform",
+      Connection: "keep-alive",
+      "X-Accel-Buffering": "no",
+      "Access-Control-Allow-Origin": c.config.portalUrl,
+      "Access-Control-Allow-Credentials": "true",
+    });
+    res.write(`: connected\n\n`);
+    let set = c.state.sseSubscribers.get(kelaboId);
+    if (!set) {
+      set = new Set();
+      c.state.sseSubscribers.set(kelaboId, set);
+    }
+    const sub = { res, participantId };
+    set.add(sub);
+    res.on("close", () => {
+      // Re-read the set rather than closing over the one that was current at
+      // subscribe time. When the last subscriber leaves, the kelabo's set is
+      // deleted from the map (below) and the next subscriber builds a fresh
+      // one — so a connection that outlived that gap held a reference to an
+      // orphaned Set, and the "is this participant still here?" scan below ran
+      // against a collection nobody else could see. It answered "no" every
+      // time, and evicted a participant who had already reconnected.
+      const current = c.state.sseSubscribers.get(kelaboId);
+      current?.delete(sub);
+      if (current && !current.size) c.state.sseSubscribers.delete(kelaboId);
+      // Losing the stream is how we learn a participant left the call: there is
+      // no other liveness signal, and /rtc/leave only fires on a clean exit.
+      //
+      // But only when it was their LAST stream. EventSource reconnects on its
+      // own, and the old connection's close routinely lands after the
+      // replacement has already subscribed — evicting a participant who is
+      // sitting right there. That is what left one participant missing from
+      // everyone else's call roster.
+      if (!participantId) return;
+      let remaining = 0;
+      for (const other of current ?? []) if (other.participantId === participantId) remaining += 1;
+      if (remaining > 0) {
+        c.log("sse_resubscribed", { kelaboId, participantId, streams: remaining });
+        return;
+      }
+      c.rtcRoom?.handleDisconnect(kelaboId, participantId);
+      // Their last caption stream in any kelabo closed → tell contact-presence
+      // watchers they are no longer in a kelabo (docs 18 §5). Deferred a tick so
+      // the scan below sees the fully-updated sseSubscribers map.
+      if (c.presence) setImmediate(() => c.presence.refreshKelaboState(participantId));
+    });
+    c.log("sse_subscribed", { kelaboId, participantId, subscribers: set.size });
+    // Entering a kelabo flips `inKelabo` for contact-presence watchers.
+    if (participantId && c.presence) c.presence.refreshKelaboState(participantId);
+  }
+
+  function writeEvent(res, event, data) {
+    writeRaw(res, `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+  }
+
+  async function publish(kelaboId, contribution) {
+    // Ephemeral cards are streamed but never persisted: in-progress placeholders
+    // ("working"), "skipped" cards (the agent explaining why nothing is coming —
+    // useful live, noise in an archive) and empty "clear" markers (a done card
+    // with no title/markdown, used to remove an in-progress card). Only real
+    // final contributions are stored.
+    const isClearMarker = contribution.status === "done" && !contribution.title && !contribution.markdown;
+    const isEphemeral = contribution.status === "working" || contribution.status === "skipped";
+    if (!isEphemeral && !isClearMarker) {
+      try {
+        await putContrib(c, contribution);
+      } catch (err) {
+        c.logError("contrib_persist_failed", err, { kelaboId });
+      }
+    }
+    const subs = c.state.sseSubscribers.get(kelaboId);
+    if (!subs) return;
+    for (const sub of subs) writeEvent(sub.res, SSE_EVENT_CONTRIBUTION, contribution);
+    c.log("contribution_fanned", {
+      kelaboId,
+      tag: contribution.tag,
+      kind: contribution.kind,
+      origin: contribution.origin,
+      status: contribution.status,
+      subscribers: subs.size,
+    });
+  }
+
+  function rename(kelaboId, payload) {
+    const subs = c.state.sseSubscribers.get(kelaboId);
+    if (!subs) return;
+    for (const sub of subs) writeEvent(sub.res, SSE_EVENT_RENAME, payload);
+    c.log("rename_fanned", { kelaboId, ...payload, subscribers: subs.size });
+  }
+
+  // Fan out an LLM debug entry (request messages / raw response) for the
+  // in-app debug panel. Ephemeral — never persisted.
+  function debug(kelaboId, payload) {
+    const subs = c.state.sseSubscribers.get(kelaboId);
+    if (!subs) return;
+    for (const sub of subs) writeEvent(sub.res, SSE_EVENT_DEBUG, payload);
+  }
+
+  // Fan out a finalized spoken utterance to every participant (not persisted here;
+  // persistence happens via putUtt in the caption handler).
+  function utterance(kelaboId, payload) {
+    const subs = c.state.sseSubscribers.get(kelaboId);
+    if (!subs) return;
+    for (const sub of subs) writeEvent(sub.res, SSE_EVENT_UTTERANCE, payload);
+  }
+
+  // Conference-audio signalling (docs 15). Roster changes go to the whole room;
+  // mesh offer/answer/ICE go to one peer only, so a participant never sees
+  // another pair's negotiation.
+  function rtc(kelaboId, payload) {
+    const subs = c.state.sseSubscribers.get(kelaboId);
+    if (!subs) return 0;
+    for (const sub of subs) writeEvent(sub.res, SSE_EVENT_RTC, payload);
+    return subs.size;
+  }
+
+  function rtcTo(kelaboId, participantId, payload) {
+    const subs = c.state.sseSubscribers.get(kelaboId);
+    if (!subs) return 0;
+    let sent = 0;
+    for (const sub of subs) {
+      if (sub.participantId !== participantId) continue;
+      writeEvent(sub.res, SSE_EVENT_RTC, payload);
+      sent += 1;
+    }
+    return sent;
+  }
+
+  // A developer's local agent attached or detached (docs 16). Ephemeral, like
+  // `rename`: the durable half is `isDeveloperPresent` on the META. Worth
+  // fanning out because a dropped bridge used to hand the kelabo back to the
+  // server agent with nothing on screen to say so.
+  function agent(kelaboId, payload) {
+    const subs = c.state.sseSubscribers.get(kelaboId);
+    if (!subs) return;
+    for (const sub of subs) writeEvent(sub.res, SSE_EVENT_AGENT, payload);
+    c.log("agent_presence_fanned", { kelaboId, ...payload, subscribers: subs.size });
+  }
+
+  function ended(kelaboId, payload = { reason: "ended" }) {
+    const subs = c.state.sseSubscribers.get(kelaboId);
+    if (subs) {
+      for (const sub of subs) {
+        writeEvent(sub.res, SSE_EVENT_ENDED, payload);
+        sub.res.end();
+      }
+      c.state.sseSubscribers.delete(kelaboId);
+    }
+    c.log("sse_ended", { kelaboId, subscribers: subs?.size ?? 0 });
+  }
+
+  return { subscribe, publish, rename, debug, utterance, rtc, rtcTo, agent, ended, writeEvent };
+}
+
+function writeRaw(res, chunk) {
+  try {
+    res.write(chunk);
+  } catch {}
+}

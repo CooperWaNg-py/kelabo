@@ -1,0 +1,139 @@
+import { Stack, Duration, CfnOutput } from "aws-cdk-lib";
+import * as lambda from "aws-cdk-lib/aws-lambda";
+import { NodejsFunction, OutputFormat } from "aws-cdk-lib/aws-lambda-nodejs";
+import * as iam from "aws-cdk-lib/aws-iam";
+import * as secretsmanager from "aws-cdk-lib/aws-secretsmanager";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const here = dirname(fileURLToPath(import.meta.url));
+
+export class LambdaStack extends Stack {
+  constructor(scope, id, props) {
+    super(scope, id, props);
+    const { cfg, tables, archiveBucket } = props;
+    const names = cfg.tableNames;
+
+    this.fn = new NodejsFunction(this, "RestApiFn", {
+      functionName: `${cfg.app}-${cfg.endpoint}-rest-api`,
+      entry: join(here, "../../rest-api/src/index.js"),
+      handler: "handler",
+      runtime: lambda.Runtime.NODEJS_20_X,
+      memorySize: 512,
+      timeout: Duration.seconds(30),
+      projectRoot: join(here, "../.."),
+      depsLockFilePath: join(here, "../../package-lock.json"),
+      bundling: {
+        forceDockerBundling: false,
+        minify: true,
+        sourceMap: false,
+        // The rest-api and config/loadConfig.mjs are ESM and use import.meta.url;
+        // bundle to ESM so import.meta resolves (default cjs leaves it empty).
+        format: OutputFormat.ESM,
+      },
+      environment: {
+        KELABO_ENV: cfg.endpoint,
+        KELABO_REGION: cfg.region,
+        KELABO_PORTAL_URL: cfg.portalUrl,
+        KELABO_API_BASE_URL: cfg.apiBaseUrl,
+        KELABO_GATEWAY_BASE_URL: cfg.gatewayBaseUrl,
+        KELABO_COOKIE_DOMAIN: cfg.cookieDomain,
+        KELABO_ALLOWED_EMAIL_DOMAIN: cfg.allowedEmailDomain,
+        KELABO_TABLE_KELABOS: names.kelabos,
+        KELABO_TABLE_HISTORY: names.history,
+        KELABO_TABLE_USERS: names.users,
+        KELABO_TABLE_OTP: names.otp,
+        KELABO_TABLE_REFRESH: names.refresh,
+        KELABO_TABLE_MCP: names.mcp,
+        KELABO_TABLE_CONTACTS: names.contacts,
+        KELABO_ARCHIVE_BUCKET: cfg.archiveBucket,
+        KELABO_ARCHIVE_KEY_PREFIX: cfg.archiveKeyPrefix,
+        KELABO_SECRET_DEEPGRAM: cfg.secrets.deepgram,
+        KELABO_SECRET_COOKIE_KEY: cfg.secrets.cookieSigningKey,
+        KELABO_SECRET_OIDC_GOOGLE: cfg.secrets.oidcGoogle,
+        KELABO_SECRET_OIDC_APPLE: cfg.secrets.oidcApple,
+        KELABO_SECRET_MCP_PREFIX: cfg.secrets.mcpPrefix,
+        KELABO_SES_FROM_ADDRESS: cfg.ses.fromAddress,
+        KELABO_SOCIAL_PROVIDERS: (cfg.auth?.socialProviders ?? []).join(","),
+        KELABO_SESSION_TTL_SECONDS: String(cfg.auth.sessionTtlSeconds),
+        KELABO_REFRESH_TTL_DAYS: String(cfg.auth.refreshTtlDays),
+        KELABO_PARTICIPANT_TTL_SECONDS: String(cfg.auth.participantTtlSeconds),
+        KELABO_OTP_TTL_SECONDS: String(cfg.otp.ttlSeconds),
+        KELABO_OTP_MAX_ATTEMPTS: String(cfg.otp.maxAttempts),
+        KELABO_OTP_RESEND_SECONDS: String(cfg.otp.resendSeconds),
+        KELABO_OTP_PER_EMAIL_WINDOW_SECONDS: String(cfg.otp.perEmailWindowSeconds),
+        KELABO_OTP_PER_EMAIL_MAX_REQUESTS: String(cfg.otp.perEmailMaxRequests),
+        KELABO_OTP_PER_IP_WINDOW_SECONDS: String(cfg.otp.perIpWindowSeconds),
+        KELABO_OTP_PER_IP_MAX_REQUESTS: String(cfg.otp.perIpMaxRequests),
+        KELABO_DEEPGRAM_MODEL: cfg.deepgram.model,
+        KELABO_DEEPGRAM_LANGUAGE: cfg.deepgram.language,
+        KELABO_DEEPGRAM_DIARIZE_MODEL: cfg.deepgram.diarizeModel,
+        KELABO_DEEPGRAM_TOKEN_TTL_SECONDS: String(cfg.deepgram.tokenTtlSeconds),
+        // The control plane only stamps a new kelabo's transport and reports it
+        // back; it holds no Cloudflare credentials and does no signalling.
+        KELABO_RTC_DEFAULT_MODE: cfg.rtc.defaultMode,
+        KELABO_RTC_MESH_MAX: String(cfg.rtc.meshMaxParticipants),
+        KELABO_RTC_VIDEO: String(cfg.rtc.video),
+        KELABO_CONTACTS_EXTERNAL: String(cfg.contacts.external),
+        KELABO_RETENTION_DAYS: String(cfg.retentionDays),
+      },
+    });
+
+    tables.kelabos.grantReadWriteData(this.fn);
+    tables.users.grantReadWriteData(this.fn);
+    tables.otp.grantReadWriteData(this.fn);
+    tables.refresh.grantReadWriteData(this.fn);
+    tables.history.grantReadData(this.fn);
+    tables.mcp.grantReadWriteData(this.fn);
+    tables.contacts.grantReadWriteData(this.fn);
+    archiveBucket.grantRead(this.fn);
+
+    // Retention purge (POST /records/purge). Deliberately DeleteItem/DeleteObject
+    // only, on top of the read grants above — the API still cannot write history
+    // rows or archive objects, which remain gateway-owned.
+    this.fn.addToRolePolicy(
+      new iam.PolicyStatement({ actions: ["dynamodb:DeleteItem"], resources: [tables.history.tableArn] }),
+    );
+    this.fn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["s3:DeleteObject"],
+        resources: [archiveBucket.arnForObjects("*")],
+      }),
+    );
+
+    // Host-managed MCP tokens: the API creates/updates/deletes secrets under
+    // kelabo/<env>/mcp/<identity>/<server> on behalf of the signed-in user.
+    this.fn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: [
+          "secretsmanager:CreateSecret",
+          "secretsmanager:PutSecretValue",
+          "secretsmanager:GetSecretValue",
+          "secretsmanager:DeleteSecret",
+          "secretsmanager:DescribeSecret",
+        ],
+        resources: [`arn:aws:secretsmanager:${cfg.region}:${cfg.account}:secret:${cfg.secrets.mcpPrefix}*`],
+      }),
+    );
+
+    this.fn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["ses:SendEmail", "ses:SendRawEmail"],
+        resources: ["*"],
+        conditions: { StringEquals: { "ses:FromAddress": cfg.ses.fromAddress } },
+      }),
+    );
+
+    for (const [id, secretName] of Object.entries({
+      Deepgram: cfg.secrets.deepgram,
+      CookieKey: cfg.secrets.cookieSigningKey,
+      OidcGoogle: cfg.secrets.oidcGoogle,
+      OidcApple: cfg.secrets.oidcApple,
+    })) {
+      secretsmanager.Secret.fromSecretNameV2(this, `Secret${id}`, secretName).grantRead(this.fn);
+    }
+
+    new CfnOutput(this, "RestApiFnName", { value: this.fn.functionName });
+    new CfnOutput(this, "RestApiFnArn", { value: this.fn.functionArn });
+  }
+}

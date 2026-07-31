@@ -1,0 +1,1229 @@
+/* ==========================================================================
+   The kelabo room
+   --------------------------------------------------------------------------
+   A single full-viewport canvas with everything else floating over it. The
+   tiles are the room; controls, captions and panels are laid on top and come
+   and go. Nothing here is a page — there is no scroll, no header, no column.
+
+   Structure:
+     .room            fixed, full viewport, owns the layout via [data-layout]
+     .room-canvas     the backdrop
+     .room-top        floating chrome, top-left (identity) / top-right (exits)
+     .room-main       stage + optional side panel
+     .stage           EVERY layout, one flat list of .tile-slot children
+     .captions        floating live captions
+     .cbar            one row of controls
+   Chrome hides itself on idle (`.is-idle`) — see useIdleChrome.
+   ========================================================================== */
+
+.room {
+  position: fixed;
+  inset: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+
+  --stage-gap: 0.875rem;
+  --stage-pad: 1.25rem;
+  --rail-w: clamp(10.5rem, 15vw, 14.5rem);
+  --side-w: clamp(18rem, 22vw, 26.25rem);
+  --chrome-fade: 220ms ease;
+  --tile-radius: 0.875rem;
+}
+
+/* The backdrop. Slack paints an illustration here; we tint the room with the
+   active theme's own accent instead, so the room belongs to the same app as
+   every other screen rather than looking like a different product. */
+.room-canvas {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  background:
+    radial-gradient(115% 85% at 10% 0%, color-mix(in oklab, var(--accent) 16%, transparent), transparent 62%),
+    radial-gradient(95% 75% at 92% 100%, color-mix(in oklab, var(--k-link) 14%, transparent), transparent 60%),
+    linear-gradient(165deg, var(--surface-2) 0%, var(--bg) 48%, var(--surface-3) 100%);
+}
+/* The brand as ambience: a barely-there mark in the canvas corner, tinted
+   from the theme's accent. Decoration only — it sits under every tile and
+   must never read louder than one. */
+.room-canvas::after {
+  content: '';
+  position: absolute;
+  right: 3%;
+  bottom: 4%;
+  width: min(34vh, 26vw);
+  aspect-ratio: 225 / 192;
+  background: var(--accent);
+  opacity: .05;
+  pointer-events: none;
+  -webkit-mask: url(/logo-mask.png) center / contain no-repeat;
+  mask: url(/logo-mask.png) center / contain no-repeat;
+}
+
+/* --------------------------------------------------------------------------
+   Floating chrome
+   -------------------------------------------------------------------------- */
+
+.room-top {
+  position: absolute;
+  top: var(--space-4);
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  transition: opacity var(--chrome-fade), transform var(--chrome-fade);
+}
+
+.room-top-left { left: var(--space-4); }
+.room-top-right { right: var(--space-4); transition: right var(--chrome-fade), opacity var(--chrome-fade), transform var(--chrome-fade); }
+/* The side panel is full height and would otherwise sit under Leave / End
+   kelabo — floating chrome has to give way to a panel, not overlap it. */
+.room[data-panel] .room-top-right { right: calc(var(--side-w) + var(--space-4)); }
+
+.room.is-idle .room-top,
+.room.is-idle .cbar {
+  opacity: 0;
+  pointer-events: none;
+}
+.room.is-idle .room-top { transform: translateY(-6px); }
+.room.is-idle .cbar { transform: translate(-50%, 10px); }
+
+/* The identity cluster reads as one object, like Slack's "AI Notes" pill. */
+.room-back,
+.room-id {
+  background: color-mix(in oklab, var(--surface) 82%, transparent);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  box-shadow: var(--shadow-pop);
+  backdrop-filter: blur(10px);
+}
+
+.room-back {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.125rem;
+  height: 2.125rem;
+  padding: 0;
+  color: var(--text-2);
+  flex-shrink: 0;
+  cursor: pointer;
+  font: inherit;
+}
+.room-back:hover { color: var(--text); background: var(--surface); text-decoration: none; }
+
+.room-id {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px var(--space-4) 7px;
+  min-width: 0;
+  border-radius: var(--radius-lg);
+}
+
+.room-title {
+  font-weight: 600;
+  font-size: var(--text-md);
+  line-height: 1.2;
+  max-width: 34vw;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.room-sub {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.room-top-right .btn {
+  /* Matches .room-back's circle so the floating chrome reads as one row —
+     the one place a button is shorter than the shared 2.5rem. */
+  height: 2.125rem;
+  box-shadow: var(--shadow-pop);
+  backdrop-filter: blur(10px);
+}
+.room-top-right .room-icon-btn,
+.room-top-right .room-leave {
+  background: color-mix(in oklab, var(--surface) 82%, transparent);
+  border: 1px solid var(--border);
+}
+.room-top-right .room-leave:hover { background: var(--surface); }
+
+/* Alerts sit under the top chrome and are never hidden by idle: a denied
+   microphone is not something to discover when you move the mouse. */
+.room-alerts {
+  position: absolute;
+  top: 4.25rem;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 25;
+  width: min(42.5rem, calc(100vw - 2 * var(--space-4)));
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.room-alerts .banner { box-shadow: var(--shadow-pop); }
+
+/* --------------------------------------------------------------------------
+   Stage
+   -------------------------------------------------------------------------- */
+
+.room-main {
+  position: relative;
+  z-index: 10;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+.stage {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  padding: calc(var(--stage-pad) + 2.75rem) var(--stage-pad) calc(var(--stage-pad) + 4.75rem);
+  gap: var(--stage-gap);
+}
+
+/* --- grid: flex wrap, centred, tile width computed in Stage.jsx ----------- */
+.stage[data-layout="grid"] {
+  display: flex;
+  flex-wrap: wrap;
+  align-content: center;
+  justify-content: center;
+}
+.stage[data-layout="grid"] > .tile-slot {
+  /* `0 0 auto`, never shrink: the width was computed to fit, and letting flex
+     shrink it would quietly undo that and re-wrap the last row. */
+  flex: 0 0 auto;
+  width: var(--tile-w);
+  aspect-ratio: 16 / 9;
+}
+
+/* --- focus / spotlight: one stage cell + a rail column -------------------
+   The stage item spans every row of column 1 and the rail items auto-place
+   down column 2. Both are children of the same container on purpose: a nested
+   rail wrapper would remount every card on a layout switch and there would be
+   nothing for the FLIP animation to move. */
+.stage[data-layout="focus"],
+.stage[data-layout="spotlight"] {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) var(--rail-w);
+  /* grid-template-rows is set inline by Stage.jsx — the row count is the rail
+     length, and the stage cell spans all of them (`1 / -1`), which only works
+     against explicit rows. */
+}
+.stage[data-layout="focus"] > .tile-slot[data-variant="stage"],
+.stage[data-layout="spotlight"] > .tile-slot[data-variant="stage"] {
+  grid-column: 1;
+  grid-row: 1 / -1;
+}
+.stage[data-layout="focus"] > .tile-slot[data-variant="rail"],
+.stage[data-layout="spotlight"] > .tile-slot[data-variant="rail"] {
+  grid-column: 2;
+}
+
+/* Past the rail cap a card keeps its audio analyser alive but takes no space. */
+.tile-slot.is-hidden {
+  display: none;
+}
+
+.tile-slot { min-width: 0; min-height: 0; }
+
+/* --------------------------------------------------------------------------
+   Tiles
+   -------------------------------------------------------------------------- */
+
+.tile {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  border-radius: var(--tile-radius);
+  overflow: hidden;
+  background: var(--surface-3);
+  /* The hairline is not decoration: with audio-only tiles there is no video to
+     mark where a card ends, and on a dark canvas a dark card without one is
+     invisible. */
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-pop);
+  cursor: pointer;
+  isolation: isolate;
+  transition: box-shadow .18s ease;
+}
+[data-theme="dark"] .tile {
+  background: color-mix(in oklab, var(--surface) 78%, black);
+  border-color: var(--border-strong);
+}
+
+.tile:focus-visible {
+  outline: none;
+  box-shadow: var(--shadow-pop), 0 0 0 3px var(--accent-soft), 0 0 0 4px var(--accent);
+}
+
+.tile-media {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+/* The video sits over the avatar rather than replacing it, so a camera going
+   off reveals the face behind it instead of remounting the box. It is only
+   opaque once the track is actually carrying pictures — a track that exists but
+   is muted would otherwise paint a frozen last frame or a black rectangle. */
+.tile-media video {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  opacity: 0;
+  transition: opacity .18s ease;
+}
+.tile.has-video .tile-media video { opacity: 1; }
+
+/* Over live video the name plate cannot rely on the theme's surface colour —
+   the "surface" is now whatever happens to be in front of someone's camera. A
+   scrim plus a dark plate keeps it legible against a white wall and a dark
+   room alike, which a translucent light pill does not. */
+.tile.has-video .tile-media::after {
+  content: '';
+  position: absolute;
+  inset: auto 0 0 0;
+  height: 40%;
+  z-index: 1;
+  background: linear-gradient(to top, rgba(0, 0, 0, .5), transparent);
+  pointer-events: none;
+}
+.tile.has-video .tile-name,
+.tile.has-video .tile-badge {
+  background: rgba(0, 0, 0, .55);
+  color: #fff;
+}
+.tile.has-video .tile-badge-muted { color: #ff9d9d; }
+.tile.has-video .tile-dots i { background: rgba(255, 255, 255, .6); }
+.tile.has-video.is-speaking .tile-dots i { background: var(--success); }
+/* Above the scrim, which would otherwise dim the bottom of the ring. */
+.tile-ring { z-index: 3; }
+
+/* Your own camera is mirrored, because everyone reads their own image as a
+   mirror and an unmirrored self-view looks subtly wrong. Remote video is not:
+   that is how the person actually looks. */
+.tile-self .tile-media video { transform: scaleX(-1); }
+
+/* The speaking ring. It reads as "who is talking" at a glance, so it is a full
+   border rather than a badge, and it breathes with the actual level rather
+   than blinking on a threshold — `--level` is written straight to the node at
+   frame rate by ParticipantCard, never through React. */
+.tile-ring {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  border: 2px solid transparent;
+  transition: border-color .16s ease, box-shadow .16s ease;
+}
+.tile.is-speaking .tile-ring {
+  border-color: var(--success);
+  box-shadow:
+    inset 0 0 0 1px color-mix(in oklab, var(--success) 55%, transparent),
+    0 0 0 calc(2px + 5px * var(--level, 0)) color-mix(in oklab, var(--success) 30%, transparent);
+}
+
+/* The tile's primary avatar: initials on one of five --speaker-N backgrounds.
+   Two people can still collide here — five buckets is not an identity — which
+   is what the identicon inside the circle is for. */
+.tile-avatar {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 34%;
+  max-width: 6rem;
+  min-width: 2.5rem;
+  aspect-ratio: 1;
+  border-radius: 50%;
+  overflow: hidden;
+  color: #fff;
+  font-weight: 600;
+  font-size: clamp(14px, 2.2vw, 30px);
+  letter-spacing: .02em;
+  user-select: none;
+  /* Same clock as the video's own fade, both directions — camera toggles are
+     one cross-fade between face and footage, never a pop. */
+  transition: opacity .18s ease;
+}
+/* The person's identicon fills the circle behind the initials, washed out to
+   a watermark: recognisable enough to tell two same-initials people apart,
+   quiet enough that the initials stay the thing you read. The wash is opacity
+   over the speaker colour rather than a filter, so the circle keeps its hue. */
+.tile-avatar .avatar {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: .35;
+  filter: saturate(.85);
+}
+/* Above the identicon, with a breath of shadow so the letters hold against
+   whatever pattern lands behind them. */
+.tile-avatar-initials {
+  position: relative;
+  z-index: 1;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, .3);
+}
+/* With live video the avatar disappears entirely — the video already covers
+   it, but it must not peek through the fade or a letterboxed edge. */
+.tile.has-video .tile-avatar { opacity: 0; }
+.tile-avatar.sp-1 { background: var(--speaker-1); }
+.tile-avatar.sp-2 { background: var(--speaker-2); }
+.tile-avatar.sp-3 { background: var(--speaker-3); }
+.tile-avatar.sp-4 { background: var(--speaker-4); }
+.tile-avatar.sp-5 { background: var(--speaker-5); }
+
+/* Name plate, bottom-left, over the media — Slack's placement, and the right
+   one: it never moves when a tile resizes. */
+.tile-name {
+  position: absolute;
+  left: 8px;
+  bottom: 8px;
+  right: 8px;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: fit-content;
+  max-width: calc(100% - 16px);
+  padding: 4px 10px 4px 8px;
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--surface) 88%, transparent);
+  backdrop-filter: blur(8px);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  line-height: 1.2;
+}
+.tile-name-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The level meter on the name plate — the one signal that survives a tile being
+   160px wide.
+
+   Driven by the `--level` custom property that ParticipantCard writes onto the
+   tile node every frame, NOT by a keyframe animation. Keyframes were the first
+   approach and they stop dead on any machine reporting
+   `prefers-reduced-motion` — which on Windows is every machine set to "Adjust
+   for best performance", or with animation effects off, a far more common state
+   there than on macOS. A live status indicator was therefore invisible on a
+   whole platform while looking perfect on the one it was built on. Reading the
+   property instead means it behaves identically everywhere, and it shows *how
+   loud* rather than merely whether. */
+.tile-dots {
+  display: inline-flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 11px;
+  flex-shrink: 0;
+}
+.tile-dots i {
+  width: 3px;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--text-3);
+  transform-origin: bottom;
+  /* A floor, so silence still reads as three bars rather than nothing. */
+  transform: scaleY(.2);
+  transition: transform .07s linear, background-color .2s ease;
+}
+.tile.is-speaking .tile-dots i { background: var(--success); }
+/* A different multiplier per bar so it reads as a meter instead of three
+   identical blocks moving as one. */
+.tile.is-speaking .tile-dots i:nth-child(1) { transform: scaleY(calc(.2 + .55 * var(--level, 0))); }
+.tile.is-speaking .tile-dots i:nth-child(2) { transform: scaleY(calc(.2 + 1 * var(--level, 0))); }
+.tile.is-speaking .tile-dots i:nth-child(3) { transform: scaleY(calc(.2 + .72 * var(--level, 0))); }
+
+@keyframes tile-dot {
+  0%, 100% { transform: translateY(0); opacity: .55; }
+  50% { transform: translateY(-3px); opacity: 1; }
+}
+
+.tile-badges {
+  position: absolute;
+  right: 8px;
+  top: 8px;
+  z-index: 2;
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+.tile-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 7px;
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--surface) 88%, transparent);
+  backdrop-filter: blur(8px);
+  color: var(--text-2);
+  font-size: var(--text-2xs);
+  font-weight: 500;
+  line-height: 1;
+}
+.tile-badge-muted { color: var(--danger); padding: 4px; }
+.tile-badge-bad { color: var(--danger); }
+/* Favourite star on a participant tile (docs 18 §4). A button, not a label:
+   click toggles. Dim until hovered so it does not clutter the grid; a colleague
+   already favourited stays lit. */
+.tile-fav {
+  border: none; cursor: pointer; padding: 4px;
+  color: var(--text-3);
+  opacity: 0; transition: opacity .12s, color .12s;
+}
+.tile:hover .tile-fav,
+.tile-fav:focus-visible { opacity: 1; }
+.tile-fav.on { opacity: 1; color: var(--accent); }
+.tile-fav:hover { color: var(--accent); }
+@media (hover: none) { .tile-fav { opacity: 1; } }
+.tile-badge-accent { color: var(--accent-text); background: color-mix(in oklab, var(--accent-soft) 92%, transparent); }
+
+/* Size variants. Only type scale and radius — never layout, which belongs to
+   the stage, so that one card can grow from rail to stage without changing
+   which element it is. */
+.tile-rail { --tile-radius: 0.6875rem; }
+.tile-rail .tile-name { font-size: var(--text-xs); padding: 3px 8px 3px 6px; left: 6px; bottom: 6px; }
+.tile-rail .tile-badges { right: 6px; top: 6px; }
+.tile-rail .tile-avatar { width: 40%; }
+
+.tile-stage { --tile-radius: 1rem; }
+
+/* --- a shared screen ------------------------------------------------------ */
+.tile-screen {
+  /* Letterboxed on a dark mat, never cropped: a face may lose its edges to fill
+     a tile, a slide with a figure in the corner may not. */
+  background: #14161a;
+  border-color: color-mix(in oklab, var(--accent) 45%, var(--border));
+}
+.tile-screen .tile-media video {
+  position: absolute;
+  inset: 0;
+  object-fit: contain;
+  opacity: 1;
+  /* Not mirrored — unlike a self-view, this is mostly text. */
+  transform: none;
+}
+.tile-screen .tile-name {
+  background: rgba(0, 0, 0, .6);
+  color: #fff;
+}
+.tile-share-mark { display: flex; color: var(--accent); flex-shrink: 0; }
+/* On the stage a 96px avatar in a 1200px card reads as an empty card. The cap
+   scales with the tile instead. */
+.tile-stage .tile-avatar { width: 20%; max-width: 200px; font-size: clamp(24px, 5vw, 64px); }
+.tile-stage .atile-mark,
+.tile-stage .atile-halo { max-width: 140px; }
+
+.tile-overflow {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: color-mix(in oklab, var(--surface) 70%, transparent);
+  border: 1px dashed var(--border-strong);
+  box-shadow: none;
+  color: var(--text-2);
+  font-weight: 600;
+  cursor: default;
+}
+
+/* --------------------------------------------------------------------------
+   The assistant tile
+   -------------------------------------------------------------------------- */
+
+.tile-assistant .tile-media {
+  flex-direction: column;
+  gap: var(--space-2);
+  background:
+    radial-gradient(80% 70% at 50% 30%, color-mix(in oklab, var(--accent) 24%, transparent), transparent 70%),
+    linear-gradient(160deg, var(--surface) 0%, var(--surface-2) 100%);
+}
+[data-theme="dark"] .tile-assistant .tile-media {
+  background:
+    radial-gradient(80% 70% at 50% 30%, color-mix(in oklab, var(--accent) 30%, transparent), transparent 70%),
+    linear-gradient(160deg, color-mix(in oklab, var(--surface) 80%, black) 0%, var(--surface) 100%);
+}
+
+.atile-mark {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 30%;
+  max-width: 82px;
+  min-width: 38px;
+  aspect-ratio: 1;
+  border-radius: 50%;
+  background: var(--accent);
+  color: var(--accent-on);
+  box-shadow: 0 4px 14px color-mix(in oklab, var(--accent) 40%, transparent);
+}
+
+/* The halo is the tile's whole vocabulary of state: still when idle, breathing
+   while it thinks, and a single expanding pulse when something arrives. A
+   participant tile shows presence through video; this is the equivalent. */
+.atile-halo {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 30%;
+  max-width: 82px;
+  min-width: 38px;
+  aspect-ratio: 1;
+  border-radius: 50%;
+  transform: translate(-50%, -50%);
+  border: 2px solid color-mix(in oklab, var(--accent) 45%, transparent);
+  opacity: 0;
+}
+.tile-assistant[data-phase="thinking"] .atile-halo,
+.tile-assistant[data-phase="searching"] .atile-halo {
+  animation: atile-breathe 1.9s ease-in-out infinite;
+}
+.tile-assistant[data-phase="arrived"] .atile-halo {
+  animation: atile-pop 1.4s cubic-bezier(.2, .8, .3, 1) 3;
+}
+
+@keyframes atile-breathe {
+  0%, 100% { opacity: .25; transform: translate(-50%, -50%) scale(1); }
+  50% { opacity: .85; transform: translate(-50%, -50%) scale(1.55); }
+}
+@keyframes atile-pop {
+  0% { opacity: .9; transform: translate(-50%, -50%) scale(1); }
+  100% { opacity: 0; transform: translate(-50%, -50%) scale(2.6); }
+}
+
+/* A search takes visibly longer than a thought, so it gets its own signal
+   rather than the same pulse for twenty seconds. */
+.atile-scan {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  background: linear-gradient(
+    100deg,
+    transparent 35%,
+    color-mix(in oklab, var(--accent) 26%, transparent) 50%,
+    transparent 65%
+  );
+  background-size: 220% 100%;
+  animation: atile-scan 1.6s linear infinite;
+  pointer-events: none;
+}
+@keyframes atile-scan {
+  from { background-position: 180% 0; }
+  to { background-position: -80% 0; }
+}
+
+/* --- the answer, on the tile ------------------------------------------------
+   A contribution that can only be read in the side panel is a contribution most
+   of the room never reads. So the tile carries the answer itself, and carries
+   it at a size meant for reading across a desk rather than for fitting.
+
+   Sizes are in `cqi` (percent of the tile's own width) with px floors and
+   ceilings, so one component is legible in a 240px grid tile and scales up
+   smoothly when the tile is the focus of the room — no breakpoints, no second
+   component for the big case. */
+.tile-assistant { container-type: inline-size; }
+
+.atile-answer {
+  position: relative;
+  z-index: 2;
+  width: 100%;
+  /* The bottom padding is the name pill's berth: it floats 8px from the tile's
+     bottom edge, and text running under it is the one way this layout can look
+     broken. */
+  padding: 3cqi 5cqi 13cqi;
+  text-align: left;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  /* Scales with the tile like everything else here. `em` resolved against the
+     inherited font-size rather than the title's, so it stayed hairline-thin
+     exactly when the title was largest and needed the most separation. */
+  gap: clamp(4px, 1.4cqi, 10px);
+}
+.atile-answer-title {
+  font-size: clamp(12px, 4.2cqi, 22px);
+  font-weight: 600;
+  line-height: 1.25;
+  color: var(--text);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  /* `-webkit-box` reports a content height that can fall short of the two lines
+     it actually draws, so the flex gap below was measured from the wrong place
+     and the body's first line rode up into the title's descenders. Reserving
+     the height the clamp implies — 2 lines x 1.25 — is what pins it. */
+  max-height: 2.5em;
+  flex: none;
+}
+.atile-answer-body {
+  margin: 0;
+  /* Deliberately below the title. These were 4.6cqi against the title's 4.2,
+     so the answer was set *larger* than the thing naming it and the card read
+     as two competing headlines. */
+  font-size: clamp(11px, 3.3cqi, 17px);
+  line-height: 1.45;
+  color: var(--text-2);
+  flex: none;
+  /* The clamp is what keeps a long answer from pushing the name row off the
+     tile. Bigger tiles get more lines because they have the room, not because
+     a breakpoint said so. */
+  display: -webkit-box;
+  -webkit-line-clamp: 4;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+.atile-answer-to {
+  font-size: clamp(10px, 3cqi, 15px);
+  color: var(--accent-text);
+  font-weight: 500;
+}
+@container (min-width: 380px) {
+  .atile-answer-body { -webkit-line-clamp: 7; }
+}
+@container (min-width: 620px) {
+  .atile-answer-body { -webkit-line-clamp: 12; }
+}
+/* With an answer to show, the badge shrinks out of the way — it is a marker of
+   whose card this is, not the content of the card. */
+.tile-assistant.has-answer .atile-mark {
+  width: 10%;
+  min-width: 22px;
+  max-width: 34px;
+  align-self: flex-start;
+  margin-left: 5cqi;
+}
+.tile-assistant.has-answer .tile-media { justify-content: flex-start; padding-top: 4cqi; }
+.tile-assistant.has-answer .atile-halo { display: none; }
+
+/* The headline is what the small card says when there is no answer to show:
+   what the assistant is doing, or the title of the last thing it said. */
+.atile-headline {
+  position: relative;
+  z-index: 2;
+  max-width: 84%;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--surface) 88%, transparent);
+  backdrop-filter: blur(8px);
+  color: var(--text-2);
+  font-size: var(--text-xs);
+  line-height: 1.3;
+  text-align: center;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.tile-rail .atile-headline { display: none; }
+
+.atile-phase {
+  color: var(--text-3);
+  font-size: var(--text-xs);
+  font-weight: 400;
+  white-space: nowrap;
+}
+.tile-rail .atile-phase { display: none; }
+
+.atile-pulse {
+  display: inline-flex;
+  align-items: center;
+  gap: 2.5px;
+  flex-shrink: 0;
+}
+.atile-pulse i {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--text-3);
+}
+.tile-assistant[data-phase="thinking"] .atile-pulse i,
+.tile-assistant[data-phase="searching"] .atile-pulse i {
+  background: var(--accent);
+  animation: tile-dot 1s ease-in-out infinite;
+}
+.tile-assistant[data-phase="arrived"] .atile-pulse i { background: var(--accent); }
+.atile-pulse i:nth-child(2) { animation-delay: .16s; }
+.atile-pulse i:nth-child(3) { animation-delay: .32s; }
+
+/* --------------------------------------------------------------------------
+   The assistant on the stage — its "screen share"
+   -------------------------------------------------------------------------- */
+
+.tile-assistant.tile-stage {
+  cursor: default;
+  background: var(--surface);
+}
+
+.astage {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--surface);
+}
+
+.astage-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-3) var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.astage-mark {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: var(--accent-on);
+  flex-shrink: 0;
+}
+.astage-title { font-weight: 600; font-size: var(--text-base); }
+
+.astage-filters {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding: var(--space-2) var(--space-4);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.astage-filters .chip-btn.is-on {
+  background: var(--accent);
+  color: var(--accent-on);
+  border-color: transparent;
+}
+
+.astage-body {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(12.5rem, 16.5rem) minmax(0, 1fr);
+}
+
+.astage-list {
+  border-right: 1px solid var(--border);
+  overflow-y: auto;
+  padding: var(--space-2);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  background: var(--surface-2);
+}
+
+.astage-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: var(--space-2) var(--space-3);
+  border: 0;
+  border-left: 3px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  font: inherit;
+  text-align: left;
+  color: var(--text);
+  cursor: pointer;
+}
+.astage-item:hover { background: var(--surface); }
+.astage-item.is-on { background: var(--surface); border-left-color: var(--accent); font-weight: 500; }
+.astage-item[data-kind="answer"].is-on { border-left-color: var(--k-answer); }
+.astage-item[data-kind="link"].is-on { border-left-color: var(--k-link); }
+.astage-item[data-kind="code"].is-on { border-left-color: var(--k-code); }
+.astage-item[data-kind="clarify"].is-on { border-left-color: var(--k-clarify); }
+.astage-item[data-kind="minutes"].is-on { border-left-color: var(--k-minutes); }
+.astage-item[data-kind="note"].is-on { border-left-color: var(--k-note); }
+
+.astage-item-title {
+  font-size: var(--text-md);
+  line-height: 1.35;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.astage-item-meta { display: flex; align-items: center; gap: 6px; }
+
+.astage-detail {
+  overflow-y: auto;
+  padding: var(--space-6) var(--space-8);
+}
+.astage-doc { max-width: var(--measure); animation: msg-in .28s cubic-bezier(.2, .9, .3, 1) both; }
+.astage-doc-head { margin-bottom: var(--space-4); }
+.astage-doc-head h2 {
+  font-size: var(--text-xl);
+  line-height: 1.25;
+  font-weight: 600;
+  margin: 0 0 var(--space-2);
+}
+.astage-doc-meta { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.astage-src { display: flex; gap: 6px; flex-wrap: wrap; margin-top: var(--space-5); }
+.astage-src a.chip { color: var(--accent-text); }
+.astage-src a.chip:hover { background: var(--accent-soft); text-decoration: none; }
+
+.astage-empty { color: var(--text-3); font-size: var(--text-md); padding: var(--space-4); }
+.astage-empty-lg {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-3);
+  text-align: center;
+  max-width: 380px;
+  margin: 0 auto;
+}
+
+/* --------------------------------------------------------------------------
+   Captions
+   -------------------------------------------------------------------------- */
+
+.captions {
+  position: absolute;
+  left: var(--space-5);
+  bottom: 5.75rem;
+  z-index: 28;
+  width: min(35rem, 46vw);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 5px;
+  pointer-events: none;
+}
+
+.caption {
+  max-width: 100%;
+  margin: 0;
+  padding: 6px 12px;
+  border-radius: var(--radius-sm);
+  background: color-mix(in oklab, var(--text) 88%, transparent);
+  color: var(--bg);
+  font-size: var(--text-base);
+  line-height: 1.4;
+  animation: caption-in .22s ease-out both;
+}
+.caption-who { font-weight: 600; margin-right: 6px; }
+.caption-tail { opacity: .62; }
+
+@keyframes caption-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: none; }
+}
+
+/* --------------------------------------------------------------------------
+   Control bar
+   -------------------------------------------------------------------------- */
+
+/* ONE ROW, always. The bar grows wider as controls are added and never wraps:
+   a second row moves every button on the first one, so the mute you have hit a
+   hundred times is suddenly somewhere else — and it happens exactly when the
+   room is busiest, which is the worst possible moment to relocate it. When the
+   viewport finally runs out, the buttons tighten (below) rather than the row
+   breaking.
+
+   No `overflow: auto` here, tempting as it is: a scroll container clips its
+   children, and every menu in this bar opens *upward*, out of the bar. Scrolling
+   the row would cut the menus off at the top edge.
+
+   The three sizes the narrow-screen rules tune live here as custom properties,
+   so tightening the bar is one block of overrides rather than a hunt through
+   five selectors. */
+.cbar {
+  --cbtn-h: 2.375rem;
+  --cbtn-min: 2.5rem;
+  --cbtn-pad: 11px;
+  --cbar-gap: var(--space-2);
+
+  position: absolute;
+  left: 50%;
+  bottom: var(--space-4);
+  transform: translateX(-50%);
+  z-index: 32;
+  display: flex;
+  align-items: center;
+  gap: var(--cbar-gap);
+  padding: 7px;
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--surface) 88%, transparent);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-lg);
+  backdrop-filter: blur(14px);
+  transition: opacity var(--chrome-fade), transform var(--chrome-fade);
+  max-width: calc(100vw - 2 * var(--space-4));
+  flex-wrap: nowrap;
+}
+
+/* Groups keep their own size. Letting flex shrink them would squeeze the
+   controls unevenly — whichever group happened to have the most slack would
+   give way first, so the bar would reflow differently depending on how many
+   cameras you own. */
+.cbar-group {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  padding: 3px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  flex-shrink: 0;
+}
+/* Mic and layout each pair a control with the chevron that configures it, the
+   way Slack pairs a device picker with its button. */
+.cbar-pair { gap: 0; }
+.cbar-pair .cbtn:first-child { border-top-right-radius: 6px; border-bottom-right-radius: 6px; }
+.cbar-pair .cbtn-chev {
+  border-top-left-radius: 6px; border-bottom-left-radius: 6px;
+  /* Derived from the button padding rather than pinned, so the chevrons tighten
+     with the buttons they belong to instead of staying wide while everything
+     around them shrinks. */
+  padding: 0 max(4px, calc(var(--cbtn-pad) - 4px));
+  min-width: 0;
+}
+
+.cbtn {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-width: var(--cbtn-min);
+  height: var(--cbtn-h);
+  padding: 0 var(--cbtn-pad);
+  flex-shrink: 0;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-2);
+  font: inherit;
+  cursor: pointer;
+  transition: background-color .15s ease, color .15s ease;
+}
+.cbtn:hover:not(:disabled) { background: var(--surface-3); color: var(--text); }
+.cbtn:disabled { opacity: .45; cursor: not-allowed; }
+.cbtn:focus-visible { outline: none; box-shadow: var(--ring); }
+
+.cbtn.is-on { background: var(--accent-soft); color: var(--accent-text); }
+.cbtn.is-on:hover { background: var(--accent-soft); }
+
+.cbtn-mic.is-on { background: var(--success-soft); color: var(--success); }
+.cbtn-mic.is-off { background: var(--danger-soft); color: var(--danger); }
+/* The camera is opt-in, so "off" is the resting state and gets no alarm colour
+   — unlike the mic, where off means nobody can hear you. */
+.cbtn-cam.is-on { background: var(--success-soft); color: var(--success); }
+.cbtn-mic .meter { height: 12px; }
+.cbtn-mic.is-on .meter i { background: var(--success); }
+
+.cbtn-count {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--accent-on);
+  font-size: var(--text-2xs);
+  font-weight: 600;
+  line-height: 16px;
+  text-align: center;
+}
+
+/* --- connection status (Kelabo / Deepgram / SFU) -------------------------- */
+/* Read-only, so nothing here has a hover, a pointer or a pressed state — the
+   difference between this group and the buttons beside it has to survive a
+   glance. Icon and colour only: the three labelled pills this replaces were
+   wide enough on their own to push the bar onto a second row, and a readout
+   that moves the mute button is worse than no readout. The name and the
+   sentence are in the tooltip. */
+.conn-group { gap: 2px; padding: 3px 5px; }
+
+.conn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.75rem;
+  height: 2.25rem;
+  border-radius: 999px;
+  cursor: default;
+}
+.conn-ok { color: var(--success); }
+/* Only the states that want attention move. A green light that pulses is a
+   green light nobody stops noticing, which is the same as not having one. */
+.conn-warn { color: var(--warn); animation: pulse-dot 1.4s ease-in-out infinite; }
+.conn-bad { color: var(--danger); animation: pulse-dot 1s ease-in-out infinite; }
+.conn-off { color: var(--text-3); opacity: .5; }
+
+/* The room's menus are the app's menus (see kelabo.css) — the only thing that
+   differs is the direction they open, because the control bar is 8px from the
+   bottom of the screen. Everything this block used to redefine — item font,
+   heading treatment, padding, width — is gone on purpose: three sizes of the
+   same menu within one screen was the single most visible inconsistency in the
+   room. */
+.cbar .menu {
+  top: auto;
+  bottom: calc(100% + var(--space-2));
+}
+
+/* --------------------------------------------------------------------------
+   Side panel
+   -------------------------------------------------------------------------- */
+
+.side {
+  position: relative;
+  z-index: 20;
+  width: var(--side-w);
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--surface);
+  border-left: 1px solid var(--border);
+  box-shadow: var(--shadow-lg);
+  animation: side-in .22s cubic-bezier(.2, .85, .3, 1) both;
+}
+
+@keyframes side-in {
+  from { transform: translateX(24px); opacity: 0; }
+  to { transform: none; opacity: 1; }
+}
+
+.side-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-2) var(--space-2) var(--space-4);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.side-tabs { display: flex; gap: var(--space-4); flex: 1; }
+.side-tabs button {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: var(--space-2) 0;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: none;
+  color: var(--text-3);
+  font: inherit;
+  font-size: var(--text-base);
+  font-weight: 600;
+  cursor: pointer;
+}
+.side-tabs button:hover { color: var(--text-2); }
+.side-tabs button.is-on { color: var(--text); border-bottom-color: var(--accent); }
+
+.side-note { padding: var(--space-2) var(--space-4) 0; }
+
+.side-scroll {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.side-speakers {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding: var(--space-2) var(--space-4);
+  border-bottom: 1px solid var(--border);
+}
+
+.side-foot {
+  padding: var(--space-2) var(--space-4);
+  border-top: 1px solid var(--border);
+  color: var(--text-3);
+  font-size: var(--text-xs);
+  flex-shrink: 0;
+}
+
+/* --------------------------------------------------------------------------
+   Narrow screens
+   -------------------------------------------------------------------------- */
+
+@media (max-width: 900px) {
+  .room {
+    --stage-pad: 12px;
+    --rail-w: 120px;
+  }
+  .stage { padding: calc(var(--stage-pad) + 52px) var(--stage-pad) calc(var(--stage-pad) + 84px); }
+  .room-title { max-width: 46vw; }
+  .captions { width: calc(100vw - 2 * var(--space-4)); bottom: 106px; }
+  /* The panel takes the room on a phone: 22% of a 390px screen is not a panel. */
+  .side {
+    position: absolute;
+    inset: 0;
+    width: auto;
+    border-left: 0;
+  }
+  /* The bar tightens instead of wrapping. Every control keeps its position and
+     its meaning; it just takes less room. */
+  .cbar {
+    --cbtn-h: 2.125rem;
+    --cbtn-min: 2.125rem;
+    --cbtn-pad: 7px;
+    --cbar-gap: 6px;
+  }
+  .conn { width: 1.5rem; }
+  .astage-body { grid-template-columns: 1fr; grid-template-rows: minmax(0, 170px) minmax(0, 1fr); }
+  .astage-list { border-right: 0; border-bottom: 1px solid var(--border); }
+  .astage-detail { padding: var(--space-4); }
+}
+
+@media (max-width: 560px) {
+  .cbar {
+    --cbtn-h: 2rem;
+    --cbtn-min: 2rem;
+    --cbtn-pad: 5px;
+    --cbar-gap: 4px;
+  }
+  /* A phone runs out of width before tightening can save it, so here — and only
+     here — the row is allowed to compress past the comfortable sizes above. The
+     icons themselves never shrink (they carry `flex-shrink: 0`), so what gives
+     way is padding: the bar gets dense rather than losing a control or breaking
+     into a second row. */
+  .cbar-group,
+  .cbar .cbtn { min-width: 0; flex-shrink: 1; }
+  /* Two things that are pure margin at this size. The level meter duplicates
+     what the mic icon's colour already says, and the connection lights are a
+     readout — a connection that actually fails still raises its own banner
+     across the top of the room. */
+  .cbar .meter { display: none; }
+  .conn-group { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* Decoration stops. The speaking meter deliberately does not appear here: it
+     is a live readout of who is talking, it is driven by a custom property
+     rather than a keyframe, and switching it off would remove information
+     rather than calm anything down. */
+  .atile-halo,
+  .atile-scan,
+  .atile-pulse i { animation: none !important; }
+  .side, .caption, .astage-doc { animation-duration: .01ms; }
+}

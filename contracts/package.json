@@ -1,0 +1,25 @@
+{
+  "name": "@kelabo/contracts",
+  "version": "0.1.0",
+  "license": "MIT",
+  "description": "Kelabo shared data contracts: JSDoc typedefs + zod validators (pure JS ESM)",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./typedefs": "./src/typedefs.js",
+    "./schemas": "./src/schemas.js",
+    "./frames": "./src/frames.js",
+    "./llmcon": "./src/llmcon.js",
+    "./mention": "./src/mention.js",
+    "./constants": "./src/constants.js",
+    "./mcp-auth": "./src/mcpAuth.js",
+    "./retention": "./src/retention.js"
+  },
+  "scripts": {
+    "test": "node test/frames.mjs && node test/mention.mjs"
+  },
+  "dependencies": {
+    "zod": "^3.23.8"
+  }
+}

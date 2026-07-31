@@ -1,0 +1,6 @@
+/* Inter, self-hosted (variable weight axis) — no external font CDN at runtime,
+   which keeps the app usable offline behind the service worker. */
+@import '@fontsource-variable/inter';
+
+@import './kelabo.css';
+@import './room.css';

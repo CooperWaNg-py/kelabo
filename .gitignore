@@ -1,0 +1,11 @@
+node_modules/
+rig/rig-profile.json
+config/kelabo.json
+infra/cdk.out/
+spa/dist/
+rest-api/dist/
+connector/dist/
+spa-ui-mockup/
+package-lock.json
+infra/cdk.context.json
+.claude/settings.local.json

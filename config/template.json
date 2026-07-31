@@ -1,0 +1,238 @@
+{
+  "app": "kelabo",
+  "baseDomain": "example.com",
+  "environments": {
+    "dev": {
+      "endpoint": "dev",
+      "account": "123456789012",
+      "region": "ap-southeast-2",
+      "hostedZone": {
+        "name": "dev.example.com",
+        "id": "ZXXXXXXXXXXXXX"
+      },
+      "subdomains": {
+        "portal": "dev",
+        "gateway": "gw.dev"
+      },
+      "allowedEmailDomain": "example.com",
+      "secrets": {
+        "deepgram": "kelabo/dev/deepgram",
+        "llm": "kelabo/dev/llm",
+        "cookieSigningKey": "kelabo/dev/cookie-key",
+        "oidcGoogle": "kelabo/dev/oidc-google",
+        "oidcApple": "kelabo/dev/oidc-apple",
+        "mcpPrefix": "kelabo/dev/mcp/",
+        "cloudflareRealtime": "kelabo/dev/cloudflare-realtime"
+      },
+      "rtc": {
+        "provider": "cloudflare",
+        "defaultMode": "sfu",
+        "meshMaxParticipants": 6,
+        "iceTtlSeconds": 3600,
+        "video": true
+      },
+      "auth": {
+        "sessionTtlSeconds": 3600,
+        "refreshTtlDays": 60,
+        "participantTtlSeconds": 43200,
+        "agentTokenTtlDays": 90,
+        "socialProviders": []
+      },
+      "llm": {
+        "provider": "deepseek",
+        "model": "deepseek-v4-flash",
+        "smallModel": "deepseek-v4-flash",
+        "baseUrl": "https://api.deepseek.com/v1"
+      },
+      "deepgram": {
+        "model": "nova-3",
+        "diarizeModel": "latest",
+        "tokenTtlSeconds": 60
+      },
+      "ses": {
+        "fromAddress": "otp@example.com",
+        "hostedZone": {
+          "name": "example.com",
+          "id": "ZXXXXXXXXXXXXX"
+        }
+      },
+      "gateway": {
+        "cpu": 512,
+        "memoryMiB": 1024,
+        "desiredCount": 1,
+        "imageTag": "latest",
+        "agent": {
+          "maxConcurrentRuns": 4,
+          "maxDispatchPerTurn": 3,
+          "sensitivity": "medium",
+          "maxContributionsPerMinute": 3,
+          "cooldownSeconds": 45,
+          "rollingWindowSize": 60,
+          "turnTimeoutSeconds": 1
+        }
+      },
+      "otp": {
+        "ttlSeconds": 600,
+        "maxAttempts": 5,
+        "resendSeconds": 30,
+        "perEmailWindowSeconds": 3600,
+        "perEmailMaxRequests": 5,
+        "perIpWindowSeconds": 3600,
+        "perIpMaxRequests": 30
+      },
+      "retentionDays": 30
+    },
+    "staging": {
+      "endpoint": "staging",
+      "account": "123456789012",
+      "region": "ap-southeast-2",
+      "hostedZone": {
+        "name": "example.com",
+        "id": "ZXXXXXXXXXXXXX"
+      },
+      "subdomains": {
+        "portal": "staging",
+        "gateway": "staging-gw"
+      },
+      "allowedEmailDomain": "example.com",
+      "secrets": {
+        "deepgram": "kelabo/staging/deepgram",
+        "llm": "kelabo/staging/llm",
+        "cookieSigningKey": "kelabo/staging/cookie-key",
+        "oidcGoogle": "kelabo/staging/oidc-google",
+        "oidcApple": "kelabo/staging/oidc-apple",
+        "mcpPrefix": "kelabo/staging/mcp/",
+        "cloudflareRealtime": "kelabo/staging/cloudflare-realtime"
+      },
+      "rtc": {
+        "provider": "cloudflare",
+        "defaultMode": "sfu",
+        "meshMaxParticipants": 6,
+        "iceTtlSeconds": 3600,
+        "video": true
+      },
+      "auth": {
+        "sessionTtlSeconds": 3600,
+        "refreshTtlDays": 60,
+        "participantTtlSeconds": 43200,
+        "agentTokenTtlDays": 90,
+        "socialProviders": []
+      },
+      "llm": {
+        "provider": "deepseek",
+        "model": "deepseek-v4-flash",
+        "smallModel": "deepseek-v4-flash",
+        "baseUrl": "https://api.deepseek.com/v1"
+      },
+      "deepgram": {
+        "model": "nova-3",
+        "diarizeModel": "latest",
+        "tokenTtlSeconds": 60
+      },
+      "ses": {
+        "fromAddress": "otp@example.com"
+      },
+      "gateway": {
+        "cpu": 512,
+        "memoryMiB": 1024,
+        "desiredCount": 1,
+        "imageTag": "latest",
+        "agent": {
+          "maxConcurrentRuns": 4,
+          "maxDispatchPerTurn": 3,
+          "sensitivity": "medium",
+          "maxContributionsPerMinute": 3,
+          "cooldownSeconds": 45,
+          "rollingWindowSize": 60,
+          "turnTimeoutSeconds": 1
+        }
+      },
+      "otp": {
+        "ttlSeconds": 600,
+        "maxAttempts": 5,
+        "resendSeconds": 30,
+        "perEmailWindowSeconds": 3600,
+        "perEmailMaxRequests": 5,
+        "perIpWindowSeconds": 3600,
+        "perIpMaxRequests": 30
+      },
+      "retentionDays": 30
+    },
+    "prod": {
+      "endpoint": "prod",
+      "account": "123456789012",
+      "region": "ap-southeast-2",
+      "hostedZone": {
+        "name": "example.com",
+        "id": "ZXXXXXXXXXXXXX"
+      },
+      "subdomains": {
+        "portal": "",
+        "gateway": "gw"
+      },
+      "allowedEmailDomain": "example.com",
+      "secrets": {
+        "deepgram": "kelabo/prod/deepgram",
+        "llm": "kelabo/prod/llm",
+        "cookieSigningKey": "kelabo/prod/cookie-key",
+        "oidcGoogle": "kelabo/prod/oidc-google",
+        "oidcApple": "kelabo/prod/oidc-apple",
+        "mcpPrefix": "kelabo/prod/mcp/",
+        "cloudflareRealtime": "kelabo/prod/cloudflare-realtime"
+      },
+      "rtc": {
+        "provider": "cloudflare",
+        "defaultMode": "sfu",
+        "meshMaxParticipants": 6,
+        "iceTtlSeconds": 3600,
+        "video": true
+      },
+      "auth": {
+        "sessionTtlSeconds": 3600,
+        "refreshTtlDays": 90,
+        "participantTtlSeconds": 43200,
+        "agentTokenTtlDays": 90,
+        "socialProviders": []
+      },
+      "llm": {
+        "provider": "deepseek",
+        "model": "deepseek-v4-flash",
+        "smallModel": "deepseek-v4-flash",
+        "baseUrl": "https://api.deepseek.com/v1"
+      },
+      "deepgram": {
+        "model": "nova-3",
+        "diarizeModel": "latest",
+        "tokenTtlSeconds": 60
+      },
+      "ses": {
+        "fromAddress": "otp@example.com"
+      },
+      "gateway": {
+        "cpu": 512,
+        "memoryMiB": 1024,
+        "desiredCount": 1,
+        "imageTag": "latest",
+        "agent": {
+          "maxConcurrentRuns": 8,
+          "maxDispatchPerTurn": 3,
+          "sensitivity": "medium",
+          "maxContributionsPerMinute": 3,
+          "cooldownSeconds": 45,
+          "rollingWindowSize": 60,
+          "turnTimeoutSeconds": 1
+        }
+      },
+      "otp": {
+        "ttlSeconds": 600,
+        "maxAttempts": 5,
+        "resendSeconds": 30,
+        "perEmailWindowSeconds": 3600,
+        "perEmailMaxRequests": 5,
+        "perIpWindowSeconds": 3600,
+        "perIpMaxRequests": 30
+      },
+      "retentionDays": 90
+    }
+  }
+}

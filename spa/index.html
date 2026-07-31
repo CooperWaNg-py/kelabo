@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>kelabo</title>
+<link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png">
+<link rel="icon" type="image/png" sizes="192x192" href="/favicon-192.png">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<!-- Matches the browser chrome to the app's background so the two don't seam at
+     the top of the viewport. Kept in sync with the live --bg by theme.js, since
+     the value now depends on both the scheme and the theme. -->
+<meta name="theme-color" content="#faf9f7">
+<script>
+// Runs before first paint: applying the saved appearance from React would
+// flash the default palette on every load.
+(function () {
+  var stored = localStorage.getItem("kelabo-theme");
+  var theme = stored || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+  document.documentElement.dataset.theme = theme;
+
+  var schemes = ["clay", "slate", "sage", "plum", "mono", "matrix"];
+  var scheme = localStorage.getItem("kelabo-scheme");
+  document.documentElement.dataset.scheme = schemes.indexOf(scheme) >= 0 ? scheme : "clay";
+})();
+</script>
+<script>
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", function () { navigator.serviceWorker.register("/sw.js"); });
+}
+</script>
+</head>
+<body>
+<div id="root"></div>
+<script type="module" src="/src/main.jsx"></script>
+</body>
+</html>

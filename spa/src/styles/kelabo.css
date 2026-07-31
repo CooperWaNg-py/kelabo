@@ -1,0 +1,2556 @@
+/* kelabo design system — one accent, warm neutrals, flat surfaces.
+ *
+ * Layers, in order:
+ *   1. tokens      — the only place raw colours/sizes are written down
+ *   2. base        — element defaults
+ *   3. primitives  — layout, buttons, inputs, cards, chips…
+ *   4. features    — kelabo room, board, settings…
+ *
+ * Rule of thumb: if a value appears in a `style={{}}` in JSX, it belongs here
+ * instead. The token names are semantic (`--text-2`, `--space-4`) so a retheme
+ * is a change to this block and nothing else.
+ */
+
+/* ==========================================================================
+   1. TOKENS
+   ========================================================================== */
+
+/* --------------------------------------------------------------------------
+   Two independent axes:
+     data-scheme  — which palette (clay | slate | sage | plum)
+     data-theme   — light or dark within that palette
+
+   Structural tokens (type, space, radius) live in :root and never vary. Each
+   scheme then supplies the same fixed set of colour tokens twice: once for
+   light, once for dark. Nothing outside this block names a colour, so adding a
+   scheme is adding one pair of rules here and one entry in theme.js.
+
+   Every palette keeps the same discipline: warm-or-cool neutral surfaces, ONE
+   accent, and low-saturation kind/speaker hues. Swapping schemes changes the
+   app's temperature, not how loud it is.
+   -------------------------------------------------------------------------- */
+
+:root {
+  --font: "Inter Variable", "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+  /* Page titles and the wordmark only. A serif at display size is the one thing
+     that stops a screen of sans-serif rows reading as a spreadsheet, and it
+     costs nothing: this is a system stack, so there is no second font to
+     download and nothing to fall back from. Never used below --text-lg — a
+     serif at 13px is just harder to read. */
+  --font-display: "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua",
+    Georgia, "Times New Roman", serif;
+  --mono: "SF Mono", "JetBrains Mono", ui-monospace, Consolas, monospace;
+
+  /* type scale — every font-size in the app comes from here */
+  /* rem, not px, so the whole interface scales with the root font size — see
+     the `html` rule below. The values are the same as the px they replace at a
+     16px root, so nothing moves at ordinary sizes. */
+  --text-2xs: 0.6875rem; /* 11 */
+  --text-xs: 0.75rem;    /* 12 */
+  --text-sm: 0.8125rem;  /* 13 */
+  --text-md: 0.875rem;   /* 14 — default UI text */
+  --text-base: 0.9375rem;/* 15 — reading text */
+  --text-lg: 1.0625rem;  /* 17 */
+  --text-xl: 1.25rem;    /* 20 */
+  --text-2xl: 1.5rem;    /* 24 */
+  --text-3xl: 1.875rem;  /* 30 */
+
+  --leading-tight: 1.3;
+  --leading-normal: 1.6;
+
+  /* space scale — 4px base */
+  --space-1: 0.25rem;  /* 4 */
+  --space-2: 0.5rem;   /* 8 */
+  --space-3: 0.75rem;  /* 12 */
+  --space-4: 1rem;     /* 16 */
+  --space-5: 1.25rem;  /* 20 */
+  --space-6: 1.5rem;   /* 24 */
+  --space-8: 2rem;     /* 32 */
+  --space-10: 2.5rem;  /* 40 */
+
+  /* Content measures. Two, and only two — every signed-in page shares
+     --measure so its column starts and ends in the same place no matter which
+     route you are on. --measure-form is reserved for Sign in: a single field
+     and a button, which would look absurd at full width. Guest join used to
+     share it and no longer does — it grew a camera preview and a device
+     picker, and sat at 440px immediately before the Lobby's 900px, which made
+     two steps of one flow look like two different products. Anything that hard-codes its own
+     max-width is a bug: that is how Settings ended up at 720 and New kelabo
+     at 440 while Home sat at 900. */
+  --measure: 56.25rem;  /* 900 */
+  --measure-form: 27.5rem; /* 440 */
+
+  --radius-xs: 0.375rem; /* chips, small buttons, controls inside rows */
+  --radius-sm: 0.5rem;
+  --radius: 0.75rem;
+  --radius-lg: 1rem;
+
+  /* Popover menus, everywhere. There used to be no shared values here at all,
+     which is why the account menu in the rail, the "more" menu in the room and
+     the transcription settings menu were three different sizes with three
+     different item fonts — the same component, drawn three ways depending on
+     which stylesheet block happened to reach it. One width, one item size, one
+     padding: a menu should read as the same object wherever it opens. */
+  --menu-w: 14.5rem;
+  --menu-pad: 0.3125rem;
+  --menu-item-text: var(--text-md);
+
+  /* Modals, likewise. A dialog is a dialog: same width, same padding, same
+     title size, whether it is asking you to confirm a delete or telling you a
+     kelabo is starting. */
+  --modal-w: 26.25rem; /* 420 */
+  --modal-pad: var(--space-6);
+
+  /* Flat by default. Elevation is reserved for things that genuinely float
+     above the page (drawer, modal, popover, toast). Tuned per theme below. */
+  --shadow: 0 1px 2px rgba(20, 20, 20, .04);
+  --shadow-pop: 0 4px 16px rgba(20, 20, 20, .10), 0 1px 3px rgba(20, 20, 20, .06);
+  --shadow-lg: 0 12px 40px rgba(20, 20, 20, .16);
+
+  --ring: 0 0 0 3px var(--accent-soft);
+  /* Backdrop behind drawers, modals and the mobile rail. Scheme-independent on
+     purpose — a dimmed page should read the same whatever palette is active. */
+  --scrim: rgba(20, 20, 20, .38);
+
+  /* Neutral status colours shared by every scheme: "danger" must not change
+     meaning because someone preferred a cooler palette. */
+  --success: #3f7d5c;
+  --success-soft: #e7f0ea;
+  --danger: #b03434;
+  --danger-soft: #f8eae9;
+  --warn: #8a6314;
+  --warn-soft: #f7efdd;
+}
+
+[data-theme="dark"] {
+  --scrim: rgba(0, 0, 0, .55);
+
+  --success: #74b894;
+  --success-soft: #1e2c25;
+  --danger: #e08585;
+  --danger-soft: #3a2322;
+  --warn: #d9ab5c;
+  --warn-soft: #33291a;
+
+  --shadow: 0 1px 2px rgba(0, 0, 0, .25);
+  --shadow-pop: 0 4px 16px rgba(0, 0, 0, .45), 0 1px 3px rgba(0, 0, 0, .3);
+  --shadow-lg: 0 12px 40px rgba(0, 0, 0, .55);
+}
+
+/* ---------- clay: warm bone paper, terracotta accent (default) ---------- */
+:root,
+[data-scheme="clay"] {
+  --bg: #faf9f7;
+  --surface: #ffffff;
+  --surface-2: #f3f1ed;
+  --surface-3: #e9e6e0;
+  --border: #e6e3dc;
+  --border-strong: #d2cec5;
+
+  --text: #1a1917;
+  --text-2: #56524b;
+  --text-3: #8a857c;
+
+  --accent: #b8532f;
+  --accent-hover: #a14727;
+  --accent-soft: #f6ebe5;
+  --accent-text: #9c4526;
+  --accent-on: #ffffff;
+
+  --k-answer: #b8532f;
+  --k-link: #4a7b78;
+  --k-code: #6a5f92;
+  --k-clarify: #96702a;
+  --k-note: #8a857c;
+  --k-minutes: #4d7a5c;
+
+  --speaker-1: #4a6c94;
+  --speaker-2: #4a7b78;
+  --speaker-3: #a05a3c;
+  --speaker-4: #6a5f92;
+  --speaker-5: #93526d;
+}
+
+[data-theme="dark"],
+[data-scheme="clay"][data-theme="dark"] {
+  --bg: #1c1b19;
+  --surface: #242320;
+  --surface-2: #2e2c29;
+  --surface-3: #393633;
+  --border: #37342f;
+  --border-strong: #4a4640;
+
+  --text: #f0eee9;
+  --text-2: #b0aaa0;
+  --text-3: #857f76;
+
+  --accent: #d9775a;
+  --accent-hover: #e08a68;
+  --accent-soft: #3a2823;
+  --accent-text: #e08a68;
+  --accent-on: #1c1b19;
+
+  --k-answer: #d9775a;
+  --k-link: #79b0ab;
+  --k-code: #9d92c9;
+  --k-clarify: #cca55e;
+  --k-note: #857f76;
+  --k-minutes: #7fb193;
+
+  --speaker-1: #7ba0c9;
+  --speaker-2: #79b0ab;
+  --speaker-3: #d1906f;
+  --speaker-4: #9d92c9;
+  --speaker-5: #c78aa5;
+}
+
+/* ---------- slate: cool grey, indigo accent ---------- */
+[data-scheme="slate"] {
+  --bg: #f8f9fa;
+  --surface: #ffffff;
+  --surface-2: #eff1f4;
+  --surface-3: #e3e6eb;
+  --border: #e2e5ea;
+  --border-strong: #c9ced7;
+
+  --text: #14171c;
+  --text-2: #4d5560;
+  --text-3: #838c99;
+
+  --accent: #3f5bb5;
+  --accent-hover: #354d9c;
+  --accent-soft: #eaeefa;
+  --accent-text: #35509f;
+  --accent-on: #ffffff;
+
+  --k-answer: #3f5bb5;
+  --k-link: #2f7772;
+  --k-code: #6a5f92;
+  --k-clarify: #8a6524;
+  --k-note: #838c99;
+  --k-minutes: #3d7358;
+
+  --speaker-1: #3f5bb5;
+  --speaker-2: #2f7772;
+  --speaker-3: #9a5636;
+  --speaker-4: #6a5f92;
+  --speaker-5: #8d4c69;
+}
+
+[data-scheme="slate"][data-theme="dark"] {
+  --bg: #14171c;
+  --surface: #1b1f26;
+  --surface-2: #242932;
+  --surface-3: #2f3641;
+  --border: #2c323b;
+  --border-strong: #3e4653;
+
+  --text: #eceff4;
+  --text-2: #a5aebc;
+  --text-3: #79828f;
+
+  --accent: #7f9bf0;
+  --accent-hover: #94ace9;
+  --accent-soft: #232c47;
+  --accent-text: #94acf3;
+  --accent-on: #14171c;
+
+  --k-answer: #7f9bf0;
+  --k-link: #6fb0aa;
+  --k-code: #9d92c9;
+  --k-clarify: #cca55e;
+  --k-note: #79828f;
+  --k-minutes: #75ae90;
+
+  --speaker-1: #7f9bf0;
+  --speaker-2: #6fb0aa;
+  --speaker-3: #d1906f;
+  --speaker-4: #9d92c9;
+  --speaker-5: #c78aa5;
+}
+
+/* ---------- sage: warm grey-green, moss accent ---------- */
+[data-scheme="sage"] {
+  --bg: #f8f9f6;
+  --surface: #ffffff;
+  --surface-2: #eef1ea;
+  --surface-3: #e2e7dc;
+  --border: #e3e7dd;
+  --border-strong: #c9d0c1;
+
+  --text: #171a15;
+  --text-2: #515949;
+  --text-3: #858d7c;
+
+  --accent: #4a7343;
+  --accent-hover: #3e6238;
+  --accent-soft: #e8f0e5;
+  --accent-text: #3f6539;
+  --accent-on: #ffffff;
+
+  --k-answer: #4a7343;
+  --k-link: #37716d;
+  --k-code: #665e8c;
+  --k-clarify: #8a6524;
+  --k-note: #858d7c;
+  --k-minutes: #3d7358;
+
+  --speaker-1: #46688e;
+  --speaker-2: #37716d;
+  --speaker-3: #96563a;
+  --speaker-4: #665e8c;
+  --speaker-5: #8a5068;
+}
+
+[data-scheme="sage"][data-theme="dark"] {
+  --bg: #171a15;
+  --surface: #1e221c;
+  --surface-2: #272c24;
+  --surface-3: #323830;
+  --border: #2f352c;
+  --border-strong: #424939;
+
+  --text: #edf0e9;
+  --text-2: #a9b2a0;
+  --text-3: #7d8676;
+
+  --accent: #8fbb7f;
+  --accent-hover: #a2c893;
+  --accent-soft: #262f22;
+  --accent-text: #a2c893;
+  --accent-on: #171a15;
+
+  --k-answer: #8fbb7f;
+  --k-link: #6fb0aa;
+  --k-code: #9d92c9;
+  --k-clarify: #cca55e;
+  --k-note: #7d8676;
+  --k-minutes: #75ae90;
+
+  --speaker-1: #7ba0c9;
+  --speaker-2: #6fb0aa;
+  --speaker-3: #d1906f;
+  --speaker-4: #9d92c9;
+  --speaker-5: #c78aa5;
+}
+
+/* ---------- plum: neutral grey, muted violet accent ---------- */
+[data-scheme="plum"] {
+  --bg: #faf9fb;
+  --surface: #ffffff;
+  --surface-2: #f2f0f5;
+  --surface-3: #e7e3ed;
+  --border: #e7e4ec;
+  --border-strong: #cec8d7;
+
+  --text: #191721;
+  --text-2: #544d5f;
+  --text-3: #8a8394;
+
+  --accent: #6f4498;
+  --accent-hover: #5e3a81;
+  --accent-soft: #f0e9f7;
+  --accent-text: #5f3b83;
+  --accent-on: #ffffff;
+
+  --k-answer: #6f4498;
+  --k-link: #2f7772;
+  --k-code: #4a5ea8;
+  --k-clarify: #8a6524;
+  --k-note: #8a8394;
+  --k-minutes: #3d7358;
+
+  --speaker-1: #46688e;
+  --speaker-2: #2f7772;
+  --speaker-3: #9a5636;
+  --speaker-4: #6f4498;
+  --speaker-5: #8d4c69;
+}
+
+[data-scheme="plum"][data-theme="dark"] {
+  --bg: #191721;
+  --surface: #201d29;
+  --surface-2: #2a2634;
+  --surface-3: #363040;
+  --border: #322d3c;
+  --border-strong: #453e52;
+
+  --text: #efecf3;
+  --text-2: #aea6bb;
+  --text-3: #827a8f;
+
+  --accent: #b590dd;
+  --accent-hover: #c3a4e5;
+  --accent-soft: #2d2440;
+  --accent-text: #c3a4e5;
+  --accent-on: #191721;
+
+  --k-answer: #b590dd;
+  --k-link: #6fb0aa;
+  --k-code: #8fa2e8;
+  --k-clarify: #cca55e;
+  --k-note: #827a8f;
+  --k-minutes: #75ae90;
+
+  --speaker-1: #8fa2e8;
+  --speaker-2: #6fb0aa;
+  --speaker-3: #d1906f;
+  --speaker-4: #b590dd;
+  --speaker-5: #c78aa5;
+}
+
+/* ---------- mono: black / grey / white, no hue at all ----------
+   The accent is simply the darkest ink (or the lightest, inverted for dark),
+   so a primary button is black-on-white and vice versa. Kind edges and speaker
+   labels become steps on the grey ramp rather than hues — both are already
+   named in text, so colour was only ever reinforcement there.
+
+   Consequence worth knowing: status stays green/red/amber in this scheme like
+   every other, which means live/danger/warning end up being the ONLY colour on
+   screen. That is a feature — colour reduced to the one job that needs it. */
+[data-scheme="mono"] {
+  --bg: #f7f7f7;
+  --surface: #ffffff;
+  --surface-2: #f0f0f0;
+  --surface-3: #e3e3e3;
+  --border: #e5e5e5;
+  --border-strong: #c8c8c8;
+
+  --text: #171717;
+  --text-2: #525252;
+  --text-3: #858585;
+
+  --accent: #1f1f1f;
+  --accent-hover: #000000;
+  --accent-soft: #e8e8e8;
+  --accent-text: #262626;
+  --accent-on: #ffffff;
+
+  --k-answer: #1f1f1f;
+  --k-link: #454545;
+  --k-code: #5e5e5e;
+  --k-clarify: #787878;
+  --k-note: #9a9a9a;
+  --k-minutes: #333333;
+
+  /* Speaker labels are 13px bold, so the ramp stops at the darkest grey that
+     still clears 4.5:1 on the page background — a wider spread would separate
+     the speakers better but push the lightest one below AA. */
+  --speaker-1: #1f1f1f;
+  --speaker-2: #333333;
+  --speaker-3: #474747;
+  --speaker-4: #5b5b5b;
+  --speaker-5: #6f6f6f;
+}
+
+[data-scheme="mono"][data-theme="dark"] {
+  --bg: #0f0f0f;
+  --surface: #171717;
+  --surface-2: #212121;
+  --surface-3: #2e2e2e;
+  --border: #282828;
+  --border-strong: #3d3d3d;
+
+  --text: #f5f5f5;
+  --text-2: #a8a8a8;
+  --text-3: #7a7a7a;
+
+  --accent: #f0f0f0;
+  --accent-hover: #ffffff;
+  --accent-soft: #2a2a2a;
+  --accent-text: #ededed;
+  --accent-on: #0f0f0f;
+
+  --k-answer: #f0f0f0;
+  --k-link: #c4c4c4;
+  --k-code: #a3a3a3;
+  --k-clarify: #8a8a8a;
+  --k-note: #6e6e6e;
+  --k-minutes: #d6d6d6;
+
+  --speaker-1: #f0f0f0;
+  --speaker-2: #d4d4d4;
+  --speaker-3: #b8b8b8;
+  --speaker-4: #a0a0a0;
+  --speaker-5: #8c8c8c;
+}
+
+/* ---------- matrix: phosphor green terminal ----------
+   The one scheme that also overrides --font, to the monospace stack: a green
+   terminal in a proportional face reads as a colour swap rather than a
+   terminal. That override is the only structural token any scheme touches.
+
+   Dark is the iconic variant and additionally gets the falling-glyph overlay
+   defined further down. Light is a green-phosphor-on-paper reading of the same
+   idea — less cinematic, but the theme toggle has to mean something. */
+[data-scheme="matrix"] {
+  --font: var(--mono);
+
+  --bg: #f2f7f2;
+  --surface: #ffffff;
+  --surface-2: #e9f2ea;
+  --surface-3: #d8e8dc;
+  --border: #dbe7dd;
+  --border-strong: #b3ccb9;
+
+  --text: #07240f;
+  --text-2: #2d5c3b;
+  --text-3: #5d8a69;
+
+  --accent: #0b7a35;
+  --accent-hover: #09622a;
+  --accent-soft: #dff2e5;
+  --accent-text: #0a6b2f;
+  --accent-on: #ffffff;
+
+  --k-answer: #0b7a35;
+  --k-link: #226b62;
+  --k-code: #3f6b4a;
+  --k-clarify: #6b6a24;
+  --k-note: #5d8a69;
+  --k-minutes: #2c7a4d;
+
+  --speaker-1: #07240f;
+  --speaker-2: #14472a;
+  --speaker-3: #1f6338;
+  --speaker-4: #2b7346;
+  --speaker-5: #3a7f55;
+}
+
+[data-scheme="matrix"][data-theme="dark"] {
+  --font: var(--mono);
+
+  --bg: #050805;
+  --surface: #0a0f0a;
+  --surface-2: #0f170f;
+  --surface-3: #17251a;
+  --border: #16251a;
+  --border-strong: #23392a;
+
+  --text: #d6ffe2;
+  --text-2: #74c98b;
+  --text-3: #4a8459;
+
+  --accent: #00e553;
+  --accent-hover: #3bff81;
+  --accent-soft: #0b2313;
+  --accent-text: #4dff8a;
+  --accent-on: #04140a;
+
+  --k-answer: #00e553;
+  --k-link: #35d9b0;
+  --k-code: #8ce06a;
+  --k-clarify: #d6e04a;
+  --k-note: #4a8459;
+  --k-minutes: #4dffa8;
+
+  --speaker-1: #4dff8a;
+  --speaker-2: #35d9b0;
+  --speaker-3: #8ce06a;
+  --speaker-4: #6ad9c0;
+  --speaker-5: #a8e878;
+}
+
+/* ==========================================================================
+   2. BASE
+   ========================================================================== */
+
+* { box-sizing: border-box; }
+
+/**
+ * The whole interface scales with this one number.
+ *
+ * The design was drawn for a viewport around 1280–1600 CSS pixels. A 4K display
+ * at 150% Windows scaling reports 2560, which is not a bigger screen so much as
+ * a screen with far more room than the layout was ever asked to fill: a 900px
+ * column marooned in the middle with a third of the window empty beside it, and
+ * 14px text that is physically tiny at that pixel density. Reaching for the
+ * browser's own zoom fixes it, which is the clue — every dimension needed to be
+ * bigger together, not just the type.
+ *
+ * So every token above is in rem and this scales the root: below 1600 nothing
+ * changes at all, and from there it grows to about 1.4x by 2560 and stops.
+ * Breakpoints stay in px on purpose — a media query asks how big the actual
+ * window is, and scaling the question with the answer is circular.
+ *
+ * It also means a reader who has set a larger default font size in their
+ * browser finally gets a larger interface, which they never did before.
+ */
+html {
+  font-size: clamp(16px, calc(16px + (100vw - 1600px) / 160), 22px);
+}
+
+html, body { height: 100%; }
+
+body {
+  margin: 0;
+  font-family: var(--font);
+  background: var(--bg);
+  color: var(--text);
+  font-size: var(--text-base);
+  line-height: var(--leading-normal);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  transition: background .2s ease, color .2s ease;
+}
+
+a { color: var(--accent-text); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+h1, h2, h3, h4, h5, h6 { line-height: var(--leading-tight); letter-spacing: -.011em; }
+
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* Every glyph (components/ui/Icon.jsx). Block, so it baselines like a box in
+   flex rows; never shrinks, so a tight row squeezes text before symbols. */
+.icon { display: block; flex-shrink: 0; }
+
+/* ==========================================================================
+   3. PRIMITIVES
+   ========================================================================== */
+
+/* ---------- layout ---------- */
+/* `width: 100%` is not redundant with `max-width`: it makes the column fill
+   first and cap second even if an ancestor is ever a flex/grid container, so
+   the measure can never collapse onto the content. */
+.page { width: 100%; max-width: var(--measure); margin: 0 auto; padding: var(--space-8) var(--space-5) var(--space-10); }
+.page-narrow { width: 100%; max-width: var(--measure-form); margin: 0 auto; padding: var(--space-10) var(--space-5); }
+
+/* Layout helpers. A deliberately tiny set — these replace the handful of
+   `display:flex` inline styles that were repeated across every route. */
+/* A centred flex row with a standard gap. Shared by the generic helper and
+   the three component headers that are exactly that and nothing more. */
+.hstack, .chat-meta, .con-head, .settings-control {
+  display: flex; align-items: center; gap: var(--space-2);
+}
+.vstack-sm { display: flex; flex-direction: column; gap: var(--space-2); }
+.vstack-lg { display: flex; flex-direction: column; gap: var(--space-5); }
+/* Same min-width:auto trap as .line — a wide child (table, <pre>, long token)
+   would otherwise stretch the stack instead of scrolling inside itself. */
+.vstack-sm > *, .vstack-lg > * { min-width: 0; }
+.spacer { flex: 1; }
+.flex-1 { flex: 1; min-width: 0; }
+
+/* Available to a screen reader, invisible to everyone else. For the cases where
+   a control's meaning lives in a `title` — which is not announced reliably —
+   rather than in its visible text. */
+.sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0;
+}
+
+/* ---------- headings & prose ---------- */
+.page-head {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: var(--space-3); margin-bottom: var(--space-2);
+}
+/* Balanced rather than pretty: a heading is short enough that evening the two
+   lines out beats protecting the last one. */
+.page-title {
+  font-family: var(--font-display);
+  /* Lighter than the sans it replaces: a serif carries at 400 what a
+     sans needs 600 to do, and 600 on a serif reads as shouting. */
+  font-weight: 400;
+  /* Fluid rather than fixed: 30px is right on a laptop and wraps a two-word
+     title onto three lines on a phone. */
+  font-size: clamp(var(--text-2xl), 4.5vw, var(--text-3xl));
+  letter-spacing: -.015em;
+  line-height: 1.15;
+  margin: 0 0 var(--space-2);
+}
+.page-head .page-title { margin: 0; }
+/* page/card heading with status chips beside it */
+.title-row { display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; margin-bottom: var(--space-1); }
+.title-row .page-title { margin: 0; }
+/* `text-wrap: pretty` on every block of prose in the app. It is the one-line
+   fix for the orphan the Connect-agent page showed off — a line ending in a
+   single word — and it costs nothing where the text already fits. */
+.page-sub { margin: 0 0 var(--space-5); color: var(--text-2); font-size: var(--text-md); text-wrap: pretty; }
+/* …when the subtitle is the last thing in its block */
+.page-sub-tight { margin-bottom: 0; }
+/* The app's one quiet-label treatment, used for section headings, the rail's
+   group labels and pane headers. Each caller adds only its own size, spacing
+   and layout. */
+.section-title, .sidebar-section {
+  font-weight: 600; text-transform: uppercase; letter-spacing: .07em;
+  color: var(--text-3);
+}
+.section-title {
+  font-size: var(--text-xs);
+  margin: var(--space-8) 0 var(--space-3);
+}
+.section-title:first-child { margin-top: 0; }
+.section-title-row { display: flex; justify-content: space-between; align-items: center; }
+/* a link inside an uppercase section heading opts back out of the treatment */
+.section-title .link-plain { text-transform: none; letter-spacing: 0; font-size: var(--text-sm); font-weight: 500; }
+
+/* secondary / caption text */
+.text-meta { font-size: var(--text-xs); color: var(--text-3); }
+/* "nothing here yet" copy — same everywhere instead of a bespoke inline style */
+.empty { color: var(--text-3); font-size: var(--text-md); padding: var(--space-3) 0; }
+/* The bigger empties wear the brand: dead space is the one place the mark can
+   live at size without competing with anything. Surface-toned, not accent —
+   a watermark, not a call to action. */
+.empty-hero { text-align: center; padding: var(--space-8) 0; }
+.empty-mark {
+  display: block; width: 4.25rem; height: 3.6rem; margin: 0 auto var(--space-3);
+  background: var(--surface-3);
+  -webkit-mask: url(/logo-mask.png) center / contain no-repeat;
+  mask: url(/logo-mask.png) center / contain no-repeat;
+}
+.menu-empty .empty-mark { width: 3rem; height: 2.5rem; margin: var(--space-2) auto var(--space-2); }
+/* small centred note under a form's submit button */
+.form-note { font-size: var(--text-xs); color: var(--text-3); text-align: center; margin: var(--space-4) 0 0; }
+
+/* ---------- app shell: left rail + content column ----------
+   The rail is a fixed-width flex child rather than position:fixed, so the
+   content column's centring accounts for it automatically and nothing has to
+   be offset by hand when the rail collapses. */
+.shell { display: flex; min-height: 100dvh; background: var(--bg); }
+/* Deliberately NOT a flex container. `.page` centres itself with `margin: 0
+   auto`, and auto cross-axis margins on a flex item switch it from stretch to
+   shrink-to-fit — the page column would then track its content width instead
+   of its own max-width, so the same page rendered at a different width for
+   every record. Normal block flow gives max-width + auto margins the behaviour
+   they are written for. */
+.shell-main { flex: 1; min-width: 0; }
+/* No top bar inside the shell any more, so the content needs its own headroom
+   rather than inheriting the old bar's height as breathing space. */
+.shell-main .page { padding-top: var(--space-10); }
+
+.sidebar {
+  width: 17.5rem; flex-shrink: 0;
+  display: flex; flex-direction: column;
+  background: var(--surface-2);
+  border-right: 1px solid var(--border);
+  height: 100dvh; position: sticky; top: 0;
+  padding: var(--space-3) var(--space-2);
+  gap: var(--space-1);
+  transition: width .18s ease;
+}
+/* Collapsed: an icon rail. Labels are removed from flow (not just hidden) so
+   the flex rows re-centre on their icons instead of staying left-aligned. */
+.shell-collapsed .sidebar { width: 3.75rem; }
+.shell-collapsed .sidebar-label { display: none; }
+/* `> .btn` — the account block's TRIGGER, not the menu it opens. `.sidebar-account`
+   is the menu wrapper, so the unscoped version also centred and un-padded
+   "Settings" and "Sign out" whenever the rail was collapsed. */
+.shell-collapsed .sidebar-item,
+.shell-collapsed .sidebar-new .btn,
+.shell-collapsed .sidebar-account > .btn { justify-content: center; padding-left: 0; padding-right: 0; }
+.shell-collapsed .sidebar-section { height: var(--space-3); }
+/* Collapsed, the head goes vertical — logo above, toggle below — the same
+   move the foot makes. Side by side they were 54px of content in a 60px rail:
+   the logo pinned to one edge, the toggle to the other, reading as a jam
+   rather than a column of controls. */
+.shell-collapsed .sidebar-head {
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-1);
+}
+.shell-collapsed .sidebar-head .brand .logo { margin: 0; }
+
+.sidebar-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: var(--space-1) var(--space-2) var(--space-3);
+}
+/* The head's icon cluster (search, collapse) — a row beside the brand,
+   a column under it when the rail collapses. */
+.sidebar-tools { display: flex; align-items: center; gap: var(--space-1); }
+.shell-collapsed .sidebar-tools { flex-direction: column; }
+/* The two rail rows that START something rather than going somewhere. They are
+   grouped rather than merely coloured: a tinted, bordered block with a rule
+   under it, so the eye separates "make a kelabo" from "go to a page" before it
+   reads either label. The accent stays on the icons only — loud enough to find,
+   quiet enough not to compete with the filled button on the page it opens. */
+.sidebar-actions {
+  display: flex; flex-direction: column; gap: 1px;
+  padding: var(--space-1);
+  margin-bottom: var(--space-3);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  border: 1px solid var(--border);
+}
+.sidebar-new { color: var(--text); font-weight: 600; }
+.sidebar-new svg { color: var(--accent); }
+.sidebar-new:hover { background: var(--accent-soft); color: var(--accent-text); }
+.shell-collapsed .sidebar-actions { padding: 2px; }
+
+.sidebar-nav { display: flex; flex-direction: column; gap: 1px; }
+.sidebar-item {
+  display: flex; align-items: center; gap: var(--space-3);
+  padding: var(--space-2) var(--space-3); border-radius: var(--radius-sm);
+  font-size: var(--text-base); font-weight: 500; color: var(--text-2);
+  transition: background .12s, color .12s;
+  min-width: 0;
+}
+.sidebar-item:hover { background: var(--surface-3); color: var(--text); text-decoration: none; }
+.sidebar-item.active { background: var(--surface-3); color: var(--text); font-weight: 600; }
+
+/* Recents/live list. Scrolls independently so the account block stays pinned. */
+.sidebar-scroll { flex: 1; overflow-y: auto; min-height: 0; margin-top: var(--space-3); }
+.sidebar-section {
+  font-size: var(--text-sm);
+  font-weight: 500;
+  text-transform: none;
+  letter-spacing: 0;
+  padding: var(--space-5) var(--space-3) var(--space-2);
+}
+.sidebar-entry { font-weight: 400; font-size: var(--text-sm); gap: var(--space-2); }
+/* The kind glyph every kelabo list wears — phone for a dialed kelabo, camera
+   for a convened one. Quiet by default so the shape carries the difference, not colour;
+   live rows borrow the status green the dots used to hold. */
+.kind-icon { color: var(--text-3); }
+.kind-icon-live { color: var(--success); }
+.sidebar-entry-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+
+/* In the rail the remove button overlays the row's right edge rather than
+   sitting in its flex flow, so titles keep the full width to truncate against
+   and rows do not reflow as the pointer moves down the list. */
+.sidebar-entry-wrap { position: relative; }
+.sidebar-entry-wrap .sidebar-entry { padding-right: var(--space-8); }
+
+.sidebar-foot {
+  display: flex; align-items: center; gap: var(--space-1);
+  padding-top: var(--space-2); border-top: 1px solid var(--border);
+}
+.sidebar-account { flex: 1; min-width: 0; }
+.sidebar-account > .btn { justify-content: flex-start; }
+/* The account menu is the last thing in the rail, so it opens upward. */
+.sidebar-account .menu { top: auto; bottom: calc(100% + var(--space-2)); left: 0; right: auto; }
+/* Plain column, not -reverse: the account block now comes first in the
+   markup, and collapsed it should stay on top with the theme toggle below. */
+.shell-collapsed .sidebar-foot { flex-direction: column; }
+
+/* Rail is always visible on desktop, so its backdrop only exists on mobile. */
+.sidebar-veil { display: none; }
+.shell-mobilebar { display: none; }
+
+/* ---------- top bar (unauthenticated routes only) ---------- */
+.topbar {
+  display: flex; align-items: center; gap: var(--space-3);
+  padding: var(--space-3) var(--space-5);
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+  position: sticky; top: 0; z-index: 30;
+}
+.brand {
+  font-family: var(--font-display);
+  font-weight: 500; font-size: var(--text-xl); letter-spacing: -.01em;
+  color: var(--text); display: flex; align-items: center; gap: var(--space-2);
+}
+.brand:hover { text-decoration: none; }
+/* The rail/topbar tile now carries the mark's own K (a cutout of the brand
+   glyph, masked so it renders in the theme's ink-on-accent) instead of a
+   typed letter. */
+.brand .logo {
+  width: 1.625rem; height: 1.625rem; border-radius: var(--radius-sm);
+  background: var(--accent);
+  display: grid; place-items: center;
+}
+.brand .logo::after {
+  content: '';
+  width: 50%; height: 80%;
+  background: var(--accent-on);
+  -webkit-mask: url(/logo-k-mask.png) center / contain no-repeat;
+  mask: url(/logo-k-mask.png) center / contain no-repeat;
+}
+
+.crumbs { display: flex; align-items: center; gap: var(--space-2); font-size: var(--text-sm); color: var(--text-3); min-width: 0; }
+.crumbs a { color: var(--text-2); font-weight: 500; display: inline-flex; align-items: center; gap: var(--space-1); }
+.crumbs a:hover { color: var(--text); text-decoration: none; }
+.crumbs .crumb-sep { color: var(--border-strong); }
+.crumbs .crumb-here { color: var(--text); font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* breadcrumbs used as a page header rather than inline in a toolbar */
+.crumbs-head { margin-bottom: var(--space-4); }
+
+/* Holds a generated identicon (components/ui/Avatar.jsx). `overflow: hidden` is
+   what rounds it: the SVG inside is a square grid of hard-edged blocks, and
+   clipping it to the circle is cheaper and sharper than trying to round the
+   blocks that touch the edge. */
+.avatar {
+  width: 1.75rem; height: 1.75rem; border-radius: 50%;
+  background: var(--surface-3); color: var(--text-2);
+  display: grid; place-items: center; font-weight: 600; font-size: var(--text-2xs);
+  flex-shrink: 0;
+  overflow: hidden;
+}
+.avatar svg { display: block; }
+
+.avatar-sm { width: 1.4rem; height: 1.4rem; font-size: 0.6rem; }
+
+/* ---------- buttons ---------- */
+/* Fixed heights, not padding + line-height: a button is 2.5rem tall (2rem for
+   `sm`) wherever it appears, which is also exactly the height of `.input` — so
+   a button beside a field, a select or another button always lines up. This
+   used to be a Settings-only override, which meant Settings' buttons were a
+   different size from the identical buttons everywhere else. */
+.btn {
+  appearance: none; border: 1px solid transparent; cursor: pointer;
+  font: inherit; font-weight: 500; font-size: var(--text-md); line-height: 1;
+  height: 2.5rem; padding: 0 var(--space-4); border-radius: var(--radius-sm);
+  display: inline-flex; align-items: center; justify-content: center; gap: var(--space-2);
+  transition: background .15s, border-color .15s, color .15s;
+  color: var(--text); background: var(--surface-2);
+}
+.btn:active { transform: translateY(.5px); }
+.btn:disabled { opacity: .5; cursor: not-allowed; }
+
+.btn-primary { background: var(--accent); color: var(--accent-on); font-weight: 600; }
+.btn-primary:hover:not(:disabled) { background: var(--accent-hover); }
+/* The social sign-in buttons were always just outline buttons. */
+.btn-outline, .btn-social { background: var(--surface); border-color: var(--border-strong); }
+.btn-outline:hover:not(:disabled), .btn-social:hover:not(:disabled) { background: var(--surface-2); }
+/* Same shape/hover as .btn-outline — colour is the only difference, for
+   destructive actions that sit alongside regular ones (e.g. Settings page). */
+.btn-outline-danger { background: var(--surface); border-color: var(--border-strong); color: var(--danger); }
+.btn-outline-danger:hover:not(:disabled) { background: var(--danger-soft); border-color: var(--danger); }
+.btn-ghost { background: transparent; color: var(--text-2); }
+.btn-ghost:hover:not(:disabled) { background: var(--surface-2); color: var(--text); }
+.btn-danger { background: var(--danger); color: #fff; font-weight: 600; }
+.btn-danger:hover:not(:disabled) { filter: brightness(.92); }
+.btn-danger-ghost { background: transparent; color: var(--danger); }
+.btn-danger-ghost:hover:not(:disabled) { background: var(--danger-soft); }
+.btn-block { width: 100%; }
+/* A button whose state is "chosen" (an accepted invitation, an active filter).
+   The same on-state the control bar, menus and pickers already use, so a
+   selected control reads identically everywhere — and it is never a second
+   .btn-primary competing with the page's one real action. */
+.btn.is-on { background: var(--accent-soft); color: var(--accent-text); border-color: transparent; }
+.btn-sm { height: 2rem; padding: 0 var(--space-3); font-size: var(--text-sm); border-radius: var(--radius-xs); gap: var(--space-1); }
+/* a <label>-as-button whose control is disabled — no pointer affordance */
+.btn.is-static { cursor: default; }
+/* square icon-only button, so a lone glyph isn't stretched by text padding */
+.btn-icon { padding: 0; width: 2rem; height: 2rem; flex-shrink: 0; }
+.btn-icon.btn-sm { width: 1.75rem; height: 1.75rem; }
+
+/* ---------- cards ---------- */
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.card-pad { padding: var(--space-6); }
+
+/* nested form/preview area inside a card */
+.panel-inset {
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  padding: var(--space-3); background: var(--surface-2);
+}
+
+/* ---------- chips ---------- */
+.chip {
+  display: inline-flex; align-items: center; gap: var(--space-1);
+  font-size: var(--text-xs); font-weight: 500; line-height: 1;
+  padding: 4px var(--space-2); border-radius: var(--radius-xs);
+  background: var(--surface-2); color: var(--text-2);
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+.chip .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; flex-shrink: 0; }
+
+.chip-live { background: var(--success-soft); color: var(--success); }
+.chip-live .dot { animation: pulse-dot 1.8s ease-in-out infinite; }
+.chip-ended { background: var(--surface-2); color: var(--text-3); }
+.chip-accent { background: var(--accent-soft); color: var(--accent-text); }
+.chip-danger { background: var(--danger-soft); color: var(--danger); }
+.chip-dev { background: var(--surface-3); color: var(--text-2); }
+.chip-warn { background: var(--warn-soft); color: var(--warn); }
+/* RSVP state (notes #8). Aliases of the three semantic colours rather than new
+   ones: an invitation you accepted is the same green as a live kelabo, and
+   inventing a fourth palette for one list is how a UI stops meaning anything. */
+.chip-accepted { background: var(--success-soft); color: var(--success); }
+.chip-declined { background: var(--danger-soft); color: var(--danger); }
+.chip-pending { background: var(--warn-soft); color: var(--warn); }
+/* a chip that is also a control (e.g. click-to-rename speaker) */
+.chip-btn { font: inherit; font-size: var(--text-xs); font-weight: 500; cursor: pointer; }
+.chip-btn:hover { background: var(--surface-3); color: var(--text); }
+
+@keyframes pulse-dot { 0%, 100% { opacity: 1; } 50% { opacity: .3; } }
+
+/* Kind chips are intentionally NOT colour-filled — the label carries the
+   meaning and the card's left edge carries the colour. This is what keeps a
+   board of mixed contributions reading as one surface. */
+.kind-answer, .kind-link, .kind-code, .kind-clarify, .kind-note, .kind-minutes {
+  background: var(--surface-2); color: var(--text-2);
+}
+
+/* ---------- forms ---------- */
+.field { margin-bottom: var(--space-4); }
+.label { display: block; font-size: var(--text-sm); font-weight: 500; color: var(--text-2); margin-bottom: 6px; }
+/* Fixed height (rather than relying on padding + native line-height) so a
+   text input, a <select> and a same-row <button> all line up — browsers size
+   native select chrome differently from a padded input otherwise. */
+.input {
+  width: 100%; height: 2.5rem; font: inherit; font-size: var(--text-md);
+  line-height: 1.2; color: var(--text);
+  background: var(--surface); border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm); padding: 0 var(--space-3);
+  transition: border-color .15s, box-shadow .15s;
+}
+.input::placeholder { color: var(--text-3); }
+.input-narrow { max-width: 11.25rem; }
+
+/* A <textarea> is the one control the shared rule above gets wrong. `height:
+   40px` collapses it to a single line whatever `rows` says, and `padding: 0 …`
+   leaves the first line flush against the top border with no room to breathe.
+   Both are right for a one-line field and wrong for a box you write in. */
+textarea.input {
+  height: auto;
+  min-height: 8.5em;
+  padding: var(--space-3);
+  line-height: 1.5;
+  /* Growable, but only downwards — horizontal resize would break the column. */
+  resize: vertical;
+}
+
+/* The styled dropdown (ui/Select.jsx): an `.input` trigger opening a `.menu`
+   listbox, replacing native <select>s whose open list is unstylable OS chrome.
+   The wrap inherits `.menu-wrap`'s positioning; the list hangs left-aligned
+   under the field at the field's width, where a menu hangs off its trigger's
+   right edge. */
+.select-wrap { display: inline-flex; width: 100%; }
+.select-trigger {
+  display: inline-flex; align-items: center; justify-content: space-between;
+  gap: var(--space-2); cursor: pointer; text-align: left; max-width: 100%;
+}
+/* Value and sizer share one grid cell; the sizer's labels share another single
+   cell inside it — so the column is exactly as wide as the widest label, one
+   line tall, and invisible. */
+.select-trigger .select-col { display: grid; min-width: 0; }
+.select-trigger .select-col > * { grid-area: 1 / 1; }
+/* The reserve covers what a ticked list row spends beyond the trigger's label
+   cell — the .menu's own padding, the row's wider gap, and the check icon
+   (~1.4rem at the compact paddings) — so the widest option fits its row with
+   the tick, in a list pinned to the trigger's width. */
+.select-trigger .select-sizer { display: grid; visibility: hidden; padding-right: 1.5rem; }
+.select-trigger .select-sizer > span { grid-area: 1 / 1; white-space: nowrap; }
+.select-trigger .select-value { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.select-trigger .select-chevron { color: var(--text-3); flex: none; }
+/* Exactly the field's width — a list wider than the box it fell out of reads
+   as a different control. Long labels (device names) ellipsize instead. */
+.select-wrap .menu { left: 0; right: auto; top: calc(100% + var(--space-1)); width: 100%; min-width: 0; }
+.select-menu .menu-line { justify-content: space-between; }
+.select-menu .menu-line-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Compact flavour (device pickers): same metrics `select.input.btn-sm` had. */
+.select-trigger.btn-sm { width: auto; min-width: 5.75rem; height: 2rem; padding: 0 var(--space-2); }
+/* Inside an .input-group the trigger blends into the joined control: the group
+   draws the border, the trigger only keeps the divider the old select had. */
+.input-group .select-wrap { width: auto; }
+.input-group .select-trigger {
+  border: none; border-left: 1px solid var(--border); border-radius: 0;
+  background: transparent; height: 100%; min-width: 5.75rem;
+}
+
+input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
+
+/* OTP boxes */
+.otp { display: flex; gap: var(--space-2); justify-content: center; margin: var(--space-5) 0; }
+.otp input {
+  width: 2.875rem; height: 3.5rem; text-align: center;
+  font-size: var(--text-2xl); font-weight: 600; font-family: var(--mono);
+  background: var(--surface); color: var(--text);
+  border: 1px solid var(--border-strong); border-radius: var(--radius-sm);
+  transition: border-color .15s, box-shadow .15s;
+}
+/* One focus treatment for every text-entry control in the app.
+   :focus-visible, not :focus — browsers treat a focused text field as
+   focus-visible regardless of how it got focus, so typed controls ring as
+   before; but the Select trigger is a button that takes focus back after a
+   mouse pick (for the keyboard flow), and a button focused by mouse must not
+   leave the field glowing after its list has closed. */
+.input:focus { outline: none; }
+.input:focus-visible, .otp input:focus-visible, .input-group:has(:focus-visible) {
+  outline: none; border-color: var(--accent); box-shadow: var(--ring);
+}
+
+/* radio cards (join mode) */
+.radio-card {
+  display: flex; gap: var(--space-3); align-items: flex-start;
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--border-strong); border-radius: var(--radius);
+  cursor: pointer; transition: border-color .15s, background .15s; background: var(--surface);
+}
+.radio-card:hover { background: var(--surface-2); }
+/* Selected state for both card pickers (join mode, colour scheme). */
+.radio-card.selected, .scheme-card.selected { border-color: var(--accent); background: var(--accent-soft); }
+.radio-card input { margin-top: 4px; }
+/* Label-over-description rows appear in four places; the type is defined
+   once so they cannot drift apart. */
+.rc-title, .sr-title { font-weight: 600; font-size: var(--text-md); }
+.rc-sub, .sr-sub { font-size: var(--text-sm); color: var(--text-2); }
+.scheme-hint { font-size: var(--text-xs); color: var(--text-2); }
+
+
+/* segmented control (mobile capture/board toggle) */
+.segmented {
+  display: none; gap: var(--space-1); background: var(--surface-2);
+  padding: var(--space-1); border-radius: var(--radius-sm); margin: var(--space-3) var(--space-4) 0;
+}
+.segmented button {
+  flex: 1; font: inherit; font-weight: 500; font-size: var(--text-md);
+  border: none; background: transparent; color: var(--text-2);
+  padding: var(--space-2); border-radius: var(--radius-xs); cursor: pointer;
+}
+.segmented button.active { background: var(--surface); color: var(--text); font-weight: 600; }
+/* variant: always visible, no outer margin (e.g. inline inside a settings row) */
+.segmented.segmented-static { display: flex; margin: 0; }
+
+/* A stacked label-over-input group inside a full-measure card. The card spans
+   the page column so its edges line up with every other page, but a text input
+   does not need 900px — the field itself stays at a comfortable length. */
+.form-stack { max-width: 30rem; }
+
+/* Joined input group — two controls that form a single value (amount + unit).
+   One bordered pill reads as one setting instead of two stacked fields. */
+.input-group {
+  display: flex; align-items: stretch; height: 2.5rem; flex-shrink: 0;
+  border: 1px solid var(--border-strong); border-radius: var(--radius-sm);
+  background: var(--surface);
+  transition: border-color .15s, box-shadow .15s;
+  /* No overflow:hidden — it existed to clip square child corners to the
+     rounded border, but the children are all transparent, and it silently
+     swallowed the unit dropdown's popover (ui/Select), which unlike the old
+     native select's OS popup renders inside the group. */
+}
+.input-group input {
+  border: none; background-color: transparent; font: inherit; font-size: var(--text-md); color: var(--text);
+  height: 100%; padding: 0 var(--space-3);
+  width: 3.5rem; text-align: right;
+}
+.input-group input:focus { outline: none; }
+
+/* toggle switch */
+.switch { position: relative; width: 2.375rem; height: 1.375rem; flex-shrink: 0; }
+.switch input { opacity: 0; width: 0; height: 0; }
+.switch .track { position: absolute; inset: 0; border-radius: 999px; background: var(--surface-3); transition: background .2s; cursor: pointer; }
+/* All rem, deliberately: the root font-size is fluid (the html clamp grows it
+   to 22px on wide viewports), so the rem-sized track grows with it — a px
+   inset or px travel distance leaves the ON knob stranded short of the right
+   edge on exactly the screens the clamp exists for. Travel = track width
+   (2.375rem) − knob (1rem) − both insets (0.375rem) = 1rem. */
+.switch .track::after {
+  content: ""; position: absolute; top: 0.1875rem; left: 0.1875rem; width: 1rem; height: 1rem;
+  border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,.2); transition: transform .2s;
+}
+/* `.is-on` is the read-only switch's state (no input to key off) — see
+   Switch.jsx. Both spellings drive the same two properties. */
+.switch input:checked + .track,
+.switch.is-on .track { background: var(--accent); }
+.switch input:checked + .track::after,
+.switch.is-on .track::after { transform: translateX(1rem); }
+.switch.is-on .track { cursor: inherit; }
+.switch input:focus-visible + .track { box-shadow: var(--ring); }
+
+/* ---------- list rows ---------- */
+/* A list, not a stack of cards. Each record was in its own bordered, rounded,
+   separately-shadowed box, so ten of them read as ten objects to consider
+   rather than one list to scan — and the borders alone cost more vertical space
+   than the titles. One hairline between rows does the same job. */
+.row {
+  display: flex; align-items: center; gap: var(--space-4);
+  padding: var(--space-4) var(--space-3);
+  background: transparent;
+  border: 0; border-bottom: 1px solid var(--border);
+  border-radius: 0; margin-bottom: 0;
+  color: inherit;
+  transition: background .12s;
+}
+.row:hover { background: var(--surface-2); text-decoration: none; }
+/* The trailing controls of a row, as one group. This class was already in use
+   on two pages with no rule behind it, so its buttons sat flush against each
+   other — which is most of why the Connect-agent page's actions did not look
+   like the rest of the app. */
+.row-actions { display: flex; align-items: center; gap: var(--space-2); flex-shrink: 0; }
+.row-actions-tight { gap: var(--space-1); }
+.row .row-main { flex: 1; min-width: 0; }
+.row .row-title { font-weight: 500; font-size: var(--text-base); display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; }
+.row .row-sub { font-size: var(--text-sm); color: var(--text-3); margin-top: 3px; }
+/* When a row happened, right-aligned and quiet. It used to lead the detail
+   line, where it was the most-wanted fact in the least findable place: buried
+   at the head of a run of five values that differ in length on every row, so
+   the eye had to read each one to find the date. */
+.row-meta {
+  font-size: var(--text-sm); color: var(--text-3);
+  flex-shrink: 0; white-space: nowrap;
+}
+.row-chevron { color: var(--text-3); flex-shrink: 0; display: flex; }
+
+@media (hover: hover) and (pointer: fine) {
+  .row .remove-btn, .sidebar-entry-wrap .remove-btn { opacity: 0; transition: opacity .12s; }
+  .row:hover .remove-btn,
+  .row .remove-btn:focus-visible,
+  .sidebar-entry-wrap:hover .remove-btn,
+  .sidebar-entry-wrap .remove-btn:focus-visible { opacity: 1; }
+}
+
+/* Hover-revealed remove, shared by list rows and rail entries. It occupies its
+   slot even when invisible, so surrounding content does not shift as it fades
+   in. `.remove-btn-float` is the rail's overlay variant. */
+.remove-btn {
+  display: grid; place-items: center; flex-shrink: 0;
+  width: 1.75rem; height: 1.75rem; padding: 0;
+  border: none; border-radius: var(--radius-xs); cursor: pointer;
+  background: transparent; color: var(--text-3);
+  opacity: 0; transition: opacity .12s, background .12s, color .12s;
+}
+.remove-btn:hover { background: var(--danger-soft); color: var(--danger); }
+.remove-btn-float {
+  position: absolute; right: 6px; top: 50%; transform: translateY(-50%);
+  width: 1.5rem; height: 1.5rem;
+}
+.row-removable:hover .remove-btn,
+.sidebar-entry-wrap:hover .remove-btn,
+.remove-btn:focus-visible { opacity: 1; }
+/* Touch has no hover, so the control would otherwise be unreachable. */
+@media (hover: none) {
+  .remove-btn { opacity: 1; }
+}
+
+/* favourite star toggle (Contacts) */
+.star-btn {
+  display: grid; place-items: center; flex-shrink: 0;
+  width: 1.9rem; height: 1.9rem; padding: 0;
+  border: none; border-radius: var(--radius-sm); cursor: pointer;
+  background: transparent; color: var(--text-3);
+  transition: background .12s, color .12s;
+}
+.star-btn:hover { background: var(--surface-2); color: var(--text-2); }
+.star-btn.on { color: var(--accent); }
+.star-btn:disabled { opacity: .5; cursor: default; }
+
+/* call (dial) button on an online contact */
+.call-btn {
+  display: grid; place-items: center; flex-shrink: 0;
+  width: 1.9rem; height: 1.9rem; padding: 0;
+  border: none; border-radius: var(--radius-sm); cursor: pointer;
+  background: transparent; color: var(--success);
+  transition: background .12s, color .12s;
+}
+.call-btn:hover { background: color-mix(in oklab, var(--success) 18%, transparent); }
+.call-btn:disabled { opacity: .5; cursor: default; }
+
+/* Incoming ring. One rule left: the dialog is now a plain `.modal` and the
+   caller's avatar simply sits in the `.modal-icon` slot. Everything else this
+   block used to hold — its own text alignment, its own avatar scale, a centred
+   action row — was a second dialog layout maintained for one screen. */
+.ring-avatar { animation: pulse-dot 1.6s ease-in-out infinite; }
+
+/* ---------- connect-a-coding-agent (docs 16 §6) ----------
+   What is being granted, as a list you can read rather than a paragraph you
+   skim. It had no styles at all, so it rendered as a UA-default `<ul>`: disc
+   bullets, a 40px hanging indent, and — in a 440px column — a last line holding
+   one word (notes #10). */
+/* The pairing code, set like the code it is — same face and rhythm as the OTP
+   boxes, in a single field because it arrives as one token to paste. */
+.input-code { font-family: var(--mono); font-size: var(--text-lg); letter-spacing: .12em; text-transform: uppercase; }
+.input-code::placeholder { letter-spacing: .12em; }
+
+.pair-error { margin-top: var(--space-4); }
+.pair-error .banner { margin-bottom: 0; }
+.pair-summary {
+  margin: var(--space-4) 0 var(--space-5);
+  padding: var(--space-4);
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+.pair-lead { margin: 0 0 var(--space-3); font-size: var(--text-base); text-wrap: pretty; }
+.pair-grants { margin: 0 0 var(--space-3); padding: 0; list-style: none; display: flex; flex-direction: column; gap: var(--space-2); }
+.pair-grants li {
+  position: relative; padding-left: var(--space-5);
+  font-size: var(--text-md); color: var(--text-2); text-wrap: pretty;
+}
+/* A tick, not a bullet: these are capabilities being granted, and a disc reads
+   as an agenda item. */
+.pair-grants li::before {
+  content: ""; position: absolute; left: 2px; top: .45em;
+  width: 9px; height: 5px;
+  border-left: 2px solid var(--success); border-bottom: 2px solid var(--success);
+  transform: rotate(-45deg);
+}
+
+/* Labelled search field (Contacts). The strip IS the field: the input inside it
+   keeps its own border and radius, so what you saw was a rounded box drawn
+   inside another rounded box with the caret between them (notes #10). The input
+   now contributes only its text and its caret; the strip owns every edge. */
+.search-box {
+  display: flex; align-items: center; gap: var(--space-2);
+  padding: 0 var(--space-3);
+  border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--surface); color: var(--text-3);
+}
+.search-box .input {
+  flex: 1; min-width: 0;
+  border: none; border-radius: 0; background: transparent;
+  padding-left: 0; padding-right: 0;
+}
+.search-box .input:focus { outline: none; box-shadow: none; }
+.search-box:focus-within { border-color: var(--accent); box-shadow: var(--ring); }
+
+/* status dot */
+.sdot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.sdot-live { background: var(--success); animation: pulse-dot 1.8s ease-in-out infinite; }
+.sdot-ended { background: var(--border-strong); }
+
+/* ---------- popover menu ----------
+   ONE menu. Every popover in the app — the account menu in the rail, the room's
+   layout/camera/transcription/more menus, the ring-in list — is this component
+   with these rules, and the room stylesheet no longer redefines its type scale.
+   It used to: items came out at 13px in the room's "more" menu and 14px in the
+   transcription menu right beside it, section headings had two different
+   treatments, and the rail's copy looked like a different product's. All of
+   that was one component wearing three stylesheets. */
+/* the menu is positioned against its trigger, so the wrapper is the anchor */
+.menu-wrap { position: relative; }
+.menu {
+  position: absolute; top: calc(100% + var(--space-2)); right: 0;
+  min-width: var(--menu-w); padding: var(--menu-pad); z-index: 50;
+  /* A menu long enough to run off the screen scrolls instead. The transcription
+     menu lists every language, and a laptop in a video call has a short
+     viewport. */
+  max-height: min(70vh, 30rem); overflow-y: auto; overscroll-behavior: contain;
+  display: flex; flex-direction: column; gap: 1px;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius-sm); box-shadow: var(--shadow-pop);
+  animation: menu-in .12s ease-out both;
+}
+/* A `<button>` centres its own text by UA default, and that default leaked into
+   every menu row through the flex:1 label span — which is why the ring-in list
+   read as a centred column of addresses with the avatars stranded on the left.
+   Set once here rather than fought per menu. */
+/* ONE menu row, whichever component drew it. `MenuItem` is a `.btn` and
+   `MenuToggle`/`MenuValue`/`MenuHeader` are `.menu-line`, and left to their own
+   defaults they came out at different heights: `.btn` pins `line-height: 1` and
+   `.menu-line` inherited the body's, so a language in a sub-panel sat 6px
+   shorter than the row that opened it. They also disagreed on text colour —
+   `.btn-ghost` is `--text-2`, the settings rows were `--text` — so one list read
+   as muted and the other did not.
+
+   Every metric that decides how a row looks is set here, on both selectors, and
+   nowhere else. `min-height` rather than padding alone: an 18px icon and a line
+   of 14px text are different heights, and without a floor a row with an icon is
+   taller than a row without one. */
+/* ONE menu row. Commands, toggles, value-pickers, panel headers and the people
+   picker's rows are all this — same height, same padding, same icon gap, same
+   colour — and `.menu-line` is a class NOTHING outside a menu uses, which is
+   the part that matters. These rows used to be `.btn`, and that made them
+   reachable by every `.page .btn` rule in the stylesheet: the collapsed rail
+   centred the account menu's items, and the Settings page's button metrics
+   outranked the menu's own by being further down the file.
+
+   `min-height` rather than padding alone: an 18px icon and a line of 14px text
+   are different heights, so without a floor a row with an icon is taller than a
+   row without one. */
+.menu-line,
+.picker-row {
+  display: flex; align-items: center; justify-content: flex-start;
+  width: 100%; min-height: 2.25rem;
+  padding: 6px var(--space-3); gap: var(--space-3);
+  border: 0; border-radius: var(--radius-sm);
+  background: none; color: var(--text);
+  font: inherit; font-size: var(--menu-item-text); font-weight: 500;
+  line-height: var(--leading-tight);
+  text-align: left; cursor: pointer;
+}
+.menu-line:active,
+.picker-row:active { transform: translateY(.5px); }
+.menu-line > svg { color: var(--text-3); }
+.menu-line:hover > svg { color: inherit; }
+@keyframes menu-in { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
+
+/* Small-caps section label inside a menu — the people picker's only. Panels of
+   options use `MenuHeader` instead; `.menu-head` was the third spelling of this
+   and has no users left. */
+.menu-label {
+  padding: var(--space-2) var(--space-3) var(--space-1);
+  font-size: var(--text-2xs); font-weight: 600; color: var(--text-3);
+  text-transform: uppercase; letter-spacing: .04em;
+}
+/* No heading needs a gap above it when it is the first thing in the menu. */
+.menu-label:first-child { padding-top: var(--space-1); }
+
+.menu-empty { padding: var(--space-2) var(--space-3); color: var(--text-3); font-size: var(--text-sm); }
+
+/* Who is signed in, at the top of the account menu. Ruled off the same way a
+   panel header is (border + the menu's own gap), but not a row you can press —
+   identity is context, not a command. */
+.menu-id {
+  display: flex; align-items: center; gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--border);
+  margin-bottom: var(--menu-pad);
+}
+.menu-id-text { min-width: 0; }
+.menu-id-name { font-weight: 600; font-size: var(--text-md); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.menu-id-email { font-size: var(--text-xs); color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.menu-note {
+  padding: var(--space-1) var(--space-3) var(--space-2);
+  color: var(--text-3); font-size: var(--text-xs); line-height: var(--leading-tight);
+}
+.menu-tick { margin-left: auto; color: var(--accent-text); display: flex; }
+
+.menu-line.is-on { background: var(--accent-soft); color: var(--accent-text); }
+
+/* ---------- settings rows in a menu ----------
+   Icon, label, and then whatever the setting actually is: a switch when it is
+   on or off, its current value plus a chevron when it is one of several. The
+   pattern is the one every media player's settings sheet uses, and it is worth
+   copying for a reason — it answers "what is this set to?" without opening
+   anything, and it makes an independent toggle look nothing like a choice
+   between options. Our menus used a tick for both jobs, so four unrelated
+   switches read as four mutually exclusive alternatives.
+
+   Every row here is `.menu-line` (see the shared rule above), so a root list
+   and the list you drill into are the same list by construction. */
+.menu-line:hover:not(:disabled) { background: var(--surface-2); }
+.menu-line:disabled { opacity: .5; cursor: not-allowed; }
+.menu-line:focus-visible { outline: none; box-shadow: var(--ring); }
+
+.menu-line-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The current value, muted so the label stays the thing you scan down. */
+.menu-line-value {
+  color: var(--text-3); font-weight: 400;
+  max-width: 9rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.menu-line-chevron { color: var(--text-3); }
+.menu-line-control { display: flex; align-items: center; }
+
+/* A panel's title bar. A row like any other, so the panel opens with its
+   options in the same places they were rather than everything shifting down
+   past a heading of a different height. */
+.menu-back {
+  font-weight: 600;
+  color: var(--text-2);
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: var(--menu-pad);
+}
+/* Not a control when it has no back arrow — no hover, no pointer. The hover
+   needs `.menu-line.menu-back-static` to outweigh `.menu-line:hover:not(...)`,
+   which is three selectors deep. */
+.menu-back-static { cursor: default; }
+.menu-line.menu-back-static:hover { background: none; }
+
+/* ---------- people picker (in a menu) ----------
+   A menu that holds a search field and a multi-select list rather than a column
+   of commands, so it is sized for what it contains: email addresses, which are
+   long, and a list, which needs to be scrollable rather than infinitely tall. */
+.addpeople-wrap .menu { padding: 0; min-width: 0; }
+.picker { width: min(23rem, calc(100vw - 2 * var(--space-4))); display: flex; flex-direction: column; }
+
+.picker-search {
+  display: flex; align-items: center; gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--border);
+  color: var(--text-3);
+}
+/* The field is the whole strip — a bordered input inside a bordered strip is
+   the doubled-outline look the Contacts search had. */
+.picker-search .input {
+  flex: 1; min-width: 0;
+  border: none; background: transparent; padding: 0;
+  font-size: var(--menu-item-text);
+}
+.picker-search .input:focus { outline: none; box-shadow: none; }
+
+.picker-list { max-height: 15rem; overflow-y: auto; padding: 0 var(--menu-pad) var(--menu-pad); }
+
+/* Metrics come from the shared row rule above; only the two things that make
+   this a picker rather than a menu row live here. */
+.picker-row { gap: var(--space-2); }
+.picker-row:hover { background: var(--surface-2); }
+.picker-row.is-on { background: var(--accent-soft); color: var(--accent-text); }
+.picker-row-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Reserved whether or not it is ticked, so selecting a row does not shift the
+   name under the pointer that just clicked it. */
+.picker-check { width: 14px; display: flex; justify-content: center; color: var(--accent-text); }
+
+.picker-foot {
+  display: flex; align-items: center; justify-content: space-between; gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-top: 1px solid var(--border);
+}
+
+/* The same picker, inline in the confirm-a-call dialog: identical rows and
+   search strip, framed because a modal has no menu edge to contain it, and a
+   shorter list so the dialog never outgrows a laptop viewport. */
+.call-picker {
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  margin-bottom: var(--space-2); overflow: hidden;
+}
+.call-picker .picker-list { max-height: 11rem; }
+
+/* ---------- global search (the magnifier in the rail) ----------
+   Same framed picker as the call dialog, in a wider dialog because kelabo
+   titles and minutes snippets are sentences, not names. */
+/* .modal.modal-search, not .modal-search alone: the base .modal rule sits
+   later in this file and would out-cascade a single class at equal
+   specificity — which is exactly how this dialog silently stayed at the
+   default 420px. */
+.modal.modal-search { width: min(40rem, 100%); }
+.modal-search .tabs { margin-bottom: var(--space-4); }
+/* Twice the list too — the point of the width is seeing more at once — but
+   never past the viewport: the dialog must not scroll the page behind it. */
+.modal-search .picker-list { max-height: min(32rem, 60vh); }
+/* A contact result holds two controls — open, and call — so the row itself is
+   a div and the padding moves onto the part that navigates. */
+.search-contact { padding: 0; cursor: default; }
+.search-contact-main {
+  flex: 1; min-width: 0; min-height: 2.25rem;
+  display: flex; align-items: center; gap: var(--space-2);
+  padding: 6px var(--space-3);
+  border: 0; border-radius: var(--radius-sm); background: none;
+  font: inherit; color: inherit; text-align: left; cursor: pointer;
+}
+.search-contact .call-btn { margin-right: var(--space-2); }
+/* A kelabo hit: title, and the minutes passage that matched under it. */
+.search-hit { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.search-hit-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.search-hit-snippet {
+  font-size: var(--text-xs); color: var(--text-3); font-weight: 400;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+
+/* ---------- overlays ----------
+   Drawer, modal and the mobile rail all dim the page the same way, so the
+   backdrop is defined once here. Each owns only what differs: its z-index, and
+   whether it also lays out the thing on top of it. */
+.drawer-veil, .modal-veil, .sidebar-veil {
+  position: fixed; inset: 0; background: var(--scrim);
+  opacity: 0; pointer-events: none; transition: opacity .25s;
+}
+.drawer-veil.open, .modal-veil.open, .sidebar-veil.open { opacity: 1; pointer-events: auto; }
+.drawer-veil { z-index: 40; }
+
+/* ---------- drawer ---------- */
+.drawer {
+  position: fixed; top: 0; right: 0; bottom: 0; width: min(440px, 92vw);
+  background: var(--surface); border-left: 1px solid var(--border);
+  box-shadow: var(--shadow-lg); z-index: 41;
+  transform: translateX(102%); transition: transform .3s cubic-bezier(.3,.8,.3,1);
+  display: flex; flex-direction: column;
+}
+.drawer.open { transform: translateX(0); }
+.drawer-head {
+  display: flex; align-items: center; gap: var(--space-2);
+  padding: var(--space-4) var(--space-5); border-bottom: 1px solid var(--border);
+  font-weight: 600; font-size: var(--text-lg);
+}
+.drawer-body { flex: 1; overflow-y: auto; padding: var(--space-5); }
+.drawer-foot {
+  display: flex; justify-content: flex-end; gap: var(--space-2);
+  padding: var(--space-3) var(--space-5); border-top: 1px solid var(--border);
+}
+
+/* Full-screen drawer. The panel itself grows to the viewport rather than an
+   overlay being layered inside it — .drawer has a transform, which would make
+   any position:fixed child resolve against the drawer instead of the viewport.
+   left:0 + width:auto rather than width:100vw — 100vw includes the scrollbar
+   gutter, which would push the panel past the left edge. */
+.drawer.fullscreen { left: 0; width: auto; border-left: none; }
+.drawer.fullscreen .drawer-body { padding: var(--space-6) max(var(--space-5), calc((100vw - 1400px) / 2)); }
+.drawer.fullscreen .dbg-pre { max-height: 60vh; }
+
+/* ---------- modal ----------
+   ONE dialog. Confirm, prompt, incoming ring, kelabo-ended, starting-soon —
+   every one of them is `.modal-veil > .modal > .modal-title + .modal-body +
+   .modal-actions`, at one width and one padding. They previously drifted by
+   whoever wrote them: different widths, different title sizes, actions centred
+   in one and right-aligned in the next. A dialog that changes shape depending on
+   what it is asking makes the user re-read the whole thing every time.
+
+   Buttons in `.modal-actions` are always full size (never `sm`) and always
+   equal width, so a two-button dialog is symmetric — the destructive answer is
+   never the smaller target. */
+/* The veil doubles as the modal's centring container. */
+.modal-veil { display: grid; place-items: center; padding: var(--space-5); z-index: 50; }
+.modal {
+  width: min(var(--modal-w), 100%);
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius-lg); box-shadow: var(--shadow-lg);
+  padding: var(--modal-pad);
+  transform: translateY(8px) scale(.99); opacity: 0;
+  transition: transform .2s cubic-bezier(.2,.9,.3,1.05), opacity .18s;
+}
+.modal-veil.open .modal { transform: none; opacity: 1; }
+.modal-title {
+  font-weight: 600; font-size: var(--text-lg); line-height: var(--leading-tight);
+  margin: 0 0 var(--space-2); display: flex; align-items: center; gap: var(--space-3);
+  /* Long kelabo titles land here. Balanced wrapping keeps a two-line title from
+     leaving one word on the second line. */
+  text-wrap: balance;
+}
+.modal-body { font-size: var(--text-md); color: var(--text-2); line-height: var(--leading-normal); margin: 0 0 var(--space-5); text-wrap: pretty; }
+.modal-actions { display: flex; justify-content: flex-end; gap: var(--space-2); }
+.modal-actions .btn { min-width: 6.5rem; }
+/* The one input a dialog ever holds, spaced like `.modal-body` so a prompt and
+   a confirm have the same rhythm between heading, content and actions. */
+.modal-input { width: 100%; margin: 0 0 var(--space-5); }
+.modal-icon {
+  width: 2rem; height: 2rem; border-radius: var(--radius-sm); flex-shrink: 0;
+  display: grid; place-items: center;
+  background: var(--danger-soft); color: var(--danger);
+}
+/* The badge slot can hold a person instead of a glyph (the incoming ring). The
+   identicon paints its own background edge to edge, so the default alarm-red
+   would never be seen — but a badge that is red underneath is one refactor away
+   from being red on screen. */
+.modal-icon.avatar { background: var(--surface-2); }
+.modal-icon-neutral { background: var(--surface-2); color: var(--text-2); }
+.modal-icon-accent { background: var(--accent-soft); color: var(--accent-text); }
+
+/* ---------- toast ---------- */
+.toasts {
+  position: fixed; bottom: var(--space-5); left: 50%; transform: translateX(-50%);
+  z-index: 60; display: flex; flex-direction: column; gap: var(--space-2); align-items: center;
+}
+.toast {
+  background: var(--text); color: var(--bg);
+  padding: var(--space-2) var(--space-5); border-radius: 999px;
+  font-size: var(--text-md); font-weight: 500;
+  box-shadow: var(--shadow-pop);
+  animation: toast-in .25s cubic-bezier(.2,.9,.3,1.1) both;
+}
+
+/* ---------- banner ---------- */
+.banner {
+  display: flex; gap: var(--space-2); align-items: center;
+  padding: var(--space-3) var(--space-4); border-radius: var(--radius-sm);
+  font-size: var(--text-md); margin-bottom: var(--space-4);
+  border: 1px solid transparent;
+}
+/* app-wide banner rendered above the router, aligned with the page column */
+.global-banner { max-width: var(--measure); margin: 0 auto; padding: var(--space-3) var(--space-5) 0; }
+.global-banner .banner { margin-bottom: 0; }
+.banner-warn { background: var(--warn-soft); color: var(--warn); border-color: color-mix(in srgb, var(--warn) 20%, transparent); }
+.banner-danger { background: var(--danger-soft); color: var(--danger); border-color: color-mix(in srgb, var(--danger) 20%, transparent); }
+.banner-success { background: var(--success-soft); color: var(--success); border-color: color-mix(in srgb, var(--success) 20%, transparent); }
+
+/* ---------- skeleton ---------- */
+.skel {
+  border-radius: var(--radius-sm);
+  background: linear-gradient(90deg, var(--surface-2) 25%, var(--surface-3) 50%, var(--surface-2) 75%);
+  background-size: 200% 100%; animation: shimmer 1.4s infinite;
+}
+@keyframes shimmer { to { background-position: -200% 0; } }
+/* The three placeholder shapes every loading state is built from: a title
+   line, a meta line under it, and a status dot. Sizes lived inline in each
+   route, so the same "title + subtitle" placeholder loaded at a different
+   height and rhythm on every page. Inside a .row they shrink to the row's own
+   type scale, same classes. */
+.skel-title { width: 55%; height: 1.375rem; margin-bottom: var(--space-2); }
+.skel-text { width: 35%; height: 0.875rem; }
+.skel-dot { width: 9px; height: 9px; border-radius: 50%; }
+.row .skel-title { height: 0.9375rem; margin-bottom: 6px; }
+.row .skel-text { height: 0.75rem; }
+
+/* ---------- tabs ---------- */
+.tabs { display: flex; gap: var(--space-1); border-bottom: 1px solid var(--border); margin-bottom: var(--space-5); }
+.tabs button {
+  font: inherit; font-weight: 500; font-size: var(--text-md); color: var(--text-2);
+  background: none; border: none; border-bottom: 2px solid transparent;
+  padding: var(--space-3) var(--space-3); cursor: pointer; margin-bottom: -1px;
+}
+.tabs button:hover { color: var(--text); }
+.tabs button.active { color: var(--text); font-weight: 600; border-bottom-color: var(--accent); }
+
+/* bounded scroll list (e.g. inside a panel-inset preview) */
+.scroll-list {
+  max-height: 160px; overflow-y: auto; margin: var(--space-2) 0 var(--space-3);
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: var(--surface); padding: var(--space-2) var(--space-3);
+}
+.scroll-list ul { margin: 0; padding-left: var(--space-5); }
+.scroll-list li { margin: 2px 0; }
+
+/* right-aligned action row (confirm/cancel pair) */
+.action-row { display: flex; align-items: center; gap: var(--space-2); justify-content: flex-end; margin-top: var(--space-1); }
+/* …and the left-aligned variant that sits under a panel (e.g. "Download") */
+.action-row-start { justify-content: flex-start; margin-top: var(--space-4); }
+/* header row above a list/timeline */
+.panel-toolbar { display: flex; align-items: center; gap: var(--space-2); margin-bottom: var(--space-3); flex-wrap: wrap; }
+
+/* a titled block inside a card — the heading hugs its content */
+.section-block .section-title { margin: 0 0 var(--space-2); }
+
+/* plain bulleted list inside a card */
+.bullets { margin: 0; padding-left: var(--space-5); font-size: var(--text-md); }
+.bullets li { margin: 2px 0; }
+.bullets li::marker { color: var(--text-3); }
+
+/* ---------- minutes ----------
+   The write-up is prose, so it is set as prose: a readable measure, paragraph
+   leading, and headings that separate sections rather than chips that label
+   them. */
+.min-summary { margin: 0; font-size: var(--text-md); line-height: var(--leading-normal); color: var(--text); max-width: 68ch; }
+.min-topic { padding-bottom: var(--space-3); }
+.min-topic + .min-topic { border-top: 1px solid var(--border); padding-top: var(--space-3); }
+.min-topic-head { display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; }
+.min-topic-title { font-size: var(--text-md); font-weight: 600; }
+.min-topic-detail { margin: 4px 0 0; font-size: var(--text-md); line-height: var(--leading-normal); color: var(--text); max-width: 68ch; }
+.min-rationale { color: var(--text-2); }
+.min-src { display: inline-flex; gap: 6px; flex-wrap: wrap; margin-left: var(--space-2); }
+.min-src a.chip { color: var(--accent-text); }
+
+/* The brand mark above the sign-in card, drawn in the scheme's accent: the
+   glyph's alpha is a mask and the fill is a token, so the logo re-colours
+   itself with the palette instead of arriving in some scheme of its own. */
+.auth-brand { display: flex; justify-content: center; margin-bottom: var(--space-6); }
+.auth-brand-mark {
+  height: 6rem; aspect-ratio: 225 / 192;
+  background: var(--accent);
+  -webkit-mask: url(/logo-mask.png) center / contain no-repeat;
+  mask: url(/logo-mask.png) center / contain no-repeat;
+}
+
+/* Stacked social sign-in buttons — last in the card: on a self-hosted
+   deployment the work email is the identity, social is the fallback. */
+.auth-social { display: flex; flex-direction: column; gap: var(--space-2); }
+/* a link that is temporarily unavailable (e.g. "Resend" during its cooldown) */
+.link-disabled { pointer-events: none; opacity: .5; }
+
+/* horizontal rule with a label ("or continue with") */
+.divider-label {
+  display: flex; align-items: center; gap: var(--space-3);
+  color: var(--text-3); font-size: var(--text-xs); margin: var(--space-5) 0;
+}
+.divider-label::before, .divider-label::after {
+  content: ''; flex: 1; height: 1px; background: var(--border);
+}
+
+/* ==========================================================================
+   4. FEATURES
+   ========================================================================== */
+
+/* ---------- kelabo room ----------
+   The room's own layout lives in styles/room.css — it is a full-viewport
+   surface with nothing in common with the page column this file describes.
+   What stays here is what the room borrows from the rest of the app: the
+   timer, the mic meter, the transcript chat bubbles and the contribution
+   card, all of which also appear on the archived record. */
+
+.timer { font-family: var(--mono); font-variant-numeric: tabular-nums; font-weight: 500; color: var(--text-2); font-size: var(--text-sm); }
+
+/* mic meter */
+.meter { display: inline-flex; align-items: flex-end; gap: 2.5px; height: 14px; }
+.meter i { width: 3px; border-radius: 2px; background: var(--success); animation: meter 1s ease-in-out infinite; }
+.meter i:nth-child(1) { height: 40%; animation-delay: 0s; }
+.meter i:nth-child(2) { height: 90%; animation-delay: .15s; }
+.meter i:nth-child(3) { height: 60%; animation-delay: .3s; }
+.meter i:nth-child(4) { height: 100%; animation-delay: .45s; }
+.meter i:nth-child(5) { height: 50%; animation-delay: .6s; }
+.meter.muted i { background: var(--text-3); animation: none; height: 25%; }
+@keyframes meter { 0%, 100% { transform: scaleY(.4); } 50% { transform: scaleY(1); } }
+
+/* Transcript ledger rows in the debug drawer */
+.dbg-ledger { display: flex; flex-direction: column; gap: 3px; }
+.dbg-ledger-row {
+  display: flex; align-items: center; gap: var(--space-1); flex-wrap: wrap;
+  font-size: var(--text-xs); color: var(--text-2);
+}
+.dbg-ledger-row code {
+  font-size: var(--text-2xs); color: var(--text-3);
+  min-width: 5.75rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* The unconfirmed tail inside an open message: same box, dimmed, so it reads as
+   a guess that may still change rather than as settled transcript. */
+.chat-tail { color: var(--text-3); font-style: italic; }
+
+
+/* VAD gate readout in the debug drawer */
+.dbg-kv {
+  display: flex; flex-wrap: wrap; gap: var(--space-1) var(--space-3);
+  font-size: var(--text-xs); color: var(--text-2);
+}
+.dbg-kv b { color: var(--text); font-weight: 600; }
+
+/* "Jump to latest" — shown only while the reader has scrolled back, so the live
+   transcript never yanks them away mid-sentence but is one click away. */
+.jump-latest {
+  position: absolute; left: 50%; bottom: 44px; transform: translateX(-50%);
+  z-index: 3; display: inline-flex; align-items: center; gap: 4px;
+  padding: 5px var(--space-3); border-radius: 999px;
+  border: 1px solid var(--border); background: var(--surface); color: var(--text-2);
+  font-size: var(--text-xs); cursor: pointer;
+  box-shadow: var(--shadow-pop);
+}
+.jump-latest:hover { color: var(--text); border-color: var(--text-3); }
+
+/* transcript line (archived record view) */
+.line { display: flex; gap: var(--space-3); }
+/* A FIXED width, not a minimum. With `min-width` the gutter grew to the longest
+   speaker name in the record — "Alexandra Petrov-Whitfield" made it 198px
+   instead of 52px — so every transcript line shifted right by a different
+   amount depending on who happened to be in that kelabo. Long names truncate;
+   the full name is on the element's title. */
+.line .speaker {
+  font-weight: 600; font-size: var(--text-sm); padding-top: 1px;
+  flex: 0 0 5.5rem; width: 5.5rem;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* A flex item defaults to min-width:auto, so one long unbroken token (a URL, an
+   id, a stack frame) in a transcript pushes the line — and with it the whole
+   page column — past its max-width. That is why the same tab used to render at
+   a different width for different records. */
+.line .text { font-size: var(--text-md); min-width: 0; overflow-wrap: anywhere; }
+.line .tstamp { color: var(--text-3); font-family: var(--mono); font-size: var(--text-xs); margin-right: var(--space-2); }
+
+/* transcript chat view */
+.chat-msg { display: flex; flex-direction: column; gap: var(--space-1); max-width: 82%; animation: msg-in .3s cubic-bezier(.2,.9,.3,1) both; }
+.chat-msg.mine { align-self: flex-end; align-items: flex-end; }
+.chat-msg.mine .chat-meta { flex-direction: row-reverse; }
+.chat-meta .speaker { font-weight: 600; font-size: var(--text-sm); }
+.chat-time { font-size: var(--text-2xs); color: var(--text-3); }
+.chat-bubble {
+  font-size: var(--text-md); line-height: 1.5; padding: var(--space-2) var(--space-3);
+  overflow-wrap: anywhere;
+  border-radius: var(--radius); border-top-left-radius: var(--space-1);
+  background: var(--surface-2); border: 1px solid var(--border);
+}
+.chat-msg.mine .chat-bubble {
+  background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 25%, transparent);
+  border-top-left-radius: var(--radius); border-top-right-radius: var(--space-1);
+}
+
+
+.sp-1 { color: var(--speaker-1); } .sp-2 { color: var(--speaker-2); } .sp-3 { color: var(--speaker-3); }
+.sp-4 { color: var(--speaker-4); } .sp-5 { color: var(--speaker-5); }
+
+/* ---------- board contribution ---------- */
+.con {
+  background: var(--surface); border: 1px solid var(--border);
+  border-left: 3px solid var(--k-answer);
+  border-radius: var(--radius-sm);
+  padding: var(--space-3); cursor: pointer;
+  transition: border-color .15s, background .15s;
+  animation: msg-in .3s cubic-bezier(.2,.9,.3,1) both;
+}
+.con:hover { background: var(--surface-2); }
+.con[data-kind="answer"]  { border-left-color: var(--k-answer); }
+.con[data-kind="link"]    { border-left-color: var(--k-link); }
+.con[data-kind="code"]    { border-left-color: var(--k-code); }
+.con[data-kind="clarify"] { border-left-color: var(--k-clarify); }
+.con[data-kind="note"]    { border-left-color: var(--k-note); }
+.con[data-kind="minutes"] { border-left-color: var(--k-minutes); }
+
+.con-working { cursor: default; border-left-color: var(--accent); }
+.con-working::after {
+  content: ''; display: block; height: 2px; margin-top: var(--space-2); border-radius: 2px;
+  background: linear-gradient(90deg, transparent, var(--accent), transparent);
+  background-size: 200% 100%; animation: con-scan 1.2s linear infinite;
+}
+@keyframes con-scan { from { background-position: 200% 0; } to { background-position: -200% 0; } }
+.con-spinner {
+  width: 14px; height: 14px; flex-shrink: 0;
+  border: 2px solid var(--border); border-top-color: var(--accent);
+  border-radius: 50%; animation: con-spin .7s linear infinite;
+}
+@keyframes con-spin { to { transform: rotate(360deg); } }
+/* What the card is doing right now, and the trail of what it already did. The
+   status line replaces itself; the steps accumulate (last three), so a long
+   lookup reads as progress rather than as a stalled spinner. */
+.con-progress {
+  margin-top: 6px; padding-left: 22px;
+  font-size: var(--text-xs); color: var(--text-2);
+}
+.con-steps {
+  margin: 4px 0 0; padding-left: 22px; list-style: none;
+  font-size: var(--text-2xs); color: var(--text-3);
+}
+.con-steps li { position: relative; padding-left: 12px; line-height: 1.5; }
+.con-steps li::before {
+  content: ''; position: absolute; left: 2px; top: .55em;
+  width: 4px; height: 4px; border-radius: 50%; background: var(--text-3); opacity: .6;
+}
+
+/* The agent looked, and is not going to post. Muted to the weight of a system
+   note — present, legible, and clearly not a contribution. */
+.con-skipped {
+  cursor: default; border-left-color: var(--border);
+  background: var(--surface-2); opacity: .85;
+}
+.con-skipped:hover { background: var(--surface-2); }
+.con-skipped .con-title { font-weight: 400; color: var(--text-2); }
+.con-skipped .con-mark { color: var(--text-3); }
+.con-reason {
+  margin-top: 6px; padding-left: 22px;
+  font-size: var(--text-xs); color: var(--text-3); line-height: 1.5;
+}
+
+/* The head is a symbol, a title and a caret — nothing else, so it survives a
+   300px column without wrapping. The title clamps at two lines rather than
+   ellipsing at one: a contribution's headline is the whole card when collapsed,
+   and half of one is not worth the space saved. */
+.con-head { align-items: flex-start; gap: var(--space-2); }
+.con-mark { flex-shrink: 0; display: flex; margin-top: 1px; color: var(--k-answer); }
+.con[data-kind="answer"]  .con-mark { color: var(--k-answer); }
+.con[data-kind="link"]    .con-mark { color: var(--k-link); }
+.con[data-kind="code"]    .con-mark { color: var(--k-code); }
+.con[data-kind="clarify"] .con-mark { color: var(--k-clarify); }
+.con[data-kind="note"]    .con-mark { color: var(--k-note); }
+.con[data-kind="minutes"] .con-mark { color: var(--k-minutes); }
+
+.con-title {
+  font-weight: 500;
+  font-size: var(--text-md);
+  line-height: 1.35;
+  flex: 1;
+  min-width: 0;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.con.open .con-title { -webkit-line-clamp: unset; }
+.con-caret { color: var(--text-3); transition: transform .2s; flex-shrink: 0; display: flex; margin-top: 2px; }
+.con.open .con-caret { transform: rotate(90deg); }
+
+/* Second row, not more things crammed into the first. Everything in it is a
+   number or a symbol. */
+.con-sub {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: 5px;
+  padding-left: 22px;
+  font-size: var(--text-2xs);
+  color: var(--text-3);
+}
+.con-sub span { display: inline-flex; align-items: center; gap: 3px; }
+.con-to { color: var(--accent-text); font-weight: 500; }
+.con-body {
+  max-height: 0; overflow: hidden; opacity: 0;
+  transition: max-height .3s ease, opacity .25s ease, margin .25s ease;
+  font-size: var(--text-md); color: var(--text);
+}
+.con.open .con-body { max-height: 640px; overflow-y: auto; opacity: 1; margin-top: var(--space-3); }
+.con-body pre {
+  background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: var(--radius-sm); padding: var(--space-3); overflow-x: auto;
+  font-family: var(--mono); font-size: var(--text-xs);
+}
+/* Source citations. Now that kind chips are neutral, an <a> here would be
+   indistinguishable from a static chip — give the clickable ones the accent. */
+.con-src { display: flex; gap: 6px; flex-wrap: wrap; margin-top: var(--space-2); }
+.con-src a.chip { color: var(--accent-text); }
+.con-src a.chip:hover { background: var(--accent-soft); text-decoration: none; }
+
+/* ---------- record detail ----------
+   All three tabs share one panel so switching tabs never moves the content's
+   left edge or changes its measure. Transcript and minutes used to sit inside
+   a padded .card while the board rendered bare on the page, so the same record
+   read at two different widths depending on which tab you were on. */
+.record-panel { min-width: 0; }
+.record-panel > * { min-width: 0; }
+/* Transcript rows are separated by hairlines rather than wrapped in a card —
+   containment without adding an inset the other two tabs do not have. */
+.record-transcript .line { padding: var(--space-3) 0; border-bottom: 1px solid var(--border); }
+.record-transcript .line:first-child { padding-top: 0; }
+.record-transcript .line:last-child { border-bottom: none; }
+
+/* rendered markdown (contribution answers) */
+.md-h { font-weight: 600; line-height: var(--leading-tight); }
+h3.md-h { font-size: var(--text-base); }
+h4.md-h { font-size: var(--text-md); }
+h5.md-h, h6.md-h { font-size: var(--text-sm); color: var(--text-2); }
+.md-list { margin: var(--space-2) 0 0; padding-left: var(--space-5); }
+.md-list li { margin: 2px 0; }
+.md-list li::marker { color: var(--text-3); }
+.md-table-wrap { margin: var(--space-2) 0 0; overflow-x: auto; }
+.md-table {
+  border-collapse: collapse; width: 100%; font-size: var(--text-sm);
+  border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden;
+}
+.md-table th, .md-table td { border: 1px solid var(--border); padding: 6px var(--space-3); text-align: left; vertical-align: top; }
+.md-table thead th { background: var(--surface-2); font-weight: 600; }
+.md-table tbody tr:nth-child(even) td { background: color-mix(in srgb, var(--surface-2) 45%, transparent); }
+
+/* compose box */
+.compose { display: flex; gap: var(--space-2); padding: var(--space-3) var(--space-4); border-top: 1px solid var(--border); background: var(--surface); }
+.compose .input { flex: 1; }
+/* Marks a transcript line somebody typed rather than said. A glyph, not a chip:
+   it sits inside a metadata row that is already three items wide in a 22%-width
+   panel, and how the words arrived is the least important thing on that row. */
+.chat-typed { color: var(--text-3); }
+
+/* ---------- LLM debug panel ---------- */
+/* Raw request/response blocks. A class rather than an inline style so the
+   fullscreen drawer rule above can grow them. */
+.dbg-pre {
+  margin: 0; padding: var(--space-2) var(--space-3); background: var(--surface-2);
+  border-radius: var(--radius-sm); font-family: var(--mono);
+  font-size: var(--text-xs); white-space: pre-wrap; word-break: break-word;
+  max-height: 260px; overflow: auto;
+}
+/* a collapsible section (system prompt, context, gate decision) */
+.dbg-block { margin-bottom: var(--space-2); }
+.dbg-block > summary { cursor: pointer; font-size: var(--text-xs); color: var(--text-3); }
+.dbg-block > summary::marker { color: var(--text-3); }
+/* one message inside "context sent to model" */
+.dbg-msg { margin-bottom: 6px; }
+.dbg-msg > .text-meta { margin-bottom: 2px; }
+/* an exchange card */
+.dbg-card { margin-bottom: var(--space-2); }
+/* a whole orchestration turn, edged in the accent so turns are scannable */
+.dbg-turn { border-left: 3px solid var(--accent); margin-bottom: var(--space-3); }
+.dbg-turn .panel-toolbar { margin-bottom: var(--space-3); }
+.dbg-query { font-size: var(--text-sm); font-weight: 600; }
+.dbg-token-unit { opacity: .65; margin-left: var(--space-1); }
+
+/* ---------- the call tree ----------
+   Rows are uniform: a fixed offset gutter, the label, chips, then the numbers
+   pinned right. Uniform rows are what make depth readable — the eye follows the
+   rail and the +offset column, not indentation alone. */
+.dbg-tree { font-size: var(--text-xs); }
+.dbg-row {
+  display: flex; align-items: center; gap: var(--space-2);
+  padding: 3px 4px; border-radius: var(--radius-sm);
+  cursor: pointer; list-style: none; min-width: 0;
+}
+.dbg-row::-webkit-details-marker { display: none; }
+.dbg-row:hover { background: var(--surface-2); }
+.dbg-leaf { cursor: default; padding-left: 22px; }
+.dbg-leaf:hover { background: transparent; }
+.dbg-t {
+  flex-shrink: 0; width: 2.875rem; text-align: right;
+  font-family: var(--mono); font-size: var(--text-2xs); color: var(--text-3);
+}
+.dbg-twisty { display: flex; color: var(--text-3); transition: transform .15s; flex-shrink: 0; }
+.dbg-node[open] > .dbg-row > .dbg-twisty { transform: rotate(90deg); }
+.dbg-node-label {
+  display: flex; align-items: baseline; gap: var(--space-2);
+  min-width: 0; color: var(--text); white-space: nowrap;
+}
+.dbg-node-sub {
+  color: var(--text-3); font-weight: 400;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 42ch;
+}
+.dbg-dur { font-family: var(--mono); font-size: var(--text-2xs); color: var(--text-2); flex-shrink: 0; }
+/* the rail: one line per level, so a sub-agent's calls read as its children */
+.dbg-children {
+  margin-left: 14px; padding-left: 10px;
+  border-left: 1px solid var(--border);
+}
+.dbg-node.is-danger > .dbg-row .dbg-node-label { color: var(--danger); }
+.dbg-exchange { padding: var(--space-2) 0 var(--space-2) 4px; }
+.dbg-tool {
+  font-family: var(--mono); font-size: var(--text-2xs); color: var(--text-2);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 60ch;
+}
+/* the two folded readouts above the timeline (VAD, transcript ledger) */
+.dbg-fold > .dbg-fold-head {
+  display: flex; align-items: center; gap: var(--space-2);
+  cursor: pointer; list-style: none;
+  font-size: var(--text-xs); color: var(--text-2);
+}
+.dbg-fold > .dbg-fold-head::-webkit-details-marker { display: none; }
+.dbg-fold[open] > .dbg-fold-head { margin-bottom: var(--space-3); }
+.dbg-fold[open] > .dbg-fold-head .dbg-twisty { transform: rotate(90deg); }
+
+/* ---------- MCP rows (settings) ---------- */
+/* layout only — border/bg/radius come from the shared .panel-inset class */
+.mcp-row { display: flex; align-items: center; gap: var(--space-3); margin-bottom: var(--space-2); }
+.mcp-row .mcp-name { font-weight: 600; font-size: var(--text-md); display: flex; align-items: center; gap: 6px; }
+.mcp-row .mcp-url { font-size: var(--text-xs); color: var(--text-3); font-family: var(--mono); }
+
+/* ---------- lobby ---------- */
+.linkbox {
+  display: flex; gap: var(--space-2); align-items: center;
+  background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: var(--radius-sm); padding: var(--space-1) var(--space-1) var(--space-1) var(--space-3);
+  font-family: var(--mono); font-size: var(--text-sm); color: var(--text-2);
+}
+.linkbox .link-url { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.waiting-dots i {
+  display: inline-block; width: 4px; height: 4px; border-radius: 50%;
+  background: currentColor; margin-left: 3px; animation: wdot 1.2s ease-in-out infinite;
+}
+.waiting-dots i:nth-child(2) { animation-delay: .2s; }
+.waiting-dots i:nth-child(3) { animation-delay: .4s; }
+@keyframes wdot { 0%, 100% { opacity: .25; transform: translateY(0); } 50% { opacity: 1; transform: translateY(-3px); } }
+
+/* Lobby participants are ordinary .row list rows; only these two survive as
+   lobby-specific: the "(you)" marker inside a row title, and the centring on
+   the waiting note (which is otherwise a plain .empty). */
+.lp-you { color: var(--text-3); font-weight: 400; }
+.lobby-wait { text-align: center; }
+/* Cancel / Start pair — a shared .action-row, pushed clear of the list. */
+.lobby-actions { margin-top: var(--space-6); }
+
+/* ---------- settings ---------- */
+/* No max-width and no button overrides here — Settings uses the shared
+   --measure and the shared button metrics like every other signed-in page. */
+/* Sections are plain blocks on the page, not cards. Seven stacked cards read
+   as seven unrelated widgets; hairline-separated rows under a quiet heading
+   read as one settings surface. */
+.settings-section { margin-bottom: var(--space-10); }
+.settings-section:last-child { margin-bottom: 0; }
+.settings-danger .section-title { color: var(--danger); }
+.settings-row {
+  display: flex; align-items: center; gap: var(--space-4);
+  padding: var(--space-4) 0; border-bottom: 1px solid var(--border);
+}
+.settings-row:last-child { border-bottom: none; }
+.settings-row-plain { border-bottom: none; padding: 6px 0 var(--space-3); }
+/* A row whose control is too wide to sit beside its label (the scheme grid). */
+.settings-row-stacked { flex-direction: column; align-items: stretch; gap: var(--space-3); }
+
+/* ---------- colour scheme picker ---------- */
+.scheme-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: var(--space-2); }
+.scheme-card {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 6px;
+  padding: var(--space-3); border-radius: var(--radius);
+  border: 1px solid var(--border-strong); background: var(--surface);
+  font: inherit; text-align: left; cursor: pointer;
+  transition: border-color .15s, background .15s;
+}
+.scheme-card:hover { background: var(--surface-2); }
+.scheme-card .scheme-name { font-size: var(--text-md); font-weight: 600; color: var(--text); }
+
+/* The swatch strip re-declares data-scheme, so these four cells resolve against
+   THAT palette while everything around them stays on the active one — a live
+   preview with no duplicated colour values in JS. */
+.scheme-swatches { display: flex; border-radius: var(--radius-xs); overflow: hidden; width: 100%; height: 24px; }
+.scheme-sw { flex: 1; }
+.scheme-sw-bg { background: var(--bg); }
+.scheme-sw-surface { background: var(--surface-3); }
+.scheme-sw-accent { background: var(--accent); flex: 1.6; }
+.scheme-sw-text { background: var(--text-2); }
+.settings-row .sr-main { flex: 1; min-width: 0; }
+/* the control cluster on the right of a settings row */
+/* a note or preview panel that follows a settings row */
+.settings-note { margin-top: var(--space-4); }
+.mcp-warn { color: var(--warn); }
+.purge-summary { font-size: var(--text-sm); margin-bottom: var(--space-2); }
+
+/* ==========================================================================
+   ANIMATION & RESPONSIVE
+   ========================================================================== */
+
+@keyframes msg-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: none; }
+}
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(12px); }
+  to   { opacity: 1; transform: none; }
+}
+/* fill `backwards`, not `both`: an animation filling opacity/transform keeps a
+   stacking context FOREVER, which trapped every popover's z-index inside its
+   own section — the next .anim-in section painted over the open list's lower
+   rows, making them unhoverable. `backwards` covers the delayed start (the
+   only frame that matters) and releases the context when the entrance ends. */
+.anim-in { animation: msg-in .3s cubic-bezier(.2,.9,.3,1) backwards; }
+.anim-in-d1 { animation-delay: .04s; } .anim-in-d2 { animation-delay: .08s; }
+.anim-in-d3 { animation-delay: .12s; } .anim-in-d4 { animation-delay: .16s; }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; }
+}
+
+/* ---------- matrix: falling glyph overlay (dark only) ----------
+   Two stacked repeating gradients — evenly spaced vertical columns, and a
+   dashed mask scrolling down them — read as streams of glyphs falling. It is a
+   decorative layer, so:
+     • pointer-events: none, or it would eat every click on the page;
+     • mix-blend-mode: screen at low opacity, so it lightens rather than
+       veiling, and text contrast underneath is essentially untouched;
+     • it sits above the app but below toasts, which must stay legible.
+   The global reduced-motion rule above freezes it into a static texture rather
+   than removing it, which is the right outcome for a purely decorative effect. */
+[data-scheme="matrix"][data-theme="dark"] body::after {
+  content: '';
+  position: fixed; inset: 0;
+  pointer-events: none; z-index: 55;
+  opacity: .16; mix-blend-mode: screen;
+  background-image:
+    repeating-linear-gradient(90deg,
+      transparent 0 26px, var(--accent) 26px 27px, transparent 27px 64px),
+    repeating-linear-gradient(180deg,
+      transparent 0 4px, #000 4px 15px);
+  background-size: 100% 100%, 100% 240px;
+  animation: matrix-rain 5.5s linear infinite;
+}
+@keyframes matrix-rain {
+  from { background-position: 0 0, 0 0; }
+  to   { background-position: 0 0, 0 240px; }
+}
+
+@media (max-width: 767px) {
+  /* The rail becomes an off-canvas drawer, opened from a slim mobile bar. */
+  .sidebar {
+    position: fixed; left: 0; top: 0; bottom: 0; z-index: 41;
+    width: 260px; transform: translateX(-102%);
+    transition: transform .25s cubic-bezier(.3,.8,.3,1);
+    box-shadow: var(--shadow-lg);
+  }
+  .sidebar.open { transform: none; }
+  .shell-collapsed .sidebar { width: 260px; }
+  .shell-collapsed .sidebar-label { display: revert; }
+  /* The drawer is full width whatever the desktop collapse preference says,
+     so the head lays out as a row again. */
+  .shell-collapsed .sidebar-head { flex-direction: row; align-items: center; }
+  .sidebar-collapse { display: none; }
+  /* Backdrop styling comes from the shared overlay rule; only its existence
+     and stacking are mobile-specific. */
+  .sidebar-veil { display: block; z-index: 40; }
+  .shell-mobilebar {
+    display: flex; align-items: center; gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    border-bottom: 1px solid var(--border);
+    position: sticky; top: 0; z-index: 30; background: var(--bg);
+  }
+
+  .crumbs .crumb-back-label { display: none; }
+  .page { padding: var(--space-5) var(--space-4) var(--space-10); }
+  .card-pad { padding: var(--space-5); }
+  /* Rows sit inside a page that already has its own gutter — repeating it here
+     spends a fifth of a phone's width on nothing. */
+  .row { padding: var(--space-3) var(--space-2); }
+  .otp input { width: 42px; height: 52px; }
+}
+
+/* A list row on a phone stacks instead of competing for one line. With the
+   title, the date and an action all in a single row, "PenTest results review"
+   wrapped onto three lines to make room for "about 3 hours ago" — the title,
+   the one thing worth reading, lost to the one thing worth glancing at. Title
+   gets the full width; the date and the action share the line below it. */
+@media (max-width: 560px) {
+  .row { flex-wrap: wrap; row-gap: var(--space-2); }
+  .row .row-main { flex: 1 1 100%; }
+  /* Pushes whatever trailing action the row has to the far edge. */
+  .row-meta { margin-right: auto; }
+  /* The status dot is redundant beside the live/ended chip in the title, and on
+     a phone it costs a line's worth of indent. */
+  .row > .sdot { display: none; }
+
+  /* A page's primary action goes full width under its title rather than
+     squeezing the title into half a column. */
+  .page-head { flex-wrap: wrap; }
+  .page-head > .btn { flex: 1 1 100%; justify-content: center; }
+}
+
+/* ==========================================================================
+   Device check — the camera/mic preview on the way into a kelabo
+   --------------------------------------------------------------------------
+   Shared by Join and Lobby. Deliberately a plain page component rather than
+   part of the room: it runs before the room exists, and it releases both
+   devices when it unmounts so nothing is left lit behind a page nobody is on.
+   ========================================================================== */
+
+.devcheck {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.devcheck-preview {
+  position: relative;
+  aspect-ratio: 16 / 9;
+  width: 100%;
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: var(--surface-3);
+  border: 1px solid var(--border);
+}
+.devcheck-preview video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  /* Mirrored, like every self-view: people read their own image as a mirror. */
+  transform: scaleX(-1);
+}
+.devcheck-off {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  color: var(--text-3);
+  font-size: var(--text-sm);
+}
+
+.devcheck-rows { display: flex; flex-direction: column; gap: var(--space-2); }
+.devcheck-row { display: flex; align-items: center; gap: var(--space-2); }
+.devcheck-gap { display: none; }
+
+/* Above the wrapping breakpoint the two rows share one grid, so the toggles,
+   the meter and the pickers line up down the column instead of each row
+   arranging itself around the width of its own label. */
+@media (min-width: 560px) {
+  .devcheck-rows {
+    display: grid;
+    grid-template-columns: max-content max-content minmax(0, 1fr);
+    gap: var(--space-2);
+    align-items: center;
+  }
+  .devcheck-row { display: contents; }
+  .devcheck-gap { display: block; }
+}
+.devcheck-select { flex: 1; min-width: 0; max-width: 100%; }
+
+.devcheck-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--text-2);
+  font: inherit;
+  font-size: var(--text-sm);
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.devcheck-toggle:hover { background: var(--surface-3); color: var(--text); }
+.devcheck-toggle.is-on { background: var(--success-soft); color: var(--success); border-color: transparent; }
+.devcheck-toggle.is-off { background: var(--danger-soft); color: var(--danger); border-color: transparent; }
+.devcheck-toggle:focus-visible { outline: none; box-shadow: var(--ring); }
+
+/* The one thing a checkbox cannot do: show that the microphone actually works.
+   Driven by `--level` written straight to the node, for the same reason as the
+   room's tile meter — a keyframe would stop dead under prefers-reduced-motion,
+   and a level meter that never moves says the opposite of what it means. */
+.devcheck-meter {
+  display: inline-flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 16px;
+  flex-shrink: 0;
+}
+.devcheck-meter i {
+  width: 3px;
+  height: 100%;
+  border-radius: 2px;
+  /* Colour tracks the level too, so a very quiet input still reads as "heard"
+     rather than as a meter that has not moved. */
+  background: color-mix(in oklab, var(--success) calc(var(--level, 0) * 100%), var(--border-strong));
+  transform-origin: bottom;
+  transform: scaleY(.15);
+  transition: transform .07s linear;
+}
+.devcheck-meter i:nth-child(1) { transform: scaleY(calc(.15 + .5 * var(--level, 0))); }
+.devcheck-meter i:nth-child(2) { transform: scaleY(calc(.15 + .75 * var(--level, 0))); }
+.devcheck-meter i:nth-child(3) { transform: scaleY(calc(.15 + 1 * var(--level, 0))); }
+.devcheck-meter i:nth-child(4) { transform: scaleY(calc(.15 + .8 * var(--level, 0))); }
+.devcheck-meter i:nth-child(5) { transform: scaleY(calc(.15 + .55 * var(--level, 0))); }
+
+.devcheck-note { margin: 0; font-size: var(--text-xs); color: var(--text-3); }
+.devcheck-bad { color: var(--danger); }
+
+/* Given room, the preview and its controls sit side by side. Stretching a 16:9
+   preview across a 900px column would make it 500px tall and turn a two-line
+   check into the whole page. */
+@media (min-width: 640px) {
+  .devcheck {
+    display: grid;
+    grid-template-columns: minmax(0, 21.25rem) minmax(0, 1fr);
+    grid-template-rows: auto 1fr;
+    grid-template-areas:
+      "preview rows"
+      "preview note";
+    column-gap: var(--space-4);
+    align-items: start;
+  }
+  .devcheck-preview { grid-area: preview; }
+  .devcheck-rows { grid-area: rows; }
+  .devcheck-note { grid-area: note; align-self: start; }
+}
+
+@media (max-width: 560px) {
+  .devcheck-row { flex-wrap: wrap; }
+  .devcheck-select { flex-basis: 100%; }
+}
+
+/* ==========================================================================
+   Scheduling — the schedule form, the invitation reply, and the rail entries
+   ========================================================================== */
+
+/* --- date + time picker ---------------------------------------------------
+   Built from the app's own tokens rather than the browser's controls, so it
+   follows the theme — dark included — instead of drawing a white calendar on a
+   dark page. */
+.dtp { position: relative; }
+
+.dtp-trigger {
+  display: inline-flex; align-items: center; gap: var(--space-2);
+  min-width: 16.25rem; padding: 0.5625rem var(--space-3);
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font: inherit; font-size: var(--text-md); color: var(--text);
+  cursor: pointer; text-align: left;
+}
+.dtp-trigger:hover { border-color: var(--border-strong); }
+.dtp-trigger.is-open, .dtp-trigger:focus-visible {
+  outline: none; border-color: var(--accent); box-shadow: var(--ring);
+}
+.dtp-trigger:disabled { opacity: .6; cursor: not-allowed; }
+.dtp-trigger svg { color: var(--text-3); }
+.dtp-value { flex: 1; font-variant-numeric: tabular-nums; }
+
+.dtp-panel {
+  position: absolute; z-index: 30; top: calc(100% + 6px); left: 0;
+  padding: var(--space-3);
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius); box-shadow: var(--shadow-pop);
+  animation: menu-in .12s ease-out both;
+}
+.dtp-presets { display: flex; gap: 6px; margin-bottom: var(--space-3); }
+.dtp-presets .chip-btn.is-on { background: var(--accent); color: var(--accent-on); border-color: transparent; }
+
+.dtp-body { display: flex; gap: var(--space-3); }
+.dtp-cal { width: 15.75rem; }
+
+.dtp-month { display: flex; align-items: center; gap: var(--space-2); margin-bottom: var(--space-2); }
+.dtp-month-label { flex: 1; text-align: center; font-weight: 600; font-size: var(--text-md); }
+.dtp-nav {
+  display: flex; padding: 5px; border: 0; border-radius: var(--radius-sm);
+  background: none; color: var(--text-2); cursor: pointer;
+}
+.dtp-nav:hover:not(:disabled) { background: var(--surface-2); color: var(--text); }
+.dtp-nav:disabled { opacity: .3; cursor: not-allowed; }
+.dtp-flip { transform: rotate(180deg); }
+
+.dtp-week, .dtp-days { display: grid; grid-template-columns: repeat(7, 1fr); gap: 2px; }
+.dtp-week span {
+  text-align: center; padding-bottom: 4px;
+  font-size: var(--text-2xs); color: var(--text-3); font-weight: 600;
+}
+.dtp-day {
+  aspect-ratio: 1; display: grid; place-items: center;
+  border: 0; border-radius: var(--radius-sm); background: none;
+  font: inherit; font-size: var(--text-sm); color: var(--text);
+  cursor: pointer; font-variant-numeric: tabular-nums;
+}
+.dtp-day:hover:not(:disabled):not(.is-selected) { background: var(--surface-2); }
+.dtp-day:disabled { color: var(--text-3); opacity: .4; cursor: not-allowed; }
+.dtp-day.is-blank { pointer-events: none; }
+/* Today is outlined, the choice is filled — so "where am I" and "what did I
+   pick" never look the same. */
+.dtp-day.is-today { box-shadow: inset 0 0 0 1px var(--border-strong); }
+.dtp-day.is-selected { background: var(--accent); color: var(--accent-on); font-weight: 600; }
+
+.dtp-times {
+  width: 5.75rem; max-height: 15.375rem; overflow-y: auto;
+  display: flex; flex-direction: column; gap: 1px;
+  padding-left: var(--space-3); border-left: 1px solid var(--border);
+}
+.dtp-time {
+  padding: 6px var(--space-2); border: 0; border-radius: var(--radius-sm);
+  background: none; font: inherit; font-size: var(--text-sm); color: var(--text-2);
+  cursor: pointer; text-align: center; font-variant-numeric: tabular-nums;
+}
+.dtp-time:hover:not(.is-selected) { background: var(--surface-2); color: var(--text); }
+.dtp-time.is-selected { background: var(--accent); color: var(--accent-on); font-weight: 600; }
+
+/* The group's second create action is deliberately quieter — scheduling is the
+   less common of the two. */
+.sidebar-new-alt { font-weight: 500; }
+.sidebar-new-alt svg { color: var(--text-3); }
+.sidebar-new-alt:hover svg { color: var(--accent); }
+
+.sdot-scheduled { background: var(--accent); opacity: .55; }
+/* The invitation list's status dot mirrors its chip, so the state is readable
+   from the left edge without reading across the row. */
+.sdot-accepted { background: var(--success); }
+.sdot-declined { background: var(--danger); }
+.sdot-pending { background: var(--warn); }
+/* When it is, pushed to the rail's right edge and never wrapping. */
+.sidebar-when {
+  margin-left: auto; padding-left: var(--space-2);
+  font-size: var(--text-2xs); color: var(--text-3);
+  white-space: nowrap; flex-shrink: 0;
+}
+
+.invite-note {
+  margin: 0 0 var(--space-5);
+  padding: var(--space-3) var(--space-4);
+  border-left: 2px solid var(--border-strong);
+  color: var(--text-2); font-size: var(--text-base);
+  white-space: pre-wrap;
+}
+
+.invite-answer {
+  display: flex; align-items: center; gap: var(--space-2);
+  padding: var(--space-3) var(--space-4); margin-bottom: var(--space-4);
+  border-radius: var(--radius-sm); font-size: var(--text-md); font-weight: 500;
+}
+.invite-answer-accepted { background: var(--success-soft); color: var(--success); }
+.invite-answer-declined { background: var(--surface-2); color: var(--text-2); }
+
+.invite-actions { display: flex; gap: var(--space-2); margin-bottom: var(--space-3); }
+.invite-actions .btn { flex: 1; justify-content: center; }
+.invite-live { margin-top: var(--space-5); }
+
+/* Reply status on the host's list. */
+.rsvp {
+  display: inline-flex; align-items: center; gap: 5px;
+  flex-shrink: 0; font-size: var(--text-sm); white-space: nowrap;
+}
+.rsvp-yes { color: var(--success); }
+.rsvp-no { color: var(--text-3); }
+.rsvp-pending { color: var(--text-3); opacity: .75; }
+
+/* --- invitee picker ------------------------------------------------------- */
+
+.epick { position: relative; }
+.epick-box {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+  padding: 7px 8px; min-height: 2.625rem;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius-sm); cursor: text;
+}
+.epick-box:focus-within { border-color: var(--accent); box-shadow: var(--ring); }
+.epick-box.is-disabled { opacity: .6; cursor: default; }
+
+.epick-chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 3px 4px 3px 9px; border-radius: 999px;
+  background: var(--surface-2); font-size: var(--text-sm);
+}
+.epick-chip button {
+  display: flex; padding: 2px; border: 0; border-radius: 50%;
+  background: none; color: var(--text-3); cursor: pointer;
+}
+.epick-chip button:hover { background: var(--surface-3); color: var(--text); }
+
+.epick-input {
+  flex: 1; min-width: 8.75rem;
+  border: 0; background: none; outline: none;
+  font: inherit; font-size: var(--text-md); color: var(--text);
+}
+
+.epick-list {
+  position: absolute; z-index: 20; left: 0; right: 0; top: calc(100% + 4px);
+  margin: 0; padding: var(--space-1); list-style: none;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius-sm); box-shadow: var(--shadow-pop);
+  max-height: 15rem; overflow-y: auto;
+}
+.epick-option {
+  display: flex; align-items: baseline; gap: var(--space-2); width: 100%;
+  padding: var(--space-2) var(--space-3); border: 0; border-radius: var(--radius-sm);
+  background: none; font: inherit; text-align: left; cursor: pointer; color: var(--text);
+}
+.epick-option.is-active { background: var(--surface-2); }
+.epick-option-email { font-size: var(--text-md); }
+.epick-option-name { font-size: var(--text-xs); color: var(--text-3); }
+.epick-error { margin: 6px 0 0; font-size: var(--text-xs); color: var(--danger); }
+.epick-note { margin: 6px 0 0; font-size: var(--text-xs); color: var(--text-3); }
+
+@media (max-width: 560px) {
+  .dtp-trigger { min-width: 0; width: 100%; }
+  /* The popover becomes the width of the field rather than overflowing it. */
+  .dtp-panel { left: 0; right: 0; }
+  .dtp-body { gap: var(--space-2); }
+  .dtp-cal { width: auto; flex: 1; min-width: 0; }
+  .dtp-times { width: 78px; padding-left: var(--space-2); }
+  .invite-actions { flex-wrap: wrap; }
+  .invite-actions .btn { flex: 1 1 100%; }
+}

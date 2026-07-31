@@ -63,6 +63,9 @@ export function ControlBar({
   capture,
   cam,
   screen,
+  // Audio output selection ({ supported, deviceId, devices, setDeviceId }).
+  // Absent or unsupported (Safari) simply hides the row.
+  speaker,
   camAvailable,
   camPublishing,
   // Non-null when a screen share cannot be admitted right now (mesh room at
@@ -135,7 +138,32 @@ export function ControlBar({
               </button>
             )}
           >
-            {({ view, open, back }) => (view === 'lang' ? (
+            {({ view, open, back }) => (view === 'speaker' && speaker ? (
+              <>
+                <MenuHeader onBack={back}>Speaker</MenuHeader>
+                <MenuItem
+                  icon={<Icon name="volume" />}
+                  className={!speaker.deviceId ? 'is-on' : ''}
+                  disabled={ended}
+                  onClick={() => { back(); speaker.setDeviceId('') }}
+                >
+                  System default
+                  {!speaker.deviceId && <span className="menu-tick"><Icon name="check" size={14} /></span>}
+                </MenuItem>
+                {speaker.devices.filter(d => d.deviceId && d.deviceId !== 'default').map((d, i) => (
+                  <MenuItem
+                    key={d.deviceId || i}
+                    icon={<Icon name="volume" />}
+                    className={speaker.deviceId === d.deviceId ? 'is-on' : ''}
+                    disabled={ended}
+                    onClick={() => { back(); speaker.setDeviceId(d.deviceId) }}
+                  >
+                    {d.label || `Speaker ${i + 1}`}
+                    {speaker.deviceId === d.deviceId && <span className="menu-tick"><Icon name="check" size={14} /></span>}
+                  </MenuItem>
+                ))}
+              </>
+            ) : view === 'lang' ? (
               <>
                 <MenuHeader onBack={back}>Language</MenuHeader>
                 {/* The globe on every row is not decoration: it is the icon
@@ -181,6 +209,22 @@ export function ControlBar({
                 >
                   Language
                 </MenuValue>
+                {/* Only when the browser can actually switch outputs (Safari
+                    cannot) — a picker that does nothing is worse than none. */}
+                {speaker?.supported && speaker.devices.length > 0 && (
+                  <MenuValue
+                    icon={<Icon name="volume" />}
+                    value={
+                      speaker.devices.find(d => d.deviceId === speaker.deviceId)?.label
+                        || 'Default'
+                    }
+                    disabled={ended}
+                    title="Which audio output the call plays through."
+                    onClick={() => open('speaker')}
+                  >
+                    Speaker
+                  </MenuValue>
+                )}
                 <MenuToggle
                   icon={<Icon name="users" />}
                   checked={stt.diarize}

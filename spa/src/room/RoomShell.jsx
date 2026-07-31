@@ -82,6 +82,7 @@ export function RoomShell({
   mic,
   cam,
   screen,
+  speaker,
   board,
   stt,
   micPrefs,
@@ -486,6 +487,7 @@ export function RoomShell({
         capture={capture}
         cam={cam}
         screen={screen}
+        speaker={speaker}
         // Only the deployment's policy — deliberately NOT whether the call is
         // live. Turning a camera on is a local act; publishing it is a separate
         // one that `useRtc` gates on its own. Requiring a live call here meant

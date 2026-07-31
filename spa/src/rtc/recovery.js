@@ -56,6 +56,23 @@ export function iceRefreshDelayMs(ttlSeconds) {
 export const ICE_REFRESH_RETRY_MS = 120_000
 
 /**
+ * Does this ICE configuration include a TURN relay? Decides how long SDP
+ * gathering may wait: on a network that needs relay, an offer posted before
+ * any relay candidate arrived can never connect — and the SFU API has no
+ * trickle channel, so what the offer carries is all the SFU will ever know.
+ */
+export function hasTurnServers(iceServers) {
+  if (!Array.isArray(iceServers)) return false
+  for (const server of iceServers) {
+    const urls = Array.isArray(server?.urls) ? server.urls : [server?.urls]
+    for (const url of urls) {
+      if (typeof url === 'string' && /^turns?:/i.test(url)) return true
+    }
+  }
+  return false
+}
+
+/**
  * Backoff for retrying a failed `/rtc/join`. Capped rather than unbounded:
  * `error` must mean "retrying in the background", never "gave up forever" —
  * a passive banner over a dead call was the old behaviour, and the only way

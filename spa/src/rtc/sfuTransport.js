@@ -1,6 +1,7 @@
 import { rtc as rtcApi } from '../api'
 import { withRetry, isFatal } from './retry.js'
 import { missingPulls, PULL_GRACE_MS } from './reconcile.js'
+import { hasTurnServers } from './recovery.js'
 
 // Cloudflare Realtime SFU transport.
 //
@@ -27,7 +28,18 @@ const TRACK_NAMES = { audio: 'mic', video: 'cam', screen: 'screen' }
 // been gathered, so sending `pc.localDescription` straight away ships an SDP
 // with no candidates in it — the session is created, the API returns 200, and
 // then no media ever flows. Wait for gathering to finish first.
+//
+// Two caps, not one: on a network that needs the relay, TURN allocation is
+// routinely the slowest gather of all — exactly the candidate the offer cannot
+// go without. So when TURN servers are configured the wait stretches (up to
+// the hard cap) until at least one relay candidate is in, instead of shipping
+// a host/srflx-only offer that connects everywhere except where it matters.
 const ICE_GATHER_TIMEOUT_MS = 3000
+const ICE_GATHER_RELAY_TIMEOUT_MS = 8000
+
+// How long an ICE restart may take before the session is declared dead and
+// rebuilt from scratch.
+const ICE_RESTART_TIMEOUT_MS = 10000
 
 // Cloudflare refuses to touch a session whose PeerConnection is not up:
 // `tracks/new` answers `410 session_error: "Session appears to be disconnected.
@@ -40,25 +52,45 @@ const CONNECT_TIMEOUT_MS = 15000
 // How long before the reconciler tries a failed publish again.
 const REPUBLISH_INTERVAL_MS = 20000
 
-function waitForIceGathering(pc) {
+function waitForIceGathering(pc, wantRelay = false) {
   if (pc.iceGatheringState === 'complete') return Promise.resolve()
   return new Promise(resolve => {
     let done = false
+    let relaySeen = false
+    let softDeadlinePassed = false
     const finish = () => {
       if (done) return
       done = true
       pc.removeEventListener('icegatheringstatechange', onChange)
-      clearTimeout(timer)
+      pc.removeEventListener('icecandidate', onCandidate)
+      clearTimeout(softTimer)
+      clearTimeout(hardTimer)
       resolve()
     }
     const onChange = () => {
       if (pc.iceGatheringState === 'complete') finish()
     }
+    const onCandidate = ev => {
+      const c = ev.candidate
+      if (!c) return
+      if (c.type === 'relay' || / typ relay(\s|$)/.test(c.candidate ?? '')) {
+        relaySeen = true
+        if (softDeadlinePassed) finish()
+      }
+    }
     pc.addEventListener('icegatheringstatechange', onChange)
+    pc.addEventListener('icecandidate', onCandidate)
     // Some networks leave a candidate source hanging (a TURN server that never
     // answers). The candidates gathered so far are usually enough, so cap the
-    // wait rather than stalling the whole call on the slowest one.
-    const timer = setTimeout(finish, ICE_GATHER_TIMEOUT_MS)
+    // wait rather than stalling the whole call on the slowest one — except
+    // that when a relay is expected and has not arrived yet, cutting it off
+    // here ships an offer that cannot work behind symmetric NAT. Then, and
+    // only then, the hard cap takes over.
+    const softTimer = setTimeout(() => {
+      softDeadlinePassed = true
+      if (!wantRelay || relaySeen) finish()
+    }, ICE_GATHER_TIMEOUT_MS)
+    const hardTimer = setTimeout(finish, ICE_GATHER_RELAY_TIMEOUT_MS)
   })
 }
 
@@ -133,11 +165,25 @@ export function createSfuTransport({ kelaboId, iceServers, onRemoteTrack, onStat
   const orphaned = new Map()
   let closed = false
   let sessionReady = false
+  // The recvonly transceiver `ensureSession` adds exists only to give the
+  // session-creating offer an m-line. Added once ever: a session POST that
+  // failed used to leave `sessionReady` false, and every retry stacked another
+  // dead m-line into every future offer.
+  let sessionTransceiverAdded = false
   let queue = Promise.resolve()
   // Reported at most once. Everything in flight when a session dies fails, and
   // a burst of identical "rebuild the call" requests would tear down the
   // replacement as fast as it was built.
   let died = false
+  // One ICE-restart attempt at a time; a second failure while one is being
+  // repaired escalates through the same attempt's timeout instead of queueing
+  // another renegotiation behind it.
+  let recovering = false
+  // The credentials currently configured, kept fresh by setIceServers (the
+  // re-mint timer in useRtc). Read both for `setConfiguration` and to decide
+  // whether an SDP gather should hold out for a relay candidate.
+  let currentIceServers = Array.isArray(iceServers) ? iceServers : []
+  const wantRelay = () => hasTurnServers(currentIceServers)
 
   /**
    * Every SFU failure lands here. Most are a bad second and belong to whoever
@@ -155,16 +201,73 @@ export function createSfuTransport({ kelaboId, iceServers, onRemoteTrack, onStat
 
   // One PeerConnection carries every peer's media here, so its state applies to
   // all of them — unlike mesh, where each peer has its own.
-  pc.addEventListener('connectionstatechange', () => onStateChange?.(null, pc.connectionState))
-  pc.addEventListener('iceconnectionstatechange', () => {
-    if (pc.iceConnectionState === 'failed') {
-      // An ICE restart is the only thing that recovers a failed checklist, and
-      // it costs one renegotiation. Without it the call sits on "connecting"
-      // forever with no explanation and no way back.
-      try { pc.restartIce?.() } catch {}
-      onError?.(new Error('ice_failed'))
-    }
+  pc.addEventListener('connectionstatechange', () => {
+    onStateChange?.(null, pc.connectionState)
+    if (pc.connectionState === 'failed') recoverConnection('connection_failed')
   })
+  pc.addEventListener('iceconnectionstatechange', () => {
+    if (pc.iceConnectionState === 'failed') recoverConnection('ice_failed')
+  })
+
+  /**
+   * A mid-call connection failure — network change, VPN toggle, a router blip
+   * longer than ICE consent, a mobile OS killing the connection in background.
+   *
+   * The ladder: a real ICE restart first (fresh credentials, an
+   * `iceRestart: true` offer through the serialized queue, the SFU's answer
+   * applied), and the fatal whole-session rebuild only if that does not reach
+   * `connected` in time. The old code called `pc.restartIce()` here and
+   * nothing else — but that only *flags* that the next offer should restart
+   * ICE, and no code path ever made that offer, so the "restart" was a no-op
+   * and the call stayed dead until someone reloaded the page. This was the
+   * single biggest violation of "the call must go on".
+   */
+  function recoverConnection(reason) {
+    if (closed || died || recovering || !sessionReady) return
+    recovering = true
+    onError?.(new Error(reason))
+    run(async () => {
+      try {
+        if (closed || died) return
+        // The blip may have healed itself while this waited in the queue.
+        if (pc.connectionState === 'connected') return
+        // Fresh TURN before regathering: past the credential TTL a restart
+        // gathers host/srflx only and fails on exactly the networks that
+        // needed the relay. Best-effort — the scheduled re-mint usually keeps
+        // these fresh already.
+        try {
+          const out = await rtcApi.ice(kelaboId)
+          if (Array.isArray(out?.iceServers) && out.iceServers.length) setIceServers(out.iceServers)
+        } catch {}
+        await pc.setLocalDescription(await pc.createOffer({ iceRestart: true }))
+        await waitForIceGathering(pc, wantRelay())
+        const res = await withRetry(() =>
+          rtcApi.sfuRenegotiate(kelaboId, { type: 'offer', sdp: pc.localDescription.sdp }),
+        )
+        await applySignal(res)
+        if (!(await waitForConnected(pc, ICE_RESTART_TIMEOUT_MS))) {
+          throw fatal(new Error('sfu_recover_failed'))
+        }
+      } catch (err) {
+        // Whatever went wrong — the SFU refusing the restart offer included —
+        // the session is not coming back this way. Escalate to the rebuild.
+        report(isFatal(err) ? err : fatal(err))
+      } finally {
+        recovering = false
+      }
+    })
+  }
+
+  /**
+   * Fresh TURN credentials from the re-mint timer (useRtc). Applied to the
+   * live connection so the next gather — an ICE restart above, or any
+   * renegotiation — still has its relay.
+   */
+  function setIceServers(next) {
+    if (closed || !Array.isArray(next) || !next.length) return
+    currentIceServers = next
+    try { pc.setConfiguration({ iceServers: next, bundlePolicy: 'max-bundle' }) } catch {}
+  }
 
   pc.addEventListener('track', ev => {
     // The SFU labels each incoming transceiver with the mid we asked for, which
@@ -243,7 +346,7 @@ export function createSfuTransport({ kelaboId, iceServers, onRemoteTrack, onStat
       if (desc.type !== 'offer') return
       await pc.setRemoteDescription(desc)
       await pc.setLocalDescription(await pc.createAnswer())
-      await waitForIceGathering(pc)
+      await waitForIceGathering(pc, wantRelay())
       await withRetry(() =>
         rtcApi.sfuRenegotiate(kelaboId, { type: 'answer', sdp: pc.localDescription.sdp }),
       )
@@ -283,9 +386,15 @@ export function createSfuTransport({ kelaboId, iceServers, onRemoteTrack, onStat
    */
   async function ensureSession() {
     if (sessionReady) return
-    pc.addTransceiver('audio', { direction: 'recvonly' })
+    // Once ever, even across failed attempts: each invocation past this guard
+    // used to add another recvonly m-line, so a session POST that failed on a
+    // bad network bloated every future offer.
+    if (!sessionTransceiverAdded) {
+      pc.addTransceiver('audio', { direction: 'recvonly' })
+      sessionTransceiverAdded = true
+    }
     await pc.setLocalDescription(await pc.createOffer())
-    await waitForIceGathering(pc)
+    await waitForIceGathering(pc, wantRelay())
     const res = await withRetry(() =>
       rtcApi.sfuSession(kelaboId, { type: 'offer', sdp: pc.localDescription.sdp }),
     )
@@ -335,7 +444,7 @@ export function createSfuTransport({ kelaboId, iceServers, onRemoteTrack, onStat
         transceiver = pc.addTransceiver(track, { direction: 'sendonly' })
         published.set(kind, transceiver.sender)
         await pc.setLocalDescription(await pc.createOffer())
-        await waitForIceGathering(pc)
+        await waitForIceGathering(pc, wantRelay())
         const res = await withRetry(() =>
           rtcApi.sfuTracks(kelaboId, {
             sessionDescription: { type: 'offer', sdp: pc.localDescription.sdp },
@@ -345,6 +454,18 @@ export function createSfuTransport({ kelaboId, iceServers, onRemoteTrack, onStat
         await applySignal(res)
         const err = trackError(res)
         if (err) throw err
+        // What was ASKED FOR may have moved while this publish was in flight —
+        // a fast camera-off, or a device switch, lands in `desired` and then
+        // hit the `publishing.has(kind)` early return above. The publish
+        // completes with the track it captured at call time, so re-read
+        // `desired` and swap; without this the stale track (sometimes an ended
+        // one — dead camera hardware) stayed on the sender until the next
+        // manual toggle, and the reconciler skipped the kind for good because
+        // `published` said it was done.
+        const wanted = desired.get(kind) ?? null
+        if (wanted !== track) {
+          try { await transceiver.sender.replaceTrack(wanted) } catch (e2) { onError?.(e2) }
+        }
         // Hold the queue until the connection is actually up. Everything behind
         // this — every pull of every peer — is an API call on this session, and
         // Cloudflare rejects those with a 410 until the PeerConnection connects,
@@ -459,7 +580,16 @@ export function createSfuTransport({ kelaboId, iceServers, onRemoteTrack, onStat
     // nothing in it.
     const now = Date.now()
     for (const [kind, track] of desired) {
-      if (!track || published.has(kind) || publishing.has(kind)) continue
+      // A sender that drifted from what was asked for — the tail end of the
+      // in-flight-publish race the repair in setLocalTrack usually catches.
+      // Cheap to check, and it makes `desired` the truth on every tick rather
+      // than only at publish time.
+      const sender = published.get(kind)
+      if (sender && !publishing.has(kind) && sender.track !== (track ?? null)) {
+        sender.replaceTrack(track ?? null).catch(err => onError?.(err))
+        continue
+      }
+      if (!track || sender || publishing.has(kind)) continue
       if (now - (publishedAt.get(kind) ?? 0) < REPUBLISH_INTERVAL_MS) continue
       setLocalTrack(kind, track)
     }
@@ -520,5 +650,5 @@ export function createSfuTransport({ kelaboId, iceServers, onRemoteTrack, onStat
     try { pc.close() } catch {}
   }
 
-  return { mode: 'sfu', setLocalTrack, pullTrack, reconcile, dropPeer, trackStatus, close, trackNames: TRACK_NAMES }
+  return { mode: 'sfu', setLocalTrack, setIceServers, pullTrack, reconcile, dropPeer, trackStatus, close, trackNames: TRACK_NAMES }
 }

@@ -277,6 +277,37 @@ person it happened to, because their own camera preview is local and keeps
 working — it is everyone else who gets a tile with a name in it and nothing
 else.
 
+**`desired` is the truth, even mid-flight.** A camera toggled off — or a device
+switched — while its *first* publish was still in flight used to be lost: the
+new value landed in `desired`, hit the in-progress guard, and nothing ever
+re-read it, so the sender kept the track captured at call time (sometimes an
+ended one) until the next manual toggle. The publish now re-reads `desired` on
+completion and swaps the sender, and the reconciler repairs any sender whose
+`track` disagrees with `desired` on every tick.
+
+### Mid-call connection failure: restart, then rebuild
+
+`connectionState`/`iceConnectionState` reaching `failed` after the session is up
+— a network change, a VPN toggle, a mobile OS killing the connection in
+background — runs a recovery ladder (`recoverConnection`): fresh TURN
+credentials (best-effort re-mint), a real ICE restart (`createOffer({
+iceRestart: true })` through the serialized queue, posted to
+`/rtc/sfu/renegotiate`, the SFU's answer applied), and, if `connected` is not
+reached within 10s or the SFU refuses the restart offer, escalation to the
+fatal whole-session rebuild. The previous code called `pc.restartIce()` here
+and nothing else — which only *flags* that the next offer should restart ICE,
+and with no code path making that offer the call stayed dead until a manual
+reload.
+
+### SDP gathering waits for the relay when one is expected
+
+The SFU API has no trickle channel, so an offer carries every candidate it will
+ever have. When the configured ICE servers include TURN (`hasTurnServers` in
+`recovery.js`), the gather wait stretches past the 3s soft cap — up to a hard
+8s — until at least one relay candidate is in. Cutting it off at 3s shipped
+host/srflx-only offers on exactly the networks where TURN allocation is slow
+because it is needed.
+
 ---
 
 ## 7. Mesh flow
@@ -352,6 +383,12 @@ microphone adds nothing and waits to be dialled.
   ```
 - **Tiles are size-agnostic.** A `<video>` fills the same box the avatar sits in,
   at grid, rail or stage size, so video changed no layout code.
+- **The speaker is selectable too** (`useSpeakerDevice` + `setSinkId` on the
+  per-peer `Audio` elements). It was the one device the room decided silently —
+  a laptop docked to a conference speaker played the call through its own lid.
+  `''` means system default; the device id is a fact about the machine and is
+  never synced (joinPrefs.js). Safari has no `setSinkId`, so the picker hides
+  itself there.
 
 **Screen share is built**, and it needed the one protocol addition this doc
 predicted. The SFU could always tell a shared screen from a camera — it names
@@ -446,6 +483,7 @@ the TURN half, STUN alone is used and only relay-requiring peers fail to connect
 | Half-open SSE socket | `useBoard`'s watchdog notices a minute without events (the named `ping` makes silence observable) and resubscribes |
 | Evicted while unaware (second tab left, slept through it) | Self-addressed `peer_left`, a `409` from `/rtc/media`, or absence from the roster snapshot each trigger a clean rejoin — a ghost tab heals in seconds instead of never |
 | Mesh peer connection fails | ICE restart, then capped rebuilds (`recovery.js`); the budget refills on `connected` and with time. Every peer failing at once escalates to a whole-call rebuild via `onFatal` |
+| SFU connection fails mid-call | Recovery ladder (§6): fresh TURN, real ICE restart via `/rtc/sfu/renegotiate`, then the fatal session rebuild if not `connected` within 10s |
 | Call older than the TURN TTL | Credentials re-minted at 80% of TTL via `/rtc/ice` and applied with `setConfiguration`, so ICE restarts keep their relay |
 | Tab killed / hard close | `pagehide` beacon posts `/rtc/leave`; the SSE close (and its grace window) remains the backstop |
 | Cloudflare session dies (`session_error`) | Not retried — the call is rebuilt around a new session, backed off, three attempts, then `error` (which retries, see above) |

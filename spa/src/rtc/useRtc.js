@@ -31,7 +31,7 @@ const STREAM_GRACE_MS = 15_000
  *           videoStream?: MediaStream|null, muted?: boolean,
  *           streamLive?: boolean }} opts
  */
-export function useRtc({ kelaboId, enabled, stream, videoStream = null, screenStream = null, muted = false, streamLive = false }) {
+export function useRtc({ kelaboId, enabled, stream, videoStream = null, screenStream = null, muted = false, streamLive = false, sinkId = '' }) {
   const [state, setState] = useState('idle') // idle | joining | live | full | unavailable | error
   const [mode, setMode] = useState(null)
   const [peers, setPeers] = useState([])
@@ -622,14 +622,21 @@ export function useRtc({ kelaboId, enabled, stream, videoStream = null, screenSt
   // shown muted rather than having to speak to prove otherwise.
   const cameraOn = !!(videoAllowed && videoStream?.getVideoTracks()[0])
   useEffect(() => {
-    if (state !== 'live') return
-    // A 409 is not noise: it says the Gateway has no seat for us — evicted
-    // while we could not hear it — and this once-per-toggle report is a free
-    // liveness probe. Swallowing it is what let a ghost tab sit healthy-looking
-    // for the rest of the kelabo.
-    rtcApi.media(kelaboId, { audio: !muted, video: cameraOn }).catch(err => {
-      if (err?.status === 409) rejoinAfterEviction()
-    })
+    if (state !== 'live') return undefined
+    // Debounced: the state is absolute, so last-write-wins is safe, and
+    // mute-spam otherwise turns into a POST burst that fans a room-wide SSE
+    // event per keypress. (The mesh screen admission is deliberately NOT
+    // debounced — that one is a capacity request, not a report.)
+    const t = setTimeout(() => {
+      // A 409 is not noise: it says the Gateway has no seat for us — evicted
+      // while we could not hear it — and this once-per-toggle report is a free
+      // liveness probe. Swallowing it is what let a ghost tab sit
+      // healthy-looking for the rest of the kelabo.
+      rtcApi.media(kelaboId, { audio: !muted, video: cameraOn }).catch(err => {
+        if (err?.status === 409) rejoinAfterEviction()
+      })
+    }, 200)
+    return () => clearTimeout(t)
   }, [state, kelaboId, muted, cameraOn, rejoinAfterEviction])
 
   // --- signalling from the kelabo's SSE stream -----------------------------
@@ -762,6 +769,14 @@ export function useRtc({ kelaboId, enabled, stream, videoStream = null, screenSt
         el.playsInline = true
         els.set(participantId, el)
       }
+      // The chosen speaker ('' = system default). Feature-detected — Safari
+      // has no setSinkId — and best-effort: a device that was unplugged since
+      // it was chosen falls back to the default rather than muting the call.
+      if (el.setSinkId && el.kelaboSinkId !== sinkId) {
+        el.setSinkId(sinkId)
+          .then(() => { el.kelaboSinkId = sinkId })
+          .catch(() => {})
+      }
       if (el.srcObject !== ms) el.srcObject = ms
       el.play().catch(() => setNeedsUnblock(true))
     }
@@ -770,7 +785,7 @@ export function useRtc({ kelaboId, enabled, stream, videoStream = null, screenSt
       el.srcObject = null
       els.delete(participantId)
     }
-  }, [remoteStreams])
+  }, [remoteStreams, sinkId])
 
   useEffect(() => {
     const els = audioElsRef.current

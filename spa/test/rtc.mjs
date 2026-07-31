@@ -8,6 +8,7 @@ import {
   shouldRebuildCall,
   iceRefreshDelayMs,
   joinRetryDelayMs,
+  hasTurnServers,
 } from '../src/rtc/recovery.js'
 
 /**
@@ -258,6 +259,26 @@ test('join retries back off and cap', () => {
 test('a nonsense attempt count is treated as the first attempt', () => {
   assert.equal(joinRetryDelayMs(-3), 2000)
   assert.equal(joinRetryDelayMs(NaN), 2000)
+})
+
+// --- recovery: TURN detection -----------------------------------------------
+// Decides whether an SDP gather should hold out for a relay candidate: on a
+// network that needs the relay, an offer without one can never connect, and
+// the SFU API has no trickle channel to add it later.
+
+test('turn and turns urls are recognised, string or array', () => {
+  assert.equal(hasTurnServers([{ urls: 'turn:turn.example.com:3478' }]), true)
+  assert.equal(hasTurnServers([{ urls: 'turns:turn.example.com:5349?transport=tcp' }]), true)
+  assert.equal(hasTurnServers([{ urls: ['stun:stun.example.com', 'turn:turn.example.com'] }]), true)
+  assert.equal(hasTurnServers([{ urls: 'TURN:upper.example.com' }]), true, 'schemes are case-insensitive')
+})
+
+test('stun-only, empty or malformed configurations have no relay', () => {
+  assert.equal(hasTurnServers([{ urls: 'stun:stun.cloudflare.com:3478' }]), false)
+  assert.equal(hasTurnServers([]), false)
+  assert.equal(hasTurnServers(undefined), false)
+  assert.equal(hasTurnServers([{}, { urls: null }, null]), false)
+  assert.equal(hasTurnServers([{ urls: 'stunturn:not-a-scheme' }]), false)
 })
 
 for (const [name, fn] of tests) {

@@ -32,9 +32,18 @@ import { useEffect, useRef } from 'react'
  *     per re-render before anything happens, which looks exactly like the guard
  *     not working at all.
  */
-export function useLeaveGuard({ enabled, confirm, onLeave }) {
+/**
+ * `unloadEnabled` relaxes the reload/close prompt independently of the Back
+ * guard: a room whose call is in `error` has nothing a reload would lose that
+ * a reload would not also fix, and taxing the one action the user is about to
+ * take with a browser dialog only teaches them to click through it. Defaults
+ * to `enabled`.
+ */
+export function useLeaveGuard({ enabled, unloadEnabled = enabled, confirm, onLeave }) {
   const enabledRef = useRef(enabled)
   enabledRef.current = enabled
+  const unloadEnabledRef = useRef(unloadEnabled)
+  unloadEnabledRef.current = unloadEnabled
   const confirmRef = useRef(confirm)
   confirmRef.current = confirm
   const onLeaveRef = useRef(onLeave)
@@ -65,7 +74,7 @@ export function useLeaveGuard({ enabled, confirm, onLeave }) {
     // Reload and tab-close are the one exit no dialog of ours can precede — the
     // browser owns that prompt, and only offers it if the page says it is busy.
     const onUnload = e => {
-      if (!enabledRef.current) return
+      if (!enabledRef.current || !unloadEnabledRef.current) return
       e.preventDefault()
       e.returnValue = ''
     }

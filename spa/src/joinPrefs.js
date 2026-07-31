@@ -22,6 +22,7 @@ const KEYS = {
   camera: 'kelabo-join-camera',
   micDevice: 'kelabo-mic-device',
   camDevice: 'kelabo-camera-device',
+  speakerDevice: 'kelabo-speaker-device',
 }
 
 /** Synced via settings.js; the device ids deliberately are not. */
@@ -37,6 +38,9 @@ export function joinPrefs() {
     camera: localStorage.getItem(KEYS.camera) === '1',
     micDevice: localStorage.getItem(KEYS.micDevice) || '',
     camDevice: localStorage.getItem(KEYS.camDevice) || '',
+    // '' means the system default output. A device id, like the two above, is
+    // a fact about this machine and is never synced.
+    speakerDevice: localStorage.getItem(KEYS.speakerDevice) || '',
   }
 }
 

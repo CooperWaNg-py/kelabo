@@ -15,6 +15,7 @@ import { useHiddenMute } from '../capture/useHiddenMute'
 import { useMicStream } from '../rtc/useMicStream'
 import { useCameraStream } from '../rtc/useCameraStream'
 import { useScreenShare } from '../rtc/useScreenShare'
+import { useSpeakerDevice } from '../rtc/useSpeakerDevice'
 import { useRtc } from '../rtc/useRtc'
 import { useBoard } from '../room/useBoard'
 import { RoomShell } from '../room/RoomShell'
@@ -102,6 +103,9 @@ export default function Kelabo() {
   // Sharing is off until asked for, and the browser's own "Stop sharing" bar
   // is authoritative — see useScreenShare.
   const screen = useScreenShare({ enabled: onCall && !!kelabo })
+  // Which output the call plays through ('' = system default). The one device
+  // the room used to decide silently.
+  const speaker = useSpeakerDevice()
 
   const capture = useCapture({
     kelaboId: id,
@@ -141,6 +145,7 @@ export default function Kelabo() {
     screenStream: screen.stream,
     muted: capture.muted,
     streamLive: streamStatus === 'live',
+    sinkId: speaker.deviceId,
   })
 
   // A share the Gateway refused — a mesh room at its participants-plus-shares
@@ -307,7 +312,10 @@ export default function Kelabo() {
   }
 
   // The browser's own Back gets the same question the arrow does (notes #2).
-  useLeaveGuard({ enabled: !ended, confirm: confirmLeave, onLeave: leave })
+  // The reload/close prompt stands down while the call is in `error`: with the
+  // call already down there is nothing a reload loses, and it used to tax the
+  // exact action that recovers.
+  useLeaveGuard({ enabled: !ended, unloadEnabled: !ended && call.state !== 'error', confirm: confirmLeave, onLeave: leave })
 
   const endKelabo = async () => {
     const ok = await confirm({
@@ -342,6 +350,7 @@ export default function Kelabo() {
         mic={mic}
         cam={cam}
         screen={screen}
+        speaker={speaker}
         board={board}
         diarize={diarize}
         stt={{

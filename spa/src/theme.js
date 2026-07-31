@@ -69,3 +69,29 @@ export function setScheme(scheme) {
 export function themeIcon() {
   return currentTheme() === 'dark' ? 'sun' : 'moon'
 }
+
+/**
+ * Show a random scheme + light/dark on the login page — a shop window for the
+ * palettes. Preview only: nothing is written to localStorage, so the person's
+ * chosen appearance (or the boot default) comes back the moment they leave.
+ */
+export function previewRandomAppearance() {
+  const scheme = SCHEMES[Math.floor(Math.random() * SCHEMES.length)].id
+  const theme = Math.random() < 0.5 ? 'dark' : 'light'
+  document.documentElement.dataset.scheme = scheme
+  document.documentElement.dataset.theme = theme
+  syncThemeColor()
+  return { scheme, theme }
+}
+
+/** Re-apply the saved appearance, mirroring the boot script in index.html. */
+export function restoreSavedAppearance() {
+  const storedTheme = localStorage.getItem('kelabo-theme')
+  document.documentElement.dataset.theme =
+    storedTheme || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
+  const storedScheme = localStorage.getItem('kelabo-scheme')
+  document.documentElement.dataset.scheme = SCHEMES.some(x => x.id === storedScheme)
+    ? storedScheme
+    : DEFAULT_SCHEME
+  syncThemeColor()
+}

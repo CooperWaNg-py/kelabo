@@ -9,6 +9,7 @@ import { Banner } from '../components/ui/Banner'
 import { Button } from '../components/ui/Button'
 import { useToast } from '../components/Toaster'
 import { useTypeAnywhere } from '../useTypeAnywhere'
+import { previewRandomAppearance, restoreSavedAppearance } from '../theme'
 
 function otpErrorMessage(err) {
   switch (err?.code) {
@@ -49,6 +50,13 @@ export default function Login() {
   useEffect(() => {
     if (!loading && identity) navigate('/', { replace: true })
   }, [loading, identity, navigate])
+
+  // Each visit to the sign-in page wears a random palette — a shop window for
+  // the schemes. Preview only: leaving the page restores the saved appearance.
+  useEffect(() => {
+    previewRandomAppearance()
+    return restoreSavedAppearance
+  }, [])
 
   useEffect(() => () => clearInterval(timerRef.current), [])
 

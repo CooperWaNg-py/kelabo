@@ -9,7 +9,7 @@ import { Drawer } from '../components/ui/Drawer'
 import { Button } from '../components/ui/Button'
 import { Icon } from '../components/ui/Icon'
 import { Modal } from '../components/ui/Modal'
-import { themeIcon, toggleTheme } from '../theme'
+import { currentScheme, setScheme, themeIcon, toggleTheme } from '../theme'
 import { useCapture } from '../capture/useCapture'
 import { useHiddenMute } from '../capture/useHiddenMute'
 import { useMicStream } from '../rtc/useMicStream'
@@ -45,6 +45,7 @@ export default function Kelabo() {
   const [loadError, setLoadError] = useState(false)
   const [ended, setEnded] = useState(false)
   const [icon, setIcon] = useState(themeIcon())
+  const [scheme, setSchemeState] = useState(currentScheme())
   const [finalOnly, setFinalOnly] = useState(localStorage.getItem('kelabo-final-only') === '1')
   const [sttLang, setSttLang] = useState(localStorage.getItem('kelabo-stt-lang') || 'en')
   // Speaker diarization always starts off for each kelabo — opt in per kelabo.
@@ -359,6 +360,8 @@ export default function Kelabo() {
         onBack={back}
         onEndKelabo={endKelabo}
         onToggleTheme={() => { toggleTheme(); setIcon(themeIcon()); pushSettings() }}
+        onScheme={id => { setSchemeState(setScheme(id)); pushSettings() }}
+        scheme={scheme}
         themeIcon={icon}
       />
 

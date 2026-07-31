@@ -3,6 +3,7 @@ import { Icon } from '../components/ui/Icon'
 import { Menu, MenuHeader, MenuItem, MenuToggle, MenuValue } from '../components/ui/Menu'
 import { ConnStatus } from './ConnStatus'
 import { LAYOUTS } from './layouts'
+import { SCHEMES } from '../theme'
 
 /**
  * Every control in the room, in one row.
@@ -78,6 +79,8 @@ export function ControlBar({
   onCopyInvite,
   onGenerateMinutes,
   onToggleTheme,
+  onScheme,
+  scheme,
   themeIcon,
   onHold,
   conn,
@@ -348,15 +351,55 @@ export function ControlBar({
             that arrives suddenly — a window moved onto a bright screen, a
             recording about to start — and two clicks through a "more" menu is
             two more than that is worth. The icon names where it goes, not what
-            it does. */}
-        <button
-          className="cbtn"
-          title={themeIcon === 'sun' ? 'Switch to the light theme' : 'Switch to the dark theme'}
-          aria-label={themeIcon === 'sun' ? 'Switch to the light theme' : 'Switch to the dark theme'}
-          onClick={onToggleTheme}
-        >
-          <Icon name={themeIcon} size={18} />
-        </button>
+            it does. The palette sits behind its chevron, like every other
+            set-once setting in this bar — and it is the only way to reach one
+            for anyone who cannot open Settings. */}
+        <div className="cbar-pair">
+          <button
+            className="cbtn"
+            title={themeIcon === 'sun' ? 'Switch to the light theme' : 'Switch to the dark theme'}
+            aria-label={themeIcon === 'sun' ? 'Switch to the light theme' : 'Switch to the dark theme'}
+            onClick={onToggleTheme}
+          >
+            <Icon name={themeIcon} size={18} />
+          </button>
+          <Menu
+            ariaLabel="Choose a colour palette"
+            onOpenChange={onHold}
+            renderTrigger={props => (
+              <button className="cbtn cbtn-chev" title="Colour palette" {...props}>
+                <Icon name="chevron-up" size={14} />
+              </button>
+            )}
+          >
+            {({ close }) => (
+              <>
+                <MenuHeader>Palette</MenuHeader>
+                {SCHEMES.map(sch => (
+                  <MenuItem
+                    key={sch.id}
+                    icon={
+                      // Each row previews its own palette by rendering the
+                      // swatches inside a nested data-scheme — the same trick
+                      // Settings uses, so no colour value is restated in JS.
+                      <span className="scheme-swatches scheme-swatches-sm" data-scheme={sch.id} aria-hidden="true">
+                        <span className="scheme-sw scheme-sw-bg"></span>
+                        <span className="scheme-sw scheme-sw-accent"></span>
+                        <span className="scheme-sw scheme-sw-text"></span>
+                      </span>
+                    }
+                    className={scheme === sch.id ? 'is-on' : ''}
+                    title={sch.hint}
+                    onClick={() => { close(); onScheme(sch.id) }}
+                  >
+                    {sch.label}
+                    {scheme === sch.id && <span className="menu-tick"><Icon name="check" size={14} /></span>}
+                  </MenuItem>
+                ))}
+              </>
+            )}
+          </Menu>
+        </div>
         <button
           className={'cbtn' + (debugOn ? ' is-on' : '')}
           aria-pressed={debugOn}

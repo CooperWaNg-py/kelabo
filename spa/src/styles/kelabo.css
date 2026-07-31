@@ -2118,6 +2118,9 @@ h5.md-h, h6.md-h { font-size: var(--text-sm); color: var(--text-2); }
 .scheme-sw-surface { background: var(--surface-3); }
 .scheme-sw-accent { background: var(--accent); flex: 1.6; }
 .scheme-sw-text { background: var(--text-2); }
+/* The same swatch strip at icon size, for the room's palette menu — the one
+   place a guest (who has no Settings page) can pick a scheme. */
+.scheme-swatches-sm { width: 1.125rem; height: 1.125rem; border-radius: var(--radius-xs); }
 .settings-row .sr-main { flex: 1; min-width: 0; }
 /* the control cluster on the right of a settings row */
 /* a note or preview panel that follows a settings row */

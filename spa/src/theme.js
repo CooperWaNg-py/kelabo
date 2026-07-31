@@ -71,11 +71,25 @@ export function themeIcon() {
 }
 
 /**
+ * Has this browser ever been told what to look like? Either half counts: the
+ * room's appearance picker and Settings both write these, so once someone has
+ * expressed a preference we have one to respect.
+ */
+export function hasChosenAppearance() {
+  return !!(localStorage.getItem('kelabo-theme') || localStorage.getItem('kelabo-scheme'))
+}
+
+/**
  * Show a random scheme + light/dark on the login page — a shop window for the
  * palettes. Preview only: nothing is written to localStorage, so the person's
  * chosen appearance (or the boot default) comes back the moment they leave.
+ *
+ * Skipped entirely once the person has chosen an appearance: a shop window is
+ * for people who have not picked yet, and overriding a deliberate choice —
+ * even for one page — reads as the app losing the setting.
  */
 export function previewRandomAppearance() {
+  if (hasChosenAppearance()) return null
   const scheme = SCHEMES[Math.floor(Math.random() * SCHEMES.length)].id
   const theme = Math.random() < 0.5 ? 'dark' : 'light'
   document.documentElement.dataset.scheme = scheme

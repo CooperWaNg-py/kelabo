@@ -94,6 +94,8 @@ export function RoomShell({
   onBack,
   onEndKelabo,
   onToggleTheme,
+  onScheme,
+  scheme,
   themeIcon,
 }) {
   const [layout, setLayoutState] = useState(loadLayout)
@@ -499,6 +501,8 @@ export function RoomShell({
         onCopyInvite={onCopyInvite}
         onGenerateMinutes={onGenerateMinutes}
         onToggleTheme={onToggleTheme}
+        onScheme={onScheme}
+        scheme={scheme}
         themeIcon={themeIcon}
         onHold={chrome.hold}
         conn={{

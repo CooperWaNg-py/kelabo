@@ -48,8 +48,14 @@ certUse1.addDependency(dns);
 
 const ddb = new DynamoDbStack(app, `${prefix}-ddb`, { ...synthProps, env: homeEnv, cfg });
 
-const ses = new SesStack(app, `${prefix}-ses`, { ...synthProps, env: homeEnv, cfg, zone: dns.zone });
-ses.addDependency(dns);
+// SES email identities are account+region scoped. When several envs send from
+// the same domain, exactly one of them owns the identity; the others set
+// ses.createIdentity: false and just use it (the send permission in the lambda
+// stack is identity-independent).
+if (cfg.ses.createIdentity !== false) {
+  const ses = new SesStack(app, `${prefix}-ses`, { ...synthProps, env: homeEnv, cfg, zone: dns.zone });
+  ses.addDependency(dns);
+}
 
 const lambda = new LambdaStack(app, `${prefix}-lambda`, {
   ...synthProps,

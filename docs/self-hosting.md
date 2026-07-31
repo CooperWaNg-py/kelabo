@@ -124,6 +124,7 @@ All configuration is one file. Nothing anywhere else needs editing.
    | `environments.<env>.subdomains.portal` / `gateway` | e.g. `kelabo` and `gw.kelabo` → `kelabo.mycompany.com`, `gw.kelabo.mycompany.com` |
    | `environments.<env>.allowedEmailDomain` | e.g. `mycompany.com` — **this is your tenant boundary**: only addresses at this domain can sign in, and everyone at it is one organisation |
    | `environments.<env>.ses.fromAddress` | e.g. `kelabo@mycompany.com` — where sign-in codes come from |
+   | `environments.<env>.ses.createIdentity` | leave unset. Set `false` only when another env in the same account already verified the sending domain (SES identities are account-scoped; two stacks can't create the same one) |
 
    Leave `auth.socialProviders` as `[]` — work-email sign-in is the
    self-hosting identity path. (Google/Apple sign-in requires registering

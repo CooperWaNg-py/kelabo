@@ -1,5 +1,6 @@
 import { RTC_MODES } from "@kelabo/contracts";
 import { getMeta } from "../db.js";
+import { meshHasRoom, meshUnits } from "./capacity.js";
 
 // Per-kelabo conference presence. Deliberately in-process and unpersisted, for
 // the same reason as sseSubscribers: it is a view of who currently holds a live
@@ -19,18 +20,42 @@ import { getMeta } from "../db.js";
 
 export function createRtcRoom(c) {
   const meshMax = c.config.rtc.meshMaxParticipants;
+  const disconnectGraceMs = Math.max(0, (c.config.rtc.disconnectGraceSeconds ?? 0) * 1000);
+  // `${kelaboId}\n${participantId}` -> pending eviction timer. A participant
+  // whose last SSE stream closed keeps their seat for the grace window, so an
+  // EventSource blip or a reload is invisible to the room instead of a full
+  // peer_left / peer_joined churn.
+  const disconnectTimers = new Map();
+  const timerKey = (kelaboId, participantId) => `${kelaboId}\n${participantId}`;
 
   function room(kelaboId) {
     return c.state.rtcRooms.get(kelaboId) ?? null;
   }
 
-  /** Resolve (and cache) the kelabo's transport from its META. */
+  /**
+   * Resolve (and cache) the kelabo's transport from its META.
+   *
+   * Fails CLOSED: if the META cannot be read and the room is not in memory,
+   * this throws rather than falling back to the default mode. The default is
+   * `sfu`, so guessing here would silently move a mesh kelabo — whose whole
+   * point is that no server can decrypt the media — onto Cloudflare's SFU on
+   * nothing more than a DynamoDB blip during a rejoin into an empty room.
+   * A missing `rtcMode` on a META that *was* read is different: that is a
+   * kelabo predating the field, and the default is correct for it.
+   */
   async function modeFor(kelaboId) {
     const existing = room(kelaboId);
     if (existing) return existing.mode;
-    const meta = await getMeta(c, kelaboId).catch(() => null);
-    const mode = RTC_MODES.includes(meta?.rtcMode) ? meta.rtcMode : c.config.rtc.defaultMode;
-    return mode;
+    let meta;
+    try {
+      meta = await getMeta(c, kelaboId);
+    } catch (err) {
+      c.logError("rtc_mode_unresolved", err, { kelaboId });
+      const e = new Error("rtc mode unresolved");
+      e.code = "rtc_mode_unavailable";
+      throw e;
+    }
+    return RTC_MODES.includes(meta?.rtcMode) ? meta.rtcMode : c.config.rtc.defaultMode;
   }
 
   function ensureRoom(kelaboId, mode) {
@@ -71,14 +96,23 @@ export function createRtcRoom(c) {
    *          | { ok:false, code:string, status:number, detail?:object }}
    */
   async function join({ kelaboId, participantId, displayName, avatarVariant, isGuest }) {
-    const mode = await modeFor(kelaboId);
+    let mode;
+    try {
+      mode = await modeFor(kelaboId);
+    } catch {
+      // Retryable by design (5xx): the client's join retry gets another chance
+      // once the META is readable again, instead of a silent mode downgrade.
+      return { ok: false, code: "rtc_mode_unavailable", status: 503 };
+    }
     const r = ensureRoom(kelaboId, mode);
 
     const rejoining = r.peers.has(participantId);
     // Mesh is a hard cap, not a soft one: silently spilling over to the SFU
     // would revoke the peer-to-peer guarantee the host chose, so the join is
-    // refused instead. Rejoining an existing seat never counts against it.
-    if (r.mode === "mesh" && !rejoining && r.peers.size >= meshMax) {
+    // refused instead. Counted in units — participants plus active screen
+    // shares (see capacity.js). Rejoining an existing seat never counts
+    // against it.
+    if (!rejoining && !meshHasRoom({ mode: r.mode, meshMax, units: meshUnits(r.peers.values()) })) {
       return { ok: false, code: "mesh_room_full", status: 409, detail: { meshMax } };
     }
 
@@ -89,17 +123,26 @@ export function createRtcRoom(c) {
       isGuest: !!isGuest,
       sfuSessionId: undefined,
       tracks: {},
-      // Switched on until told otherwise, for both: "on" is the value that
-      // makes the tiles behave exactly as they did before this field existed,
-      // reading the track and nothing else. Defaulting to "off" would put a
-      // mic badge on everyone for the moment between joining and their first
-      // report, and — worse during a rollout — would hide the camera of any
-      // peer still on a bundle that does not know to report at all.
-      media: { audio: true, video: true },
+      // Mic and camera switched on until told otherwise, for both: "on" is the
+      // value that makes the tiles behave exactly as they did before this field
+      // existed, reading the track and nothing else. Defaulting to "off" would
+      // put a mic badge on everyone for the moment between joining and their
+      // first report, and — worse during a rollout — would hide the camera of
+      // any peer still on a bundle that does not know to report at all.
+      //
+      // `screen` starts OFF, unlike the other two: nobody shares by default,
+      // and in mesh mode a share occupies a capacity unit, which must never be
+      // taken by a peer who merely joined.
+      media: { audio: true, video: true, screen: false },
       joinedAt: Date.now(),
     };
     self.displayName = displayName || self.displayName;
     r.peers.set(participantId, self);
+    // A rejoin lands here while an eviction may still be pending from the old
+    // page's SSE close (reload, or a rejoin during the grace window). The seat
+    // was just retaken; evicting it on the old stream's schedule would delete
+    // the peer record out from under the new page.
+    clearDisconnectTimer(kelaboId, participantId);
 
     // The joiner gets the roster in its /rtc/join response; everyone already in
     // the room learns about them here. Peers decide who dials whom (mesh) or
@@ -159,26 +202,43 @@ export function createRtcRoom(c) {
   }
 
   /**
-   * Record whether this participant's microphone and camera are switched on,
-   * and tell the room if it changed.
+   * Record whether this participant's microphone, camera and screen share are
+   * switched on, and tell the room if it changed.
    *
    * Deliberately separate from `announceTracks`. A published track and a
    * switched-on device are different facts with different lifetimes: the track
    * stays negotiated for the whole kelabo precisely so that toggling a camera
    * costs nothing, so "is there a track" cannot answer "is it on".
+   *
+   * `screen: true` is an *admission request* in a mesh room, not just a report:
+   * the Gateway never sees mesh media or SDP, so this is the only gate at which
+   * the participants-plus-shares cap can hold. A full room refuses the share
+   * and the client must not publish it.
+   *
+   * @returns {{ ok:true, peer:Peer } | { ok:false, code:string, status:number,
+   *            detail?:object } | null}  null when the caller has no seat.
    */
   function setMedia(kelaboId, participantId, media) {
-    const p = peer(kelaboId, participantId);
+    const r = room(kelaboId);
+    const p = r?.peers.get(participantId) ?? null;
     if (!p) return null;
+    if (
+      media.screen === true &&
+      !p.media.screen &&
+      !meshHasRoom({ mode: r.mode, meshMax, units: meshUnits(r.peers.values()) })
+    ) {
+      c.log("rtc_screen_refused", { kelaboId, participantId, meshMax });
+      return { ok: false, code: "mesh_room_full", status: 409, detail: { meshMax } };
+    }
     let changed = false;
-    for (const kind of ["audio", "video"]) {
+    for (const kind of ["audio", "video", "screen"]) {
       const next = media[kind];
       if (typeof next !== "boolean" || p.media[kind] === next) continue;
       p.media[kind] = next;
       changed = true;
     }
     if (changed) c.sseHub.rtc(kelaboId, { kind: "media", peer: toWire(p) });
-    return p;
+    return { ok: true, peer: p };
   }
 
   /**
@@ -196,11 +256,19 @@ export function createRtcRoom(c) {
 
   /** Remove a participant and tell the room. Idempotent. */
   async function leave(kelaboId, participantId, reason = "left") {
+    clearDisconnectTimer(kelaboId, participantId);
     const r = room(kelaboId);
     const p = r?.peers.get(participantId);
     if (!p) return false;
     r.peers.delete(participantId);
     if (!r.peers.size) c.state.rtcRooms.delete(kelaboId);
+
+    // The room hears about the departure FIRST. The Cloudflare cleanup below
+    // carries two 10s timeouts; awaiting it before the broadcast held
+    // everyone's roster hostage to a slow third-party API for a fact — the
+    // peer is gone — that was already true.
+    c.sseHub.rtc(kelaboId, { kind: "peer_left", participantId, reason });
+    c.log("rtc_leave", { kelaboId, participantId, reason, peers: r.peers.size });
 
     // Best-effort: the SFU also expires idle sessions on its own, so a failure
     // here costs nothing but a little lingering state on Cloudflare's side.
@@ -213,24 +281,65 @@ export function createRtcRoom(c) {
         c.logError("rtc_session_close_failed", err, { kelaboId, participantId });
       }
     }
-
-    c.sseHub.rtc(kelaboId, { kind: "peer_left", participantId, reason });
-    c.log("rtc_leave", { kelaboId, participantId, reason, peers: r.peers.size });
     return true;
   }
 
-  // Called by sseHub when a participant's event stream closes. Losing the SSE
-  // stream is the only liveness signal we get — /rtc/leave fires on a clean
+  function clearDisconnectTimer(kelaboId, participantId) {
+    const key = timerKey(kelaboId, participantId);
+    const t = disconnectTimers.get(key);
+    if (!t) return false;
+    clearTimeout(t);
+    disconnectTimers.delete(key);
+    return true;
+  }
+
+  // Called by sseHub when a participant's LAST event stream closes. Losing the
+  // SSE stream is the only liveness signal we get — /rtc/leave fires on a clean
   // exit, but a closed laptop or a killed tab never sends it.
+  //
+  // Eviction is deferred by the grace window rather than immediate: an
+  // EventSource drop of a second or two is routine (mobile, proxies, reloads),
+  // and evicting on it cost the whole room a peer_left/peer_joined cycle and a
+  // full renegotiation for a participant who never left. During the window the
+  // room sees `peer_away`; a resubscribe cancels the timer (see `subscribe` in
+  // sseHub.js) and fans `peer_back`.
   function handleDisconnect(kelaboId, participantId) {
     if (!peer(kelaboId, participantId)) return;
-    leave(kelaboId, participantId, "disconnected").catch((err) =>
-      c.logError("rtc_disconnect_cleanup_failed", err, { kelaboId, participantId }),
-    );
+    const evict = () =>
+      leave(kelaboId, participantId, "disconnected").catch((err) =>
+        c.logError("rtc_disconnect_cleanup_failed", err, { kelaboId, participantId }),
+      );
+    if (disconnectGraceMs <= 0) {
+      evict();
+      return;
+    }
+    const key = timerKey(kelaboId, participantId);
+    if (disconnectTimers.has(key)) return;
+    const timer = setTimeout(() => {
+      disconnectTimers.delete(key);
+      evict();
+    }, disconnectGraceMs);
+    timer.unref?.();
+    disconnectTimers.set(key, timer);
+    c.sseHub.rtc(kelaboId, { kind: "peer_away", participantId });
+    c.log("rtc_peer_away", { kelaboId, participantId, graceMs: disconnectGraceMs });
+  }
+
+  /** The participant's stream came back inside the grace window. */
+  function cancelDisconnect(kelaboId, participantId) {
+    if (!clearDisconnectTimer(kelaboId, participantId)) return;
+    c.sseHub.rtc(kelaboId, { kind: "peer_back", participantId });
+    c.log("rtc_peer_back", { kelaboId, participantId });
   }
 
   /** Kelabo ended: drop the whole room. The `ended` SSE event is sent separately. */
   function closeKelabo(kelaboId) {
+    for (const key of [...disconnectTimers.keys()]) {
+      if (key.startsWith(`${kelaboId}\n`)) {
+        clearTimeout(disconnectTimers.get(key));
+        disconnectTimers.delete(key);
+      }
+    }
     const r = room(kelaboId);
     if (!r) return;
     c.state.rtcRooms.delete(kelaboId);
@@ -241,6 +350,7 @@ export function createRtcRoom(c) {
     join,
     leave,
     handleDisconnect,
+    cancelDisconnect,
     closeKelabo,
     roster,
     peer,

@@ -50,8 +50,16 @@ export function loadConfig(env,   configPath = join(here, "kelabo.json")) {
   const rtc = {
     provider: "cloudflare",
     defaultMode: "sfu",
-    meshMaxParticipants: 6,
+    // Mesh only. Counted in *units*: each participant is one, each active
+    // screen share is one more — a share is an extra uplink to every peer,
+    // which is what the cap exists to bound. SFU rooms are not capped.
+    meshMaxParticipants: 5,
     iceTtlSeconds: 3600,
+    // How long a participant whose last SSE stream closed keeps their seat
+    // before being evicted. Bridges the reload / brief-network-blip gap so the
+    // room does not churn; the client holds its transport for slightly less
+    // (see spa/src/rtc/useRtc.js) so the two windows must move together.
+    disconnectGraceSeconds: 20,
     // Camera video is built (docs 15 §8). A deployment can still turn it off —
     // the flag reaches the SPA on the /rtc/join response and hides the control
     // rather than letting someone publish a track nobody wants paid for.

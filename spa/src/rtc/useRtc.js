@@ -1,7 +1,18 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { rtc as rtcApi } from '../api'
+import { config } from '../config'
 import { createSfuTransport } from './sfuTransport'
 import { createMeshTransport } from './meshTransport'
+import { withRetry } from './retry.js'
+import { iceRefreshDelayMs, joinRetryDelayMs } from './recovery.js'
+
+// How long the call outlives a dropped SSE stream before tearing down. Must
+// stay BELOW the Gateway's rtc.disconnectGraceSeconds (default 20s): a client
+// that holds its session past the server's eviction is a ghost — its peer
+// record is gone and every /rtc call answers 409. Inside the window the
+// transport keeps running; EventSource reconnects on its own and the
+// reconcile loop repairs whatever drifted.
+const STREAM_GRACE_MS = 15_000
 
 // The conference call, independent of which transport carries it.
 //
@@ -49,11 +60,27 @@ export function useRtc({ kelaboId, enabled, stream, videoStream = null, screenSt
   // Browsers block autoplay of remote audio until the page has been interacted
   // with; when that happens the UI offers a button that calls `unblock`.
   const [needsUnblock, setNeedsUnblock] = useState(false)
-  // Bumped to rebuild the whole call around a new SFU session. The join effect
+  // Bumped to rebuild the whole call around a new session. The join effect
   // keys on it, so this tears the transport down and rejoins exactly as a page
   // reload would — which until now was the only way out of a dead session, and
   // nobody was ever told to try it.
   const [generation, setGeneration] = useState(0)
+  // Peers whose SSE stream dropped and whose seat the Gateway is holding open
+  // (`peer_away` … `peer_back`). Their tiles read "reconnecting" instead of
+  // vanishing and reappearing.
+  const [awayPeers, setAwayPeers] = useState(new Set())
+  // Why the last screen share attempt was refused: 'full' (mesh room at
+  // capacity) or 'error'. Sticky until the next attempt, so the room can both
+  // stop the capture and explain itself.
+  const [screenDenied, setScreenDenied] = useState(null)
+  // The join gate. Follows `streamLive` up immediately, but follows it *down*
+  // only after STREAM_GRACE_MS — so an SSE blip no longer tears the whole
+  // call down and rejoins (the churn everyone else saw as a leave/join).
+  // The initial join still strictly waits for the stream: the SSE subscription
+  // MUST precede /rtc/join, because the old stream's close observed between a
+  // rejoin and its subscribe would evict the seat the rejoin just took. That
+  // ordering is load-bearing.
+  const [callGate, setCallGate] = useState(false)
 
   const transportRef = useRef(null)
   const selfIdRef = useRef('')
@@ -75,6 +102,20 @@ export function useRtc({ kelaboId, enabled, stream, videoStream = null, screenSt
   const rebuildingRef = useRef(false)
   const rebuildsRef = useRef(0)
   const rebuildTimerRef = useRef(null)
+  // Join-failure retry: attempt counter and pending timer. `error` means
+  // "retrying in the background", never "gave up forever".
+  const joinAttemptsRef = useRef(0)
+  const retryTimerRef = useRef(null)
+  // `rtc` SSE events that arrived during the join await, when there is no
+  // transport yet. A `peer_joined` lost in that window used to leave a peer
+  // who never spoke and never toggled anything invisible forever.
+  const pendingEventsRef = useRef([])
+  const joiningRef = useRef(false)
+  const onServerEventRef = useRef(null)
+  const gateTimerRef = useRef(null)
+  const iceTtlRef = useRef(0)
+  const announcedScreenRef = useRef(false)
+  const tickCountRef = useRef(0)
 
   /**
    * The session is gone and cannot be revived. Build a new one.
@@ -93,14 +134,68 @@ export function useRtc({ kelaboId, enabled, stream, videoStream = null, screenSt
       return
     }
     const attempt = rebuildsRef.current++
-    rebuildingRef.current = true
     rebuildTimerRef.current = setTimeout(() => {
       rebuildTimerRef.current = null
+      // Set when the timer FIRES, not when it was scheduled: a participant who
+      // left the kelabo during the backoff window would otherwise have their
+      // real leave silently swallowed by the rebuild flag, stranding a ghost.
+      rebuildingRef.current = true
       setGeneration(g => g + 1)
     }, 1000 * 2 ** attempt)
   }, [])
 
-  useEffect(() => () => clearTimeout(rebuildTimerRef.current), [])
+  // The Gateway no longer has our seat — it said so (`peer_left` addressed to
+  // us, or a 409 from /rtc/media). The old behaviour was to ignore both, which
+  // left this tab a ghost: its own tiles kept playing, everyone else had
+  // removed it, and no code path ever reconsidered. Rejoin cleanly; sending
+  // /rtc/leave for a seat that is already gone would only race the rejoin.
+  const rejoinAfterEviction = useCallback(() => {
+    if (rebuildTimerRef.current || retryTimerRef.current) return
+    rebuildingRef.current = true
+    setGeneration(g => g + 1)
+  }, [])
+
+  useEffect(
+    () => () => {
+      clearTimeout(rebuildTimerRef.current)
+      clearTimeout(retryTimerRef.current)
+      clearTimeout(gateTimerRef.current)
+    },
+    [],
+  )
+
+  // The join gate follows streamLive up at once and down only after the grace
+  // window (see STREAM_GRACE_MS above).
+  useEffect(() => {
+    if (streamLive) {
+      if (gateTimerRef.current) {
+        clearTimeout(gateTimerRef.current)
+        gateTimerRef.current = null
+      }
+      setCallGate(true)
+      return undefined
+    }
+    if (!callGate) return undefined
+    gateTimerRef.current = setTimeout(() => {
+      gateTimerRef.current = null
+      setCallGate(false)
+    }, STREAM_GRACE_MS)
+    return () => {
+      if (gateTimerRef.current) {
+        clearTimeout(gateTimerRef.current)
+        gateTimerRef.current = null
+      }
+    }
+  }, [streamLive, callGate])
+
+  // The stream came back inside the window: the transport survived, but events
+  // may have been missed while it was gone — reconcile now rather than in up
+  // to ten seconds.
+  useEffect(() => {
+    if (streamLive && state === 'live') {
+      transportRef.current?.reconcile?.([...peersRef.current.values()])
+    }
+  }, [streamLive, state])
 
   /**
    * A remote track arrived. It joins that participant's stream — it never
@@ -153,19 +248,26 @@ export function useRtc({ kelaboId, enabled, stream, videoStream = null, screenSt
 
   // --- join / leave ---------------------------------------------------------
   useEffect(() => {
-    // Wait for the SSE stream: it is both how signalling arrives and how the
-    // Gateway notices we left, so joining without it would strand a ghost peer
-    // in the roster.
-    if (!enabled || !kelaboId || !streamLive) return undefined
+    // Wait for the SSE stream (via callGate): it is both how signalling
+    // arrives and how the Gateway notices we left, so joining without it would
+    // strand a ghost peer in the roster. Once live, callGate holds through
+    // brief stream drops so the call itself does not churn.
+    if (!enabled || !kelaboId || !callGate) return undefined
 
     let cancelled = false
     setState('joining')
+    joiningRef.current = true
+    pendingEventsRef.current = []
 
     ;(async () => {
       let info
       try {
-        info = await rtcApi.join(kelaboId)
+        // Retried like every other signalling call — one 502 that happened to
+        // be in flight when the network moved is the most common transient
+        // failure there is, and it used to be terminal.
+        info = await withRetry(() => rtcApi.join(kelaboId))
       } catch (err) {
+        joiningRef.current = false
         if (cancelled) return
         if (err?.code === 'mesh_room_full') {
           setMeshMax(err.meshMax ?? 0)
@@ -175,12 +277,25 @@ export function useRtc({ kelaboId, enabled, stream, videoStream = null, screenSt
         } else {
           setError(err)
           setState('error')
+          // `error` retries itself on a capped backoff (and immediately on
+          // window `online` / tab return — see the effect below).
+          const attempt = joinAttemptsRef.current++
+          retryTimerRef.current = setTimeout(() => {
+            retryTimerRef.current = null
+            rebuildingRef.current = true
+            setGeneration(g => g + 1)
+          }, joinRetryDelayMs(attempt))
         }
         return
       }
-      if (cancelled) return
+      if (cancelled) {
+        joiningRef.current = false
+        return
+      }
 
+      joinAttemptsRef.current = 0
       selfIdRef.current = info.self.participantId
+      iceTtlRef.current = Number(info.ttlSeconds) || 0
       setMode(info.mode)
       setMeshMax(info.meshMax ?? 0)
       setVideoAllowed(info.video !== false)
@@ -213,7 +328,14 @@ export function useRtc({ kelaboId, enabled, stream, videoStream = null, screenSt
           ? createMeshTransport({ ...common, selfId: info.self.participantId })
           : createSfuTransport(common)
       transportRef.current = transport
+      joiningRef.current = false
+      announcedScreenRef.current = false
+      setAwayPeers(new Set())
       setState('live')
+
+      // Whatever the room said while the join was in flight, said again now
+      // that there is a transport to hear it.
+      for (const p of pendingEventsRef.current.splice(0)) onServerEventRef.current?.(p)
 
       // Whoever was already publishing when we walked in is picked up by the
       // reconciler's first tick rather than here — one code path for "was
@@ -233,6 +355,8 @@ export function useRtc({ kelaboId, enabled, stream, videoStream = null, screenSt
 
     return () => {
       cancelled = true
+      joiningRef.current = false
+      pendingEventsRef.current = []
       transportRef.current?.close()
       transportRef.current = null
       peersRef.current = new Map()
@@ -242,11 +366,103 @@ export function useRtc({ kelaboId, enabled, stream, videoStream = null, screenSt
       setRemoteStreams(new Map())
       setRemoteScreens(new Map())
       setPeerStates(new Map())
+      setAwayPeers(new Set())
       setState('idle')
       if (rebuildingRef.current) rebuildingRef.current = false
       else rtcApi.leave(kelaboId).catch(() => {})
     }
-  }, [enabled, kelaboId, streamLive, generation, attachRemote, syncPeers, onFatal])
+  }, [enabled, kelaboId, callGate, generation, attachRemote, syncPeers, onFatal])
+
+  // `error` must never be terminal: past the retry timer above, the two
+  // moments worth reacting to are the network coming back and the user coming
+  // back — both are exactly when a rejoin is most likely to work and most
+  // likely to be noticed failing.
+  useEffect(() => {
+    if (state !== 'error') return undefined
+    const kick = () => {
+      if (retryTimerRef.current) {
+        clearTimeout(retryTimerRef.current)
+        retryTimerRef.current = null
+      }
+      rebuildingRef.current = true
+      setGeneration(g => g + 1)
+    }
+    const onOnline = () => kick()
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') kick()
+    }
+    window.addEventListener('online', onOnline)
+    document.addEventListener('visibilitychange', onVisible)
+    return () => {
+      window.removeEventListener('online', onOnline)
+      document.removeEventListener('visibilitychange', onVisible)
+    }
+  }, [state])
+
+  // The rebuild budget also refills with time, not only on `connected`: once
+  // `error` was reached with the budget spent, a network that recovered a
+  // minute later used to find a call that had given up forever.
+  useEffect(() => {
+    if (state !== 'live' && state !== 'error') return undefined
+    const t = setInterval(() => {
+      rebuildsRef.current = Math.max(0, rebuildsRef.current - 1)
+    }, 60_000)
+    return () => clearInterval(t)
+  }, [state])
+
+  // --- ICE credential refresh ----------------------------------------------
+  // Minted at join with a TTL (default 1h) and, until now, never refreshed:
+  // /rtc/ice existed with zero call sites, so every ICE restart past the hour
+  // gathered with dead TURN credentials and failed on exactly the networks
+  // that needed the relay. Re-minted at 80% of TTL and pushed into the live
+  // transport.
+  useEffect(() => {
+    if (state !== 'live') return undefined
+    let stopped = false
+    let timer = null
+    const schedule = ttlSeconds => {
+      timer = setTimeout(async () => {
+        let out = null
+        try {
+          out = await rtcApi.ice(kelaboId)
+        } catch {}
+        if (stopped) return
+        if (Array.isArray(out?.iceServers) && out.iceServers.length) {
+          transportRef.current?.setIceServers?.(out.iceServers)
+          schedule(Number(out.ttlSeconds) || 0)
+        } else {
+          // A failed re-mint retries on iceRefreshDelayMs's short floor.
+          schedule(0)
+        }
+      }, iceRefreshDelayMs(ttlSeconds))
+    }
+    schedule(iceTtlRef.current)
+    return () => {
+      stopped = true
+      clearTimeout(timer)
+    }
+  }, [state, kelaboId])
+
+  // --- leave beacon ---------------------------------------------------------
+  // The effect cleanup above runs on in-app navigation but never on a killed
+  // tab or a hard close; those used to leave a ghost on the roster until the
+  // Gateway noticed the SSE socket die. `/rtc/leave` is idempotent, so racing
+  // the SSE-close eviction is safe. text/plain keeps the beacon a simple
+  // request — a preflight is exactly what a dying page cannot do.
+  useEffect(() => {
+    if (state !== 'live' || !kelaboId) return undefined
+    const onPageHide = () => {
+      if (rebuildingRef.current) return
+      try {
+        navigator.sendBeacon?.(
+          config.gatewayBase + '/rtc/leave',
+          new Blob([JSON.stringify({ kelaboId })], { type: 'text/plain' }),
+        )
+      } catch {}
+    }
+    window.addEventListener('pagehide', onPageHide)
+    return () => window.removeEventListener('pagehide', onPageHide)
+  }, [state, kelaboId])
 
   // --- publish local media --------------------------------------------------
   // Runs once the transport is up and the device has been granted. The same
@@ -270,14 +486,50 @@ export function useRtc({ kelaboId, enabled, stream, videoStream = null, screenSt
     transport.setLocalTrack('video', track)
   }, [state, videoStream, videoAllowed])
 
-  // A shared screen is published exactly like the camera — same call, same
-  // sender reuse — and cleared the same way when sharing stops.
+  // A shared screen is published like the camera — same sender reuse — with
+  // one difference: in a mesh room the share must be ADMITTED first. A share
+  // is one more uplink to every peer, so it occupies a capacity unit exactly
+  // like a participant does, and the Gateway is the only place that count can
+  // be enforced. `screen: true` on /rtc/media is that request; a 409
+  // `mesh_room_full` means the room is at its limit and nothing is published.
+  // The SFU needs no admission — there the report is roster truth only.
   useEffect(() => {
     const transport = transportRef.current
-    if (state !== 'live' || !transport) return
+    if (state !== 'live' || !transport) return undefined
     const track = videoAllowed ? (screenStream?.getVideoTracks()[0] ?? null) : null
-    transport.setLocalTrack('screen', track)
-  }, [state, screenStream, videoAllowed])
+
+    if (!track) {
+      transport.setLocalTrack('screen', null)
+      if (announcedScreenRef.current) {
+        announcedScreenRef.current = false
+        rtcApi.media(kelaboId, { screen: false }).catch(() => {})
+      }
+      return undefined
+    }
+
+    let cancelled = false
+    ;(async () => {
+      setScreenDenied(null)
+      if (mode === 'mesh') {
+        try {
+          await withRetry(() => rtcApi.media(kelaboId, { screen: true }))
+        } catch (err) {
+          if (cancelled) return
+          if (err?.code === 'peer_not_found') rejoinAfterEviction()
+          setScreenDenied(err?.code === 'mesh_room_full' ? 'full' : 'error')
+          return
+        }
+      } else {
+        rtcApi.media(kelaboId, { screen: true }).catch(() => {})
+      }
+      if (cancelled) return
+      announcedScreenRef.current = true
+      transport.setLocalTrack('screen', track)
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [state, screenStream, videoAllowed, mode, kelaboId, rejoinAfterEviction])
 
   // --- reconcile ------------------------------------------------------------
   // The roster says what everyone publishes; the transport knows what actually
@@ -299,18 +551,58 @@ export function useRtc({ kelaboId, enabled, stream, videoStream = null, screenSt
   // when it is created instead.
   useEffect(() => {
     if (state !== 'live') return undefined
-    const tick = () => transportRef.current?.reconcile?.([...peersRef.current.values()])
+    // Membership converges too, not only track delivery: every third tick the
+    // authoritative roster is fetched and any drift — a peer_joined lost to a
+    // throttled tab, a peer_left that never arrived — is replayed through the
+    // same event handler the live stream uses, never a second code path.
+    const syncRoster = async () => {
+      let out = null
+      try {
+        out = await rtcApi.roster(kelaboId)
+      } catch {
+        return
+      }
+      if (!transportRef.current || !Array.isArray(out?.peers)) return
+      const self = selfIdRef.current
+      const seen = new Set()
+      let selfPresent = false
+      for (const p of out.peers) {
+        if (!p?.participantId) continue
+        if (p.participantId === self) {
+          selfPresent = true
+          continue
+        }
+        seen.add(p.participantId)
+        const known = peersRef.current.has(p.participantId)
+        onServerEventRef.current?.({ kind: known ? 'tracks' : 'peer_joined', peer: p })
+      }
+      for (const id of [...peersRef.current.keys()]) {
+        if (id !== self && !seen.has(id)) {
+          onServerEventRef.current?.({ kind: 'peer_left', participantId: id, reason: 'roster_sync' })
+        }
+      }
+      // Our own seat is gone — evicted while we could not hear it. Rejoin.
+      if (!selfPresent) rejoinAfterEviction()
+    }
+    const tick = () => {
+      transportRef.current?.reconcile?.([...peersRef.current.values()])
+      if (++tickCountRef.current % 3 === 0) syncRoster()
+    }
     tick()
     const t = setInterval(tick, 10000)
     // Also on the way back from a backgrounded tab, where timers were throttled
-    // and connections may have been torn down under us.
+    // and connections may have been torn down under us — and the moment the
+    // network returns, which is when every pull and publish wants re-examining
+    // and when the user is watching the call come back.
     const onVisible = () => { if (document.visibilityState === 'visible') tick() }
     document.addEventListener('visibilitychange', onVisible)
+    window.addEventListener('online', tick)
     return () => {
       clearInterval(t)
       document.removeEventListener('visibilitychange', onVisible)
+      window.removeEventListener('online', tick)
     }
-  }, [state])
+  }, [state, kelaboId, rejoinAfterEviction])
 
   // Muting stops transmission at the source: peers hear nothing, and the track
   // stays in place so unmuting needs no renegotiation.
@@ -331,14 +623,40 @@ export function useRtc({ kelaboId, enabled, stream, videoStream = null, screenSt
   const cameraOn = !!(videoAllowed && videoStream?.getVideoTracks()[0])
   useEffect(() => {
     if (state !== 'live') return
-    rtcApi.media(kelaboId, { audio: !muted, video: cameraOn }).catch(() => {})
-  }, [state, kelaboId, muted, cameraOn])
+    // A 409 is not noise: it says the Gateway has no seat for us — evicted
+    // while we could not hear it — and this once-per-toggle report is a free
+    // liveness probe. Swallowing it is what let a ghost tab sit healthy-looking
+    // for the rest of the kelabo.
+    rtcApi.media(kelaboId, { audio: !muted, video: cameraOn }).catch(err => {
+      if (err?.status === 409) rejoinAfterEviction()
+    })
+  }, [state, kelaboId, muted, cameraOn, rejoinAfterEviction])
 
   // --- signalling from the kelabo's SSE stream -----------------------------
+  // A peer whose event stream dropped is `away` while the Gateway holds their
+  // seat open; anything heard from or about them afterwards clears it.
+  const clearAway = useCallback(id => {
+    setAwayPeers(prev => {
+      if (!prev.has(id)) return prev
+      const next = new Set(prev)
+      next.delete(id)
+      return next
+    })
+  }, [])
+
   const onServerEvent = useCallback(
     payload => {
       const transport = transportRef.current
-      if (!payload || !transport) return
+      if (!payload) return
+      if (!transport) {
+        // Mid-join there is no transport yet, but the room is still talking.
+        // Hold what it says and replay it once the transport exists — dropping
+        // it here left any peer who joined in that window invisible forever.
+        if (joiningRef.current && pendingEventsRef.current.length < 200) {
+          pendingEventsRef.current.push(payload)
+        }
+        return
+      }
       const self = selfIdRef.current
 
       // Someone's microphone or camera was switched on or off. Roster-only —
@@ -347,6 +665,7 @@ export function useRtc({ kelaboId, enabled, stream, videoStream = null, screenSt
       if (payload.kind === 'media') {
         const p = payload.peer
         if (!p || p.participantId === self) return
+        clearAway(p.participantId)
         const known = peersRef.current.get(p.participantId)
         if (!known) return
         peersRef.current.set(p.participantId, { ...known, media: p.media })
@@ -354,9 +673,25 @@ export function useRtc({ kelaboId, enabled, stream, videoStream = null, screenSt
         return
       }
 
+      // A peer's stream dropped and the Gateway is holding their seat through
+      // the grace window; their tile reads "reconnecting" instead of the whole
+      // room churning through a leave/join.
+      if (payload.kind === 'peer_away') {
+        const id = payload.participantId
+        if (!id || id === self) return
+        setAwayPeers(prev => (prev.has(id) ? prev : new Set(prev).add(id)))
+        return
+      }
+      if (payload.kind === 'peer_back') {
+        const id = payload.participantId
+        if (id && id !== self) clearAway(id)
+        return
+      }
+
       if (payload.kind === 'peer_joined' || payload.kind === 'tracks') {
         const p = payload.peer
         if (!p || p.participantId === self) return
+        clearAway(p.participantId)
         // A peer who rebuilt their SFU session is publishing on a new one, and
         // every subscription we hold points at the old. Forgetting them here is
         // what lets the pulls below start over; without it the transport sees a
@@ -383,7 +718,16 @@ export function useRtc({ kelaboId, enabled, stream, videoStream = null, screenSt
 
       if (payload.kind === 'peer_left') {
         const id = payload.participantId
-        if (!id || id === self) return
+        if (!id) return
+        if (id === self) {
+          // Addressed to us: the Gateway removed OUR seat (a second tab's
+          // leave, an eviction we slept through). Ignoring it was the ghost
+          // state — our tiles kept playing while everyone else had dropped us
+          // and every /rtc call answered 409. Rejoin instead.
+          rejoinAfterEviction()
+          return
+        }
+        clearAway(id)
         peersRef.current.delete(id)
         syncPeers()
         streamsRef.current.delete(id)
@@ -399,8 +743,11 @@ export function useRtc({ kelaboId, enabled, stream, videoStream = null, screenSt
         transport.handleSignal(payload.from, payload.signal)
       }
     },
-    [syncPeers],
+    [syncPeers, clearAway, rejoinAfterEviction],
   )
+  // Read through a ref where render order would otherwise matter: the join
+  // effect replays buffered events and the roster sync synthesises them.
+  onServerEventRef.current = onServerEvent
 
   // --- remote audio playback ------------------------------------------------
   // One <audio> element per peer, created imperatively so playback survives the
@@ -438,17 +785,32 @@ export function useRtc({ kelaboId, enabled, stream, videoStream = null, screenSt
     setNeedsUnblock(false)
   }, [])
 
-  // What a tile should say about one peer. Having their media is the only proof
-  // the call actually works, so it outranks the connection state.
+  // What a tile should say about one peer. Having their media is the only
+  // proof the call actually works, so it outranks the connection state — but
+  // ANY of their media counts. This used to count audio tracks alone, so a
+  // participant with no microphone (mic denied, watch-only) showed
+  // "connecting…" for the whole kelabo with their video on screen.
   const peerStatus = useCallback(
     participantId => {
-      if (remoteStreams.get(participantId)?.getAudioTracks().length) return 'live'
+      const ms = remoteStreams.get(participantId)
+      if (ms?.getTracks().length) return 'live'
+      if (remoteScreens.get(participantId)?.getTracks().length) return 'live'
+      // Their SSE stream dropped; the Gateway is holding the seat.
+      if (awayPeers.has(participantId)) return 'reconnecting'
       const conn = peerStates.get(mode === 'mesh' ? participantId : '*')
       if (conn === 'failed' || conn === 'closed') return 'failed'
       if (conn === 'disconnected') return 'reconnecting'
+      if (conn === 'connected') {
+        // Mesh: this IS their connection, so connected is live even with no
+        // track (nothing granted, nothing shared). SFU: '*' is our own uplink;
+        // it only vouches for a peer who advertises nothing to deliver.
+        if (mode === 'mesh') return 'live'
+        const p = peersRef.current.get(participantId)
+        if (p && !Object.keys(p.tracks || {}).length) return 'live'
+      }
       return 'connecting'
     },
-    [remoteStreams, peerStates, mode],
+    [remoteStreams, remoteScreens, awayPeers, peerStates, mode],
   )
 
   // Whether a peer's camera has actually reached us. A roster that advertises
@@ -459,5 +821,16 @@ export function useRtc({ kelaboId, enabled, stream, videoStream = null, screenSt
     [remoteStreams],
   )
 
-  return { state, mode, peers, remoteStreams, remoteScreens, error, meshMax, videoAllowed, needsUnblock, unblock, onServerEvent, peerStatus, peerHasVideo, selfId: selfIdRef.current }
+  // Whether starting a screen share could be admitted right now. Mesh only:
+  // units = everyone on the call (self included) plus every active share; a
+  // share needs one more. Advisory — the Gateway re-checks on the actual
+  // request — but it lets the control disable itself instead of failing.
+  const sharing = !!screenStream?.getVideoTracks()[0]
+  const canShareScreen =
+    mode !== 'mesh' ||
+    !(meshMax > 0) ||
+    sharing ||
+    peers.length + 1 + peers.filter(p => p.media?.screen).length < meshMax
+
+  return { state, mode, peers, remoteStreams, remoteScreens, error, meshMax, videoAllowed, needsUnblock, unblock, onServerEvent, peerStatus, peerHasVideo, screenDenied, canShareScreen, selfId: selfIdRef.current }
 }

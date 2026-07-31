@@ -143,6 +143,13 @@ export default function Kelabo() {
     streamLive: streamStatus === 'live',
   })
 
+  // A share the Gateway refused — a mesh room at its participants-plus-shares
+  // cap — must release the browser capture too, or the browser's own
+  // "sharing" bar keeps promising something nobody receives.
+  useEffect(() => {
+    if (call.screenDenied) screen.stop()
+  }, [call.screenDenied, screen.stop])
+
   // The kelabo's one EventSource. Everything the server pushes rides it —
   // contributions, transcript echo, LLM debug, conference signalling — so it is
   // mounted here, once, above every view that reads from it.

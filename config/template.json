@@ -27,7 +27,7 @@
       "rtc": {
         "provider": "cloudflare",
         "defaultMode": "sfu",
-        "meshMaxParticipants": 6,
+        "meshMaxParticipants": 5,
         "iceTtlSeconds": 3600,
         "video": true
       },
@@ -107,7 +107,7 @@
       "rtc": {
         "provider": "cloudflare",
         "defaultMode": "sfu",
-        "meshMaxParticipants": 6,
+        "meshMaxParticipants": 5,
         "iceTtlSeconds": 3600,
         "video": true
       },
@@ -183,7 +183,7 @@
       "rtc": {
         "provider": "cloudflare",
         "defaultMode": "sfu",
-        "meshMaxParticipants": 6,
+        "meshMaxParticipants": 5,
         "iceTtlSeconds": 3600,
         "video": true
       },

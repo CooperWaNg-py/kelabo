@@ -34,8 +34,9 @@ function fromEnv() {
     rtcApiBase: e.KELABO_RTC_API_BASE || "https://rtc.live.cloudflare.com/v1",
     rtc: {
       defaultMode: e.KELABO_RTC_DEFAULT_MODE || "sfu",
-      meshMaxParticipants: num(e.KELABO_RTC_MESH_MAX, 6),
+      meshMaxParticipants: num(e.KELABO_RTC_MESH_MAX, 5),
       iceTtlSeconds: num(e.KELABO_RTC_ICE_TTL, 3600),
+      disconnectGraceSeconds: num(e.KELABO_RTC_DISCONNECT_GRACE, 20),
       video: e.KELABO_RTC_VIDEO === "true",
     },
     llm: {

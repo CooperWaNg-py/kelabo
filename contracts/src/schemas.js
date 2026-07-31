@@ -405,13 +405,24 @@ export const rtcIceBodySchema = z.object({ ...kelaboScoped });
 // like a silent one and a camera that went off left its last frame frozen on
 // the tile for the rest of the kelabo.
 //
-// Both fields are optional so either can be reported without claiming anything
-// about the other.
+// All fields are optional so any can be reported without claiming anything
+// about the others.
+//
+// `screen` is also how a mesh room admits a share: in mesh mode the Gateway
+// never sees the media or the SDP, so this report is the only place the
+// participants-plus-shares cap can be enforced. A client asks (`screen: true`)
+// BEFORE publishing and a full room answers 409 `mesh_room_full`.
 export const rtcMediaBodySchema = z.object({
   ...kelaboScoped,
   audio: z.boolean().optional(),
   video: z.boolean().optional(),
+  screen: z.boolean().optional(),
 });
+
+// Authoritative membership snapshot, fetched by the reconcile loop. Events are
+// single-delivery; a `peer_joined` lost to a throttled tab otherwise skews the
+// client's roster for the rest of the kelabo.
+export const rtcRosterBodySchema = z.object({ ...kelaboScoped });
 
 // Mesh only: an offer/answer/ICE candidate addressed to exactly one peer. The
 // Gateway relays it verbatim to that peer's SSE stream and to nobody else.

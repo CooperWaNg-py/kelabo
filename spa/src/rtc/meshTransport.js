@@ -1,5 +1,6 @@
 import { rtc as rtcApi } from '../api'
 import { withRetry } from './retry.js'
+import { MAX_PEER_REBUILDS, shouldRebuildCall, shouldRebuildPeer } from './recovery.js'
 
 // Full-mesh peer-to-peer transport — the "secure kelabo" mode.
 //
@@ -9,9 +10,11 @@ import { withRetry } from './retry.js'
 // direct connectivity fails, Cloudflare TURN relays the encrypted packets — a
 // relay cannot decrypt them, so the guarantee holds.
 //
-// Cost: each participant uploads their audio once per peer, which is why the
-// Gateway caps the room at rtc.meshMaxParticipants and refuses joiners past it
-// rather than quietly falling back to the SFU.
+// Cost: each participant uploads their audio once per peer — and a shared
+// screen is one more video uplink to every peer — which is why the Gateway
+// caps the room at rtc.meshMaxParticipants units (participants plus active
+// screen shares) and refuses joiners and shares past it rather than quietly
+// falling back to the SFU.
 //
 // Glare (both sides offering at once) is handled with the standard perfect-
 // negotiation pattern: the peer with the lexicographically greater id is
@@ -24,16 +27,30 @@ import { withRetry } from './retry.js'
 // silently does nothing. So the send retries, and a send that cannot be made to
 // work rolls the offer back rather than leaving the connection stuck.
 
-// A connection that has failed outright is rebuilt, but not forever: past this
-// the network is not going to start working because we asked a fifth time.
-const MAX_REBUILDS = 4
+// A connection that has failed outright is rebuilt, but not forever in a row:
+// past MAX_PEER_REBUILDS (recovery.js) the network is not going to start
+// working because we asked a fifth time. The budget refills on `connected`,
+// so it bounds a losing streak rather than the life of the kelabo.
 const REBUILD_DELAY_MS = 1500
 
-export function createMeshTransport({ kelaboId, selfId, iceServers, onRemoteTrack, onStateChange, onError }) {
+export function createMeshTransport({ kelaboId, selfId, iceServers, onRemoteTrack, onStateChange, onError, onFatal }) {
   /** participantId -> { pc, polite, makingOffer, ignoreOffer, pendingIce[], senders, … } */
   const peers = new Map()
   const localTracks = new Map() // kind -> MediaStreamTrack
   let closed = false
+  let fatalReported = false
+
+  // The whole call is beyond per-peer repair — every connection failed at
+  // once, which is our own network changing, not N unlucky peers. Reported
+  // upward exactly once; useRtc rebuilds the call around a clean rejoin, the
+  // same machinery the SFU transport has always had (this transport used to
+  // silently drop the `onFatal` it was handed, so mesh had no whole-call
+  // recovery path at all).
+  function reportFatal(err) {
+    if (fatalReported || closed) return
+    fatalReported = true
+    onFatal?.(err)
+  }
 
   const signal = (to, payload) => withRetry(() => rtcApi.signal(kelaboId, to, payload))
 
@@ -116,7 +133,23 @@ export function createMeshTransport({ kelaboId, selfId, iceServers, onRemoteTrac
 
     pc.addEventListener('connectionstatechange', () => {
       onStateChange?.(participantId, pc.connectionState)
-      if (pc.connectionState === 'failed') scheduleRebuild(participantId)
+      // A connection that came up is a rebuild that worked: the budget bounds
+      // a losing streak, not the kelabo. Without this reset the fourth blip of
+      // an hour-long call spent the allowance forever and the peer stayed dark
+      // until a page reload.
+      if (pc.connectionState === 'connected') entry.rebuilds = 0
+      if (pc.connectionState === 'failed') {
+        // Several peers failing at once is our own network, not N unlucky
+        // peers — escalate straight to the whole-call rebuild. A single peer
+        // failing (even if it is the only peer) gets the cheaper per-peer
+        // rebuild first; scheduleRebuild escalates when that budget runs out.
+        const states = [...peers.values()].map(e => e.pc.connectionState)
+        if (states.length > 1 && shouldRebuildCall(states)) {
+          reportFatal(new Error('mesh_call_failed'))
+          return
+        }
+        scheduleRebuild(participantId)
+      }
     })
     pc.addEventListener('iceconnectionstatechange', () => {
       if (pc.iceConnectionState !== 'failed') return
@@ -184,7 +217,17 @@ export function createMeshTransport({ kelaboId, selfId, iceServers, onRemoteTrac
   function scheduleRebuild(participantId) {
     const entry = peers.get(participantId)
     if (closed || !entry || entry.rebuildTimer) return
-    if (entry.rebuilds >= MAX_REBUILDS) return
+    if (!shouldRebuildPeer({ connectionState: entry.pc.connectionState, rebuilds: entry.rebuilds })) {
+      // Budget spent. If everyone is in the same state the call itself is the
+      // patient — escalate instead of leaving this peer dark forever.
+      if (
+        entry.rebuilds >= MAX_PEER_REBUILDS &&
+        shouldRebuildCall([...peers.values()].map(e => e.pc.connectionState))
+      ) {
+        reportFatal(new Error('mesh_rebuilds_exhausted'))
+      }
+      return
+    }
     entry.rebuilds += 1
     entry.rebuildTimer = setTimeout(() => {
       const current = peers.get(participantId)
@@ -262,9 +305,11 @@ export function createMeshTransport({ kelaboId, selfId, iceServers, onRemoteTrac
    */
   function reconcile(peerList) {
     if (closed || !Array.isArray(peerList)) return
+    const rostered = new Set()
     for (const p of peerList) {
       const id = p?.participantId
       if (!id || id === selfId) continue
+      rostered.add(id)
       const entry = peers.get(id)
       if (!entry) {
         connectTo(id)
@@ -273,6 +318,27 @@ export function createMeshTransport({ kelaboId, selfId, iceServers, onRemoteTrac
       if (entry.pc.connectionState === 'failed') scheduleRebuild(id)
       else if (entry.renegotiateWanted && entry.pc.signalingState === 'stable') negotiate(id)
     }
+    // The other half of the same job: a `peer_left` that landed while this tab
+    // was throttled left a connection uploading media to someone who was gone,
+    // for the rest of the kelabo — real uplink, in the one mode where uplink
+    // is the scarce resource the cap exists to protect.
+    for (const id of [...peers.keys()]) {
+      if (!rostered.has(id)) dropPeer(id)
+    }
+  }
+
+  /**
+   * Fresh TURN credentials, applied to every live connection and to every
+   * connection built from here on. Without this an ICE restart past the
+   * credential TTL gathers host/srflx only and fails on exactly the networks
+   * that needed the relay.
+   */
+  function setIceServers(next) {
+    if (closed || !Array.isArray(next) || !next.length) return
+    iceServers = next
+    for (const entry of peers.values()) {
+      try { entry.pc.setConfiguration({ iceServers: next, bundlePolicy: 'max-bundle' }) } catch {}
+    }
   }
 
   async function handleSignal(from, signal_) {
@@ -280,6 +346,14 @@ export function createMeshTransport({ kelaboId, selfId, iceServers, onRemoteTrac
     if (signal_.type === 'bye') {
       dropPeer(from)
       return
+    }
+    // A fresh offer aimed at a connection we know has failed is the other side
+    // re-dialling — their rebuild must not land on our dead PeerConnection, or
+    // neither side can ever heal. Start clean; this path spends none of our
+    // own rebuild budget because the initiative (and the backoff) is theirs.
+    const existing = peers.get(from)
+    if (existing && signal_.type === 'offer' && existing.pc.connectionState === 'failed') {
+      dropPeer(from)
     }
     const entry = peerFor(from)
     const { pc } = entry
@@ -346,5 +420,5 @@ export function createMeshTransport({ kelaboId, selfId, iceServers, onRemoteTrac
     localTracks.clear()
   }
 
-  return { mode: 'mesh', setLocalTrack, connectTo, reconcile, handleSignal, dropPeer, close }
+  return { mode: 'mesh', setLocalTrack, setIceServers, connectTo, reconcile, handleSignal, dropPeer, close }
 }

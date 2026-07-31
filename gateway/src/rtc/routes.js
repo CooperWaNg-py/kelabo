@@ -4,6 +4,7 @@ import {
   rtcLeaveBodySchema,
   rtcIceBodySchema,
   rtcMediaBodySchema,
+  rtcRosterBodySchema,
   rtcSignalBodySchema,
   rtcSfuSessionBodySchema,
   rtcSfuTracksBodySchema,
@@ -24,6 +25,7 @@ export const RTC_PATHS = new Set([
   "/rtc/leave",
   "/rtc/ice",
   "/rtc/media",
+  "/rtc/roster",
   "/rtc/signal",
   "/rtc/sfu/session",
   "/rtc/sfu/tracks",
@@ -126,6 +128,7 @@ export async function handleRtc(c, req, res, path, method) {
   if (method === "POST" && path === "/rtc/leave") return leave(c, req, res);
   if (method === "POST" && path === "/rtc/ice") return ice(c, req, res);
   if (method === "POST" && path === "/rtc/media") return media(c, req, res);
+  if (method === "POST" && path === "/rtc/roster") return roster(c, req, res);
   if (method === "POST" && path === "/rtc/signal") return signal(c, req, res);
   if (method === "POST" && path === "/rtc/sfu/session") return sfuSession(c, req, res);
   if (method === "POST" && path === "/rtc/sfu/tracks") return sfuTracks(c, req, res);
@@ -173,6 +176,11 @@ async function join(c, req, res) {
     self: result.self,
     peers: result.peers,
     iceServers: ice.iceServers,
+    // The client schedules its own re-mint (POST /rtc/ice) from this. Without
+    // it the credentials minted here silently expire mid-call, and the first
+    // ICE restart past the hour gathers with dead TURN and fails on exactly
+    // the networks that needed the relay.
+    ttlSeconds: c.config.rtc.iceTtlSeconds,
     meshMax: c.config.rtc.meshMaxParticipants,
     video: c.config.rtc.video,
   });
@@ -207,9 +215,25 @@ async function media(c, req, res) {
   const ctx = await context(c, req, res, rtcMediaBodySchema);
   if (!ctx) return undefined;
   const { kelaboId, participant, body } = ctx;
-  const peer = c.rtcRoom.setMedia(kelaboId, participant.identity, body);
-  if (!peer) return send(res, 409, { error: "peer_not_found" });
-  return send(res, 200, { ok: true, media: peer.media });
+  const result = c.rtcRoom.setMedia(kelaboId, participant.identity, body);
+  if (!result) return send(res, 409, { error: "peer_not_found" });
+  // A refused screen share in a full mesh room — same code as a refused join,
+  // and the client tells them apart by which request it made.
+  if (!result.ok) return send(res, result.status, { error: result.code, ...(result.detail ?? {}) });
+  return send(res, 200, { ok: true, media: result.peer.media });
+}
+
+/**
+ * Authoritative membership snapshot for the reconcile loop. The SSE events are
+ * single-delivery; a `peer_joined` that landed while a tab was throttled used
+ * to skew that client's roster for the rest of the kelabo — this is how it
+ * converges again. POST like every other /rtc route so the kelabo scope rides
+ * the same cookie-checked body.
+ */
+async function roster(c, req, res) {
+  const ctx = await context(c, req, res, rtcRosterBodySchema);
+  if (!ctx) return undefined;
+  return send(res, 200, { peers: c.rtcRoom.roster(ctx.kelaboId) });
 }
 
 async function signal(c, req, res) {

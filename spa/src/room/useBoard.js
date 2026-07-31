@@ -111,6 +111,13 @@ export function useBoard({
     let cancelled = false
     let es = null
     let dropped = false
+    // When ANY event last arrived, pings included. A half-open connection —
+    // network change without a RST, suspend/resume, NAT rebinding — leaves the
+    // EventSource "open" while receiving nothing, indefinitely: no signalling,
+    // no roster, no reconnect, because onerror never fires. The server pings
+    // every 25s precisely so this side can notice the silence.
+    let lastEventAt = Date.now()
+    const mark = () => { lastEventAt = Date.now() }
 
     const backfill = async since => {
       try {
@@ -132,40 +139,50 @@ export function useBoard({
 
     const subscribe = () => {
       if (cancelled || endedRef.current) return
+      mark()
       es = new EventSource(boardStreamUrl(kelaboId), { withCredentials: true })
       esRef.current = es
       es.addEventListener('contribution', e => {
+        mark()
         try { push([JSON.parse(e.data)]) } catch {}
       })
       es.addEventListener('rename', e => {
+        mark()
         try {
           const { from, to } = JSON.parse(e.data)
           onRenameRef.current?.(from, to)
         } catch {}
       })
       es.addEventListener('utterance', e => {
+        mark()
         try { onUtteranceRef.current?.(JSON.parse(e.data)) } catch {}
       })
       es.addEventListener('debug', e => {
+        mark()
         try { onDebugRef.current?.(JSON.parse(e.data)) } catch {}
       })
       // Conference-audio signalling: roster changes plus, in mesh mode,
       // offer/answer/ICE addressed to this participant (docs 15).
       es.addEventListener('rtc', e => {
+        mark()
         try { onRtcRef.current?.(JSON.parse(e.data)) } catch {}
       })
       // A developer's local coding agent attached or detached (docs 16). This
       // used to be silent, so a dropped bridge handed the kelabo back to the
       // server agent with nothing on screen to say so.
       es.addEventListener('agent', e => {
+        mark()
         try { onAgentRef.current?.(JSON.parse(e.data)) } catch {}
       })
+      // The server's liveness pulse. Carries nothing; its arrival IS the data.
+      es.addEventListener('ping', mark)
       es.addEventListener('ended', () => {
         // Kelabo ended: normal server-side stream close. Stop cleanly, no toast.
         closeForGood()
         onEndedRef.current?.()
       })
       es.onopen = () => {
+        mark()
         if (dropped && lastAtRef.current) backfill(lastAtRef.current)
         dropped = false
         setStatus('live')
@@ -179,6 +196,21 @@ export function useBoard({
         setStatus('reconnecting')
       }
     }
+
+    // The watchdog for the half-open case onerror can never see: if nothing —
+    // not even the 25s ping — has arrived for a minute, the socket is dead no
+    // matter what readyState claims. Close it and resubscribe; onopen backfills
+    // and the call's reconcile loop repairs the rest.
+    const STALL_MS = 60_000
+    const watchdog = setInterval(() => {
+      if (cancelled || endedRef.current || !es) return
+      if (Date.now() - lastEventAt < STALL_MS) return
+      es.close()
+      if (!dropped) toast('Board connection stalled — reconnecting')
+      dropped = true
+      setStatus('reconnecting')
+      subscribe()
+    }, 15_000)
 
     // If we mounted into an already-ended kelabo, don't open a live stream at all.
     if (ended) {
@@ -195,6 +227,7 @@ export function useBoard({
 
     return () => {
       cancelled = true
+      clearInterval(watchdog)
       es?.close()
       navigator.serviceWorker?.removeEventListener?.('message', onSwMessage)
     }

@@ -135,6 +135,10 @@ export const rtc = {
   ice: kelaboId => request(config.gatewayBase, '/rtc/ice', { method: 'POST', body: { kelaboId } }),
   media: (kelaboId, media) =>
     request(config.gatewayBase, '/rtc/media', { method: 'POST', body: { kelaboId, ...media } }),
+  // Authoritative membership snapshot for the reconcile loop — SSE events are
+  // single-delivery, and one missed `peer_joined` used to skew the roster for
+  // the rest of the kelabo.
+  roster: kelaboId => request(config.gatewayBase, '/rtc/roster', { method: 'POST', body: { kelaboId } }),
   signal: (kelaboId, to, signal) =>
     request(config.gatewayBase, '/rtc/signal', { method: 'POST', body: { kelaboId, to, signal } }),
   sfuSession: (kelaboId, sessionDescription) =>

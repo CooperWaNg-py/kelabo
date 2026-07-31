@@ -1,4 +1,4 @@
-import { SSE_EVENT_AGENT, SSE_EVENT_CONTRIBUTION, SSE_EVENT_DEBUG, SSE_EVENT_ENDED, SSE_EVENT_RENAME, SSE_EVENT_RTC, SSE_EVENT_UTTERANCE } from "@kelabo/contracts";
+import { SSE_EVENT_AGENT, SSE_EVENT_CONTRIBUTION, SSE_EVENT_DEBUG, SSE_EVENT_ENDED, SSE_EVENT_PING, SSE_EVENT_RENAME, SSE_EVENT_RTC, SSE_EVENT_UTTERANCE } from "@kelabo/contracts";
 import { putContrib } from "./db.js";
 
 const PING_INTERVAL_MS = 25_000;
@@ -15,7 +15,11 @@ export function setCorsHeaders(c, res) {
 export function createSseHub(c) {
   const pingTimer = setInterval(() => {
     for (const [kelaboId, subs] of c.state.sseSubscribers) {
-      for (const sub of subs) writeRaw(sub.res, `: ping\n\n`);
+      // A named event, not an SSE comment: comments keep proxies from idling
+      // the TCP connection but are invisible to the EventSource API, so the
+      // client could never tell a quiet room from a half-open socket. The
+      // client's staleness watchdog (useBoard.js) counts on seeing this.
+      for (const sub of subs) writeEvent(sub.res, SSE_EVENT_PING, { at: Date.now() });
       if (!subs.size) c.state.sseSubscribers.delete(kelaboId);
     }
   }, PING_INTERVAL_MS);
@@ -75,6 +79,9 @@ export function createSseHub(c) {
       if (c.presence) setImmediate(() => c.presence.refreshKelaboState(participantId));
     });
     c.log("sse_subscribed", { kelaboId, participantId, subscribers: set.size });
+    // Back inside the disconnect grace window: the pending eviction is
+    // cancelled and the room is told the peer never really left.
+    if (participantId) c.rtcRoom?.cancelDisconnect?.(kelaboId, participantId);
     // Entering a kelabo flips `inKelabo` for contact-presence watchers.
     if (participantId && c.presence) c.presence.refreshKelaboState(participantId);
   }

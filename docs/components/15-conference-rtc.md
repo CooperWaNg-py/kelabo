@@ -96,13 +96,21 @@ left** — `/rtc/leave` only fires on a clean exit, never on a shut laptop.
 |---|---|---|
 | `peer_joined` | room | `{ peer }` |
 | `tracks` | room | `{ peer }` — peer's published tracks changed |
-| `media` | room | `{ peer }` — peer's mic or camera was switched on or off |
+| `media` | room | `{ peer }` — peer's mic, camera or screen share was switched on or off |
+| `peer_away` | room | `{ participantId }` — peer's last SSE stream closed; seat held for the grace window |
+| `peer_back` | room | `{ participantId }` — the peer resubscribed inside the window |
 | `peer_left` | room | `{ participantId, reason }` (`left` \| `disconnected`) |
 | `signal` | **one peer** | `{ from, to, signal }` — mesh offer/answer/ICE/bye |
 
-A peer is `{ participantId, displayName, isGuest, sfuSessionId?, tracks, joinedAt }`,
+A peer is `{ participantId, displayName, isGuest, sfuSessionId?, tracks, media, joinedAt }`,
 where `tracks` maps media kind → published track name (`{ audio: "mic" }` for an
-audio-only participant).
+audio-only participant) and `media` is `{ audio, video, screen }`.
+
+The stream also carries a named `ping` event every 25s (as well as the SSE
+comment that keeps proxies from idling the socket). The comment is invisible to
+the EventSource API; the named event is what lets `useBoard`'s watchdog tell a
+quiet room from a half-open socket — a minute of total silence closes and
+resubscribes the stream, which no `onerror` would ever report.
 
 ---
 
@@ -113,10 +121,11 @@ is only ever *checked against* the cookie, never trusted as the source.
 
 | Method | Path | Purpose |
 |---|---|---|
-| POST | `/rtc/join` | → `{ mode, self, peers[], iceServers, meshMax, video }`. Enforces the mesh cap. |
-| POST | `/rtc/leave` | Drops the peer, closes its SFU tracks, fans out `peer_left`. |
-| POST | `/rtc/ice` | Re-mint TURN credentials mid-call (they expire). |
-| POST | `/rtc/media` | Report own mic/camera on-off state; fans `media` to the room. |
+| POST | `/rtc/join` | → `{ mode, self, peers[], iceServers, ttlSeconds, meshMax, video }`. Enforces the mesh cap (in units — see §8). Refuses with `503 rtc_mode_unavailable` if the META cannot be read and the room is not cached: guessing would silently downgrade a mesh kelabo to the SFU. |
+| POST | `/rtc/leave` | Drops the peer, fans out `peer_left` *first*, then best-effort closes its SFU tracks. Also sent as a `pagehide` beacon so a killed tab does not ghost the roster. |
+| POST | `/rtc/ice` | Re-mint TURN credentials mid-call (they expire). The client calls it at 80% of `ttlSeconds` and applies the result with `setConfiguration` (`recovery.js` decides when). |
+| POST | `/rtc/media` | Report own mic/camera/screen on-off state; fans `media` to the room. `screen: true` in a mesh room is an **admission request** — a full room answers `409 mesh_room_full` and the client must not publish. A `409 peer_not_found` from any media report tells an evicted tab it is a ghost; the client rejoins. |
+| POST | `/rtc/roster` | Authoritative membership snapshot. Fetched by every third reconcile tick so membership converges even when an SSE event was missed; a client absent from its own snapshot rejoins. |
 | POST | `/rtc/signal` | Mesh only. Relays to exactly one peer. |
 | POST | `/rtc/sfu/session` | Creates the caller's Cloudflare session and binds it to their peer record. |
 | POST | `/rtc/sfu/tracks` | Publish (`local`) or pull (`remote`). |
@@ -306,8 +315,8 @@ microphone adds nothing and waits to be dialled.
   a switched-off camera stayed a frozen photograph of its owner for the rest of
   the kelabo.
 
-  So `Peer.media` (`{ audio, video }`) carries both switch states, reported on
-  `POST /rtc/media` and fanned as the `media` event. `useVideoLive` still reads
+  So `Peer.media` (`{ audio, video, screen }`) carries the switch states, reported on
+    `POST /rtc/media` and fanned as the `media` event. `useVideoLive` still reads
   the track, because it is the faster signal when it does fire, but the owner's
   report is what settles it — only they can distinguish "switched off" from "a
   bad second of network". Both default to `true`, which reproduces exactly the
@@ -371,12 +380,21 @@ capture system audio, but mixing tab audio into a call whose echo cancellation
 is tuned against the speakers is a feedback loop, and worth doing deliberately
 rather than as a side effect.
 
-**Still to revisit: the mesh cap.** `meshMaxParticipants` is 6, sized for audio,
-and video multiplies per-peer uplink — at 6 participants each browser now
-uploads five camera streams. The cap is deliberately left alone rather than
-guessed at, because the right number depends on the deployment's uplink; lower
-it in `config/kelabo.json` for any kelabo that will actually use cameras in
-mesh mode.
+**The mesh cap counts units, and screen shares are units.**
+`meshMaxParticipants` (default 5) caps a mesh room at *participants plus active
+screen shares*: each participant is one unit and each share is one more,
+because a share is one more video uplink to every peer — precisely the cost the
+cap exists to bound. Enforcement lives in the pure `gateway/src/rtc/capacity.js`
+and is applied at both admission points: `/rtc/join` for a seat, and the
+`screen: true` transition on `/rtc/media` for a share (in mesh mode the Gateway
+never sees the media or the SDP, so that report is the only possible gate — the
+client asks *before* publishing and stops the capture on a `409
+mesh_room_full`). Stopping a share, leaving, or being evicted frees the unit at
+once; a rejoin onto a seat that already holds a share keeps both units and is
+never refused. SFU rooms are not capped. The SPA disables the share button when
+its local count says the room is full (advisory — the Gateway re-checks), and
+the value remains config: raise it for a deployment whose uplinks can carry
+more, or set it `<= 0` to uncap.
 
 ---
 
@@ -384,9 +402,16 @@ mesh mode.
 
 ```json
 "rtc": { "provider": "cloudflare", "defaultMode": "sfu",
-         "meshMaxParticipants": 6, "iceTtlSeconds": 3600, "video": true },
+         "meshMaxParticipants": 5, "iceTtlSeconds": 3600,
+         "disconnectGraceSeconds": 20, "video": true },
 "secrets": { "cloudflareRealtime": "kelabo/<env>/cloudflare-realtime" }
 ```
+
+`disconnectGraceSeconds` is how long a participant whose last SSE stream closed
+keeps their seat (§10). The client holds its transport through a stream drop
+for slightly *less* (15s, `STREAM_GRACE_MS` in `useRtc.js`) — the two windows
+move together, and the client must always give up first, or it becomes a ghost
+holding a session the server has already evicted.
 
 `config/loadConfig.mjs` derives `rtcApiBase` (`https://rtc.live.cloudflare.com/v1`)
 and defaults the whole `rtc` block, so a `kelabo.json` predating conference audio
@@ -409,13 +434,21 @@ the TURN half, STUN alone is used and only relay-requiring peers fail to connect
 | Situation | Result |
 |---|---|
 | No Cloudflare secret | `rtc_unavailable`; board + transcript unaffected |
+| META unreadable at join | `503 rtc_mode_unavailable`, retried by the client — never a guessed (downgraded) mode |
+| `/rtc/join` fails transiently | Retried in-flight (`withRetry`); a still-failed join lands in `error`, which retries itself on a capped backoff and immediately on `online` / tab return. `error` always means "retrying", never "gave up" |
 | Pull of a peer who is not sending yet | Reported inside a 200 as `not_found_track_error`; retried by the reconciler |
 | Publish rejected or the session refuses it | Sender torn down, track stays in `desired`, reconciler republishes |
-| Mesh room full | `409 mesh_room_full`; joiner keeps board + transcript |
-| Mic denied | Not on the call, banner shown; board + transcript unaffected |
+| Mesh room full (participants + shares) | `409 mesh_room_full`; joiner keeps board + transcript, a refused share stops its capture |
+| Mic denied | Not on the call, banner shown; board + transcript unaffected. The peer's tile still reads `live` once connected — status counts any media, or the connection itself for a peer publishing nothing |
 | Autoplay blocked | "Enable audio" button in the Call pane |
-| SSE stream drops | Call tears down and rejoins when the stream returns; the Gateway drops the peer meanwhile |
-| Cloudflare session dies (`session_error`) | Not retried — the call is rebuilt around a new session, backed off, three attempts, then `error` |
+| SSE stream drops briefly | Nobody notices: the server holds the seat for `disconnectGraceSeconds` (fanning `peer_away`/`peer_back`), the client holds its transport for `STREAM_GRACE_MS` and reconciles on recovery |
+| SSE stream stays gone | Past the windows: server evicts (`peer_left`, `disconnected`), client tears down and rejoins when the stream returns |
+| Half-open SSE socket | `useBoard`'s watchdog notices a minute without events (the named `ping` makes silence observable) and resubscribes |
+| Evicted while unaware (second tab left, slept through it) | Self-addressed `peer_left`, a `409` from `/rtc/media`, or absence from the roster snapshot each trigger a clean rejoin — a ghost tab heals in seconds instead of never |
+| Mesh peer connection fails | ICE restart, then capped rebuilds (`recovery.js`); the budget refills on `connected` and with time. Every peer failing at once escalates to a whole-call rebuild via `onFatal` |
+| Call older than the TURN TTL | Credentials re-minted at 80% of TTL via `/rtc/ice` and applied with `setConfiguration`, so ICE restarts keep their relay |
+| Tab killed / hard close | `pagehide` beacon posts `/rtc/leave`; the SSE close (and its grace window) remains the backstop |
+| Cloudflare session dies (`session_error`) | Not retried — the call is rebuilt around a new session, backed off, three attempts, then `error` (which retries, see above) |
 | Kelabo ends | `rtcRoom.closeKelabo` runs *before* `sseHub.ended`, so ending does not emit a per-peer `peer_left` storm |
 
 ---
@@ -426,11 +459,17 @@ the TURN half, STUN alone is used and only relay-requiring peers fail to connect
 the Cloudflare client. It covers session binding, publish announcement, the
 cross-kelabo pull rejection, that renegotiate/close ignore a body-supplied
 session id, single-recipient mesh signalling, the mesh cap refusal (including
-that the room stays `mesh`), rejoining a full room, disconnect cleanup, track
+that the room stays `mesh`, and that screen shares occupy units at both
+admission points), rejoining a full room (with a share held), the roster
+snapshot, that `peer_left` is fanned before the Cloudflare cleanup, the
+META-read failure refusing rather than guessing the mode, disconnect cleanup,
+the disconnect grace window (`peer_away`, cancel-on-resubscribe, expiry), track
 retraction when a peer rebinds to a new session, and auth.
 
-`spa/test/rtc.mjs` covers the two decisions that are pure enough to run in plain
+`spa/test/rtc.mjs` covers the decisions that are pure enough to run in plain
 node and costly enough to get wrong in a live kelabo: `missingPulls` (what the
-reconciler re-pulls) and `isRetryable` / `isFatal` (whether a failure is worth
-another go, worth rebuilding the session for, or neither). Everything else in
-the transports needs a real `RTCPeerConnection`.
+reconciler re-pulls), `isRetryable` / `isFatal` (whether a failure is worth
+another go, worth rebuilding the session for, or neither), and `recovery.js`
+(per-peer rebuild budget, the whole-call escalation, ICE-credential refresh
+timing, join-retry backoff). Everything else in the transports needs a real
+`RTCPeerConnection`.

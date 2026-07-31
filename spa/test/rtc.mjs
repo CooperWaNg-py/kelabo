@@ -1,6 +1,14 @@
 import assert from 'node:assert/strict'
 import { missingPulls, PULL_GRACE_MS } from '../src/rtc/reconcile.js'
 import { isRetryable, isFatal } from '../src/rtc/retry.js'
+import {
+  MAX_PEER_REBUILDS,
+  ICE_REFRESH_RETRY_MS,
+  shouldRebuildPeer,
+  shouldRebuildCall,
+  iceRefreshDelayMs,
+  joinRetryDelayMs,
+} from '../src/rtc/recovery.js'
 
 /**
  * The conference transports need a real RTCPeerConnection, so almost none of
@@ -171,6 +179,85 @@ test('an explicitly marked error is fatal whatever its shape', () => {
 test('nothing is not fatal', () => {
   assert.equal(isFatal(null), false)
   assert.equal(isFatal(undefined), false)
+})
+
+// --- recovery: peer rebuilds -----------------------------------------------
+// The budget bounds a losing streak, not the kelabo. The transport must reset
+// the counter on `connected`; these pin the decision it consults.
+
+test('a failed connection with budget left is rebuilt', () => {
+  assert.equal(shouldRebuildPeer({ connectionState: 'failed', rebuilds: 0 }), true)
+  assert.equal(shouldRebuildPeer({ connectionState: 'failed', rebuilds: MAX_PEER_REBUILDS - 1 }), true)
+})
+
+test('a spent budget stops rebuilding', () => {
+  assert.equal(shouldRebuildPeer({ connectionState: 'failed', rebuilds: MAX_PEER_REBUILDS }), false)
+})
+
+test('only an outright failure is rebuilt — ICE restarts cover the rest', () => {
+  for (const connectionState of ['new', 'connecting', 'connected', 'disconnected', 'closed']) {
+    assert.equal(shouldRebuildPeer({ connectionState, rebuilds: 0 }), false, connectionState)
+  }
+})
+
+// After a reset (the transport zeroes the counter on `connected`) the budget
+// is whole again — four blips across an hour must not add up to darkness.
+test('a reset counter earns a full new budget', () => {
+  assert.equal(shouldRebuildPeer({ connectionState: 'failed', rebuilds: 0 }), true)
+})
+
+// --- recovery: whole-call rebuild ------------------------------------------
+// Every peer failing at once is our own network, not N unlucky peers.
+
+test('all peers failed → rebuild the call', () => {
+  assert.equal(shouldRebuildCall(['failed']), true)
+  assert.equal(shouldRebuildCall(['failed', 'failed', 'failed']), true)
+})
+
+test('one healthy peer keeps the call alive', () => {
+  assert.equal(shouldRebuildCall(['failed', 'connected']), false)
+  assert.equal(shouldRebuildCall(['failed', 'connecting']), false)
+  assert.equal(shouldRebuildCall(['failed', 'disconnected']), false)
+})
+
+test('an empty room is never "beyond repair"', () => {
+  assert.equal(shouldRebuildCall([]), false)
+})
+
+// --- recovery: ICE credential refresh --------------------------------------
+// Minted with a TTL and, before this module, never refreshed: the re-mint
+// endpoint had zero call sites and every ICE restart past the hour gathered
+// with dead TURN credentials.
+
+test('credentials are re-minted at 80% of their TTL', () => {
+  assert.equal(iceRefreshDelayMs(3600), 2880 * 1000)
+  assert.equal(iceRefreshDelayMs(600), 480 * 1000)
+})
+
+test('a tiny TTL is floored, never a busy loop', () => {
+  assert.equal(iceRefreshDelayMs(10), 30_000)
+  assert.equal(iceRefreshDelayMs(1), 30_000)
+})
+
+test('a missing or broken TTL falls back to the retry delay', () => {
+  for (const ttl of [0, -5, NaN, undefined, null, 'soon']) {
+    assert.equal(iceRefreshDelayMs(ttl), ICE_REFRESH_RETRY_MS, String(ttl))
+  }
+})
+
+// --- recovery: join retry ---------------------------------------------------
+// `error` means "retrying in the background", never "gave up forever".
+
+test('join retries back off and cap', () => {
+  assert.equal(joinRetryDelayMs(0), 2000)
+  assert.equal(joinRetryDelayMs(1), 4000)
+  assert.equal(joinRetryDelayMs(2), 8000)
+  assert.equal(joinRetryDelayMs(10), 30_000, 'capped — a retry always comes')
+})
+
+test('a nonsense attempt count is treated as the first attempt', () => {
+  assert.equal(joinRetryDelayMs(-3), 2000)
+  assert.equal(joinRetryDelayMs(NaN), 2000)
 })
 
 for (const [name, fn] of tests) {

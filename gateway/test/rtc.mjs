@@ -18,7 +18,12 @@ const METAS = {
   "m-sfu": { rtcMode: "sfu" },
   "m-other": { rtcMode: "sfu" },
   "m-mesh": { rtcMode: "mesh" },
+  // Exactly its second META read fails — the shape of a DynamoDB blip landing
+  // between the route's own getMeta and the room's modeFor.
+  "m-flaky": { rtcMode: "mesh" },
 };
+
+let flakyReads = 0;
 
 function metaItem(kelaboId) {
   return {
@@ -46,6 +51,13 @@ const db = {
     if (name === "GetCommand") {
       const pk = String(cmd.input.Key.PK ?? "");
       const id = pk.startsWith("KELABO#") ? pk.slice("KELABO#".length) : "";
+      if (id === "m-flaky" && cmd.input.Key.SK === "META") {
+        flakyReads += 1;
+        // Exactly the second read fails: the route's own getMeta succeeds, the
+        // room's modeFor read hits the blip. Later reads succeed again.
+        if (flakyReads === 2) throw new Error("dynamo blinked");
+        return { Item: metaItem(id) };
+      }
       if (METAS[id] && cmd.input.Key.SK === "META") return { Item: metaItem(id) };
       return {};
     }
@@ -66,7 +78,9 @@ const config = {
   archiveKeyPrefix: "archives",
   secrets: { llm: "t/llm", cookieSigningKey: "t/cookie", mcpPrefix: "t/mcp/", cloudflareRealtime: "t/cf" },
   rtcApiBase: "http://rtc.test/v1",
-  rtc: { defaultMode: "sfu", meshMaxParticipants: MESH_MAX, iceTtlSeconds: 3600, video: false },
+  // Grace 0 keeps the eviction tests immediate; the grace-window behaviour has
+  // its own container below.
+  rtc: { defaultMode: "sfu", meshMaxParticipants: MESH_MAX, iceTtlSeconds: 3600, disconnectGraceSeconds: 0, video: false },
   llm: { provider: "fake", model: "fake", smallModel: "fake" },
   openaiBaseUrl: "http://unused",
   gateway: { agent: { maxConcurrentRuns: 1, sensitivity: "medium", maxContributionsPerMinute: 3, cooldownSeconds: 45, rollingWindowSize: 10, turnTimeoutSeconds: 0.1 } },
@@ -103,8 +117,11 @@ function createRtcStub() {
       calls.push({ op: "closeTracks", sessionId, body });
       return { tracks: body.tracks };
     },
+    // Settable per test: a slow Cloudflare API must not delay the roster.
+    getSessionDelayMs: 0,
     async getSession(sessionId) {
       calls.push({ op: "getSession", sessionId });
+      if (this.getSessionDelayMs) await new Promise((r) => setTimeout(r, this.getSessionDelayMs));
       return { tracks: [{ mid: "0", trackName: "mic" }] };
     },
     async iceServers(ttl) {
@@ -263,7 +280,8 @@ async function main() {
     assert.equal(res.body.self.displayName, "Alice");
     assert.deepEqual(res.body.peers, []);
     assert.ok(res.body.iceServers.length > 0, "ICE servers handed to the client");
-    ok("POST /rtc/join → mode from META, own peer, empty roster, ICE servers");
+    assert.equal(res.body.ttlSeconds, 3600, "the client schedules its own TURN re-mint from this");
+    ok("POST /rtc/join → mode from META, own peer, empty roster, ICE servers + TTL");
   }
 
   {
@@ -443,7 +461,7 @@ async function main() {
       body: { kelaboId: "m-sfu", audio: false, video: true },
     });
     assert.equal(res.status, 200);
-    assert.deepEqual(res.body.media, { audio: false, video: true });
+    assert.deepEqual(res.body.media, { audio: false, video: true, screen: false });
     const ev = await waitFor(() =>
       aliceStream.rtc.find((e) => e.kind === "media" && e.peer.participantId === "alice@example.com"),
     );
@@ -523,6 +541,23 @@ async function main() {
     assert.equal(ev.reason, "left");
     assert.equal(c.rtcRoom.peer("m-sfu", "bob@example.com"), null);
     ok("POST /rtc/leave drops the peer and fans out peer_left");
+  }
+
+  {
+    // The roster hears about a departure before the Cloudflare cleanup, not
+    // after: those calls carry 10s timeouts each, and awaiting them first held
+    // everyone's roster hostage to a slow third-party API.
+    rtc.getSessionDelayMs = 300;
+    const t0 = Date.now();
+    const pending = req(port, { path: "/rtc/leave", cookie: aliceSfu, body: { kelaboId: "m-sfu" } });
+    await waitFor(() =>
+      aliceStream.rtc.find((e) => e.kind === "peer_left" && e.participantId === "alice@example.com"),
+    );
+    const elapsed = Date.now() - t0;
+    assert.ok(elapsed < 250, `peer_left fanned before the slow Cloudflare cleanup (${elapsed}ms)`);
+    await pending;
+    rtc.getSessionDelayMs = 0;
+    ok("peer_left is broadcast before the best-effort Cloudflare session cleanup");
   }
 
   // --- Mesh: signalling is point-to-point ------------------------------------
@@ -625,6 +660,99 @@ async function main() {
     ok("a reconnecting stream does not evict the participant; the last close does");
   }
 
+  // --- Mesh: screen shares occupy capacity units -----------------------------
+  // The cap is participants PLUS active screen shares: a share is one more
+  // uplink to every peer, which is the cost the cap exists to bound. In mesh
+  // mode the Gateway never sees the media, so the `screen` flag on /rtc/media
+  // is the admission gate.
+  {
+    // The room currently holds only alice. Bob rejoins: 2 units.
+    const res = await req(port, { path: "/rtc/join", cookie: bobMesh, body: { kelaboId: "m-mesh" } });
+    assert.equal(res.status, 200);
+
+    // Alice starts sharing: 3 units — the room is now full at MESH_MAX=3.
+    const share = await req(port, { path: "/rtc/media", cookie: aliceMesh, body: { kelaboId: "m-mesh", screen: true } });
+    assert.equal(share.status, 200);
+    assert.equal(share.body.media.screen, true);
+    const ev = await waitFor(() =>
+      meshStreams.alice.rtc.find((e) => e.kind === "media" && e.peer.participantId === "alice@example.com" && e.peer.media.screen === true),
+    );
+    assert.ok(ev, "the share is fanned to the room like any media change");
+    ok("a mesh screen share is admitted and announced while there is room");
+  }
+
+  {
+    // Two participants + one share = 3 units: a third PARTICIPANT is refused.
+    const res = await req(port, { path: "/rtc/join", cookie: cookieFor("m-mesh", "dave@example.com"), body: { kelaboId: "m-mesh" } });
+    assert.equal(res.status, 409);
+    assert.equal(res.body.error, "mesh_room_full");
+    assert.equal(res.body.meshMax, MESH_MAX);
+    ok("a screen share counts against the mesh cap: a joiner past it → 409");
+  }
+
+  {
+    // ...and a second SHARE is refused the same way.
+    const res = await req(port, { path: "/rtc/media", cookie: bobMesh, body: { kelaboId: "m-mesh", screen: true } });
+    assert.equal(res.status, 409);
+    assert.equal(res.body.error, "mesh_room_full");
+    assert.equal(res.body.meshMax, MESH_MAX);
+    assert.equal(c.rtcRoom.peer("m-mesh", "bob@example.com").media.screen, false, "the refused share is not recorded");
+    ok("a screen share past the cap → 409 mesh_room_full, nothing recorded");
+  }
+
+  {
+    // Stopping the share frees its unit immediately.
+    const stop = await req(port, { path: "/rtc/media", cookie: aliceMesh, body: { kelaboId: "m-mesh", screen: false } });
+    assert.equal(stop.status, 200);
+    const res = await req(port, { path: "/rtc/join", cookie: cookieFor("m-mesh", "dave@example.com"), body: { kelaboId: "m-mesh" } });
+    assert.equal(res.status, 200, "the freed unit admits the joiner");
+    // Full again (3 participants): no share fits any more.
+    const share = await req(port, { path: "/rtc/media", cookie: aliceMesh, body: { kelaboId: "m-mesh", screen: true } });
+    assert.equal(share.status, 409);
+    ok("stopping a share frees a unit; a full room of participants admits no share");
+  }
+
+  {
+    // A rejoin onto a seat that already holds a share keeps both units and is
+    // never refused — same rule as a plain rejoin.
+    await req(port, { path: "/rtc/leave", cookie: cookieFor("m-mesh", "dave@example.com"), body: { kelaboId: "m-mesh" } });
+    const share = await req(port, { path: "/rtc/media", cookie: aliceMesh, body: { kelaboId: "m-mesh", screen: true } });
+    assert.equal(share.status, 200);
+    const rejoin = await req(port, { path: "/rtc/join", cookie: aliceMesh, body: { kelaboId: "m-mesh" } });
+    assert.equal(rejoin.status, 200);
+    assert.equal(c.rtcRoom.peer("m-mesh", "alice@example.com").media.screen, true, "the share survives the rejoin");
+    ok("rejoining while sharing neither double-counts nor drops the share");
+  }
+
+  // --- Roster snapshot -------------------------------------------------------
+  {
+    const res = await req(port, { path: "/rtc/roster", cookie: aliceMesh, body: { kelaboId: "m-mesh" } });
+    assert.equal(res.status, 200);
+    const ids = res.body.peers.map((p) => p.participantId).sort();
+    assert.deepEqual(ids, ["alice@example.com", "bob@example.com"]);
+    const alice = res.body.peers.find((p) => p.participantId === "alice@example.com");
+    assert.equal(alice.media.screen, true, "the snapshot carries media state");
+    const cross = await req(port, { path: "/rtc/roster", cookie: aliceMesh, body: { kelaboId: "m-sfu" } });
+    assert.equal(cross.status, 403, "kelabo scope still rides the cookie");
+    ok("POST /rtc/roster returns the authoritative membership snapshot");
+  }
+
+  // --- A META read failure never guesses the mode ----------------------------
+  {
+    // The db stub fails every second META read of m-flaky: the route's own
+    // getMeta succeeds, the room's modeFor read fails. The old code fell back
+    // to the default mode — `sfu` — silently revoking the peer-to-peer
+    // guarantee of a mesh kelabo. It must refuse instead, retryably.
+    const res = await req(port, { path: "/rtc/join", cookie: cookieFor("m-flaky", "alice@example.com"), body: { kelaboId: "m-flaky" } });
+    assert.equal(res.status, 503);
+    assert.equal(res.body.error, "rtc_mode_unavailable");
+    assert.equal(c.state.rtcRooms.get("m-flaky"), undefined, "no room was created on a guess");
+    const retry = await req(port, { path: "/rtc/join", cookie: cookieFor("m-flaky", "alice@example.com"), body: { kelaboId: "m-flaky" } });
+    assert.equal(retry.status, 200);
+    assert.equal(retry.body.mode, "mesh", "once the META is readable the true mode wins");
+    ok("a META read failure refuses the join (503) instead of guessing sfu");
+  }
+
   // --- Auth ------------------------------------------------------------------
   {
     const res = await req(port, { path: "/rtc/join", body: { kelaboId: "m-sfu" } });
@@ -637,7 +765,81 @@ async function main() {
   meshStreams.bob.res.destroy();
   server.close();
   await c.shutdown();
+
+  await testDisconnectGrace();
   console.log(`\n${passed} rtc tests passed`);
+}
+
+// --- The disconnect grace window -------------------------------------------
+// A dropped SSE stream no longer evicts on the spot: the seat is held for
+// rtc.disconnectGraceSeconds (`peer_away` fanned), a resubscribe cancels the
+// eviction (`peer_back`), and only the window expiring is a real departure.
+// Its own container: the main suite runs with grace 0 so eviction is
+// immediate there.
+async function testDisconnectGrace() {
+  const GRACE_S = 0.25;
+  const rtc = createRtcStub();
+  const c = await createContainer({
+    config: { ...config, rtc: { ...config.rtc, disconnectGraceSeconds: GRACE_S } },
+    db,
+    s3: { send: async () => ({}) },
+    secrets,
+    rtc,
+    skipRebuild: true,
+  });
+  const server = createGateway(c);
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  const port = server.address().port;
+
+  const alice = cookieFor("m-mesh", "alice@example.com");
+  const bob = cookieFor("m-mesh", "bob@example.com");
+  const aliceStream = await connectSse(port, "m-mesh", alice);
+  let bobStream = await connectSse(port, "m-mesh", bob);
+  for (const cookie of [alice, bob]) {
+    const res = await req(port, { path: "/rtc/join", cookie, body: { kelaboId: "m-mesh" } });
+    assert.equal(res.status, 200);
+  }
+
+  {
+    bobStream.res.destroy();
+    const away = await waitFor(() =>
+      aliceStream.rtc.find((e) => e.kind === "peer_away" && e.participantId === "bob@example.com"),
+    );
+    assert.ok(away);
+    assert.ok(c.rtcRoom.peer("m-mesh", "bob@example.com"), "the seat is held through the window");
+    ok("a dropped stream fans peer_away and holds the seat");
+  }
+
+  {
+    bobStream = await connectSse(port, "m-mesh", bob);
+    const back = await waitFor(() =>
+      aliceStream.rtc.find((e) => e.kind === "peer_back" && e.participantId === "bob@example.com"),
+    );
+    assert.ok(back);
+    // Outlast the original window: the cancelled eviction must never fire.
+    await new Promise((r) => setTimeout(r, GRACE_S * 1000 + 200));
+    assert.ok(c.rtcRoom.peer("m-mesh", "bob@example.com"), "bob survived his blip");
+    assert.equal(
+      aliceStream.rtc.filter((e) => e.kind === "peer_left" && e.participantId === "bob@example.com").length,
+      0,
+      "no peer_left was fanned for a peer who came back",
+    );
+    ok("a resubscribe inside the window cancels the eviction and fans peer_back");
+  }
+
+  {
+    bobStream.res.destroy();
+    const gone = await waitFor(() =>
+      aliceStream.rtc.find((e) => e.kind === "peer_left" && e.participantId === "bob@example.com"),
+    );
+    assert.equal(gone.reason, "disconnected");
+    assert.equal(c.rtcRoom.peer("m-mesh", "bob@example.com"), null);
+    ok("a stream that stays gone past the window is a real departure");
+  }
+
+  aliceStream.res.destroy();
+  server.close();
+  await c.shutdown();
 }
 
 main().catch((err) => {

@@ -65,6 +65,9 @@ export function ControlBar({
   screen,
   camAvailable,
   camPublishing,
+  // Non-null when a screen share cannot be admitted right now (mesh room at
+  // its participants-plus-shares cap); the string says why.
+  shareNote = null,
   stt,
   micPrefs = {},
   captionsOn,
@@ -262,14 +265,16 @@ export function ControlBar({
         <div className="cbar-group">
           <button
             className={'cbtn cbtn-share' + (screen.on ? ' is-on' : '')}
-            disabled={ended || !camAvailable || screen.state === 'unavailable'}
+            disabled={ended || !camAvailable || screen.state === 'unavailable' || (!!shareNote && !screen.on)}
             aria-pressed={screen.on}
             title={
               screen.state === 'unavailable'
                 ? 'This browser cannot share a screen'
                 : !camAvailable
                   ? 'Screen sharing is not available on this call'
-                  : screen.on ? 'Stop sharing your screen' : 'Share your screen'
+                  : shareNote && !screen.on
+                    ? shareNote
+                    : screen.on ? 'Stop sharing your screen' : 'Share your screen'
             }
             onClick={screen.toggle}
           >

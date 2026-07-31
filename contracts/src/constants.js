@@ -38,8 +38,11 @@ export const JOIN_MODES = ["audio-board", "board-only"];
 //   sfu  - Cloudflare Realtime SFU relays media through Cloudflare's edge. Scales.
 //   mesh - full-mesh WebRTC; media stays peer-to-peer under DTLS-SRTP and no
 //          server (ours or Cloudflare's) can decrypt it. Capped at
-//          rtc.meshMaxParticipants; joiners past the cap are refused, never
-//          silently downgraded to `sfu`.
+//          rtc.meshMaxParticipants *units*, where a participant is one unit and
+//          an active screen share is another — a share is one more uplink to
+//          every peer, which is exactly what the cap exists to bound. Joiners
+//          and shares past the cap are refused, never silently downgraded to
+//          `sfu`.
 export const RTC_MODES = ["sfu", "mesh"];
 
 // Track names published to the SFU / carried across mesh peer connections. The
@@ -70,6 +73,10 @@ export const ERROR_CODES = [
   "stt_unavailable",
   "rtc_unavailable",
   "mesh_room_full",
+  // The kelabo's transport could not be resolved (META unreadable) and the
+  // room is not in memory. Failing the join beats guessing the mode: guessing
+  // `sfu` for a mesh kelabo would silently revoke the peer-to-peer guarantee.
+  "rtc_mode_unavailable",
   "peer_not_found",
   "email_not_verified",
   "internal_error",

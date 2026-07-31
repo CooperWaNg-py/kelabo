@@ -325,7 +325,13 @@ export function RoomShell({
     alerts.push({ kind: 'warn', key: 'stt', text: 'Transcription is unavailable right now — the call and the board still work.' })
   }
   if (call.state === 'full') {
-    alerts.push({ kind: 'danger', key: 'full', text: `This is a secure peer-to-peer kelabo and it is full (${call.meshMax} participants). Peer-to-peer kelabos are capped because every participant sends audio to every other one — the call is not switched to a relay to make room. You can still follow the captions and the board.` })
+    alerts.push({ kind: 'danger', key: 'full', text: `This is a secure peer-to-peer kelabo and it is full (${call.meshMax} — participants and shared screens count together). Peer-to-peer kelabos are capped because every participant sends media to every other one — the call is not switched to a relay to make room. You can still follow the captions and the board.` })
+  }
+  if (call.screenDenied === 'full') {
+    alerts.push({ kind: 'warn', key: 'shrfull', text: `Screen sharing was refused — this peer-to-peer kelabo is at its limit of ${call.meshMax} (participants and shared screens count together). Try again when someone leaves or stops sharing.` })
+  }
+  if (call.screenDenied === 'error') {
+    alerts.push({ kind: 'warn', key: 'shrerr', text: 'Screen sharing could not be announced to the room — the share was stopped. Try again in a moment.' })
   }
   if (call.state === 'unavailable') {
     alerts.push({ kind: 'warn', key: 'rtc', text: 'Conference audio is not configured on this deployment — captions and the board still work.' })
@@ -487,6 +493,9 @@ export function RoomShell({
         // even see yourself.
         camAvailable={call.videoAllowed}
         camPublishing={call.state === 'live'}
+        // Mesh capacity gate: null when a share could be admitted, otherwise
+        // the reason the button is disabled.
+        shareNote={call.canShareScreen ? null : `This peer-to-peer kelabo is at its limit of ${call.meshMax} — participants and shared screens count together.`}
         stt={stt}
         micPrefs={micPrefs}
         captionsOn={captionsOn}

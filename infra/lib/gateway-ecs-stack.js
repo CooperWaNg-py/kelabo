@@ -104,6 +104,7 @@ export class GatewayEcsStack extends Stack {
           KELABO_RTC_DEFAULT_MODE: cfg.rtc.defaultMode,
           KELABO_RTC_MESH_MAX: String(cfg.rtc.meshMaxParticipants),
           KELABO_RTC_ICE_TTL: String(cfg.rtc.iceTtlSeconds),
+          KELABO_RTC_DISCONNECT_GRACE: String(cfg.rtc.disconnectGraceSeconds),
           KELABO_RTC_VIDEO: String(cfg.rtc.video),
           KELABO_LLM_PROVIDER: cfg.llm.provider,
           KELABO_LLM_MODEL: cfg.llm.model,

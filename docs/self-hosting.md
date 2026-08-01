@@ -118,7 +118,7 @@ All configuration is one file. Nothing anywhere else needs editing.
 
    | Field | Meaning |
    |---|---|
-   | `baseDomain` | e.g. `mycompany.com` — every endpoint hangs off this |
+   | `environments.<env>.baseDomain` | e.g. `mycompany.com` — the registrable domain this environment's names hang off. **Per environment, with no shared default**, so an environment can sit on a different domain entirely (test on `mycompany.dev`, production on `mycompany.com`) and none can silently inherit the wrong one. Cookies are scoped to the portal host, so environments sharing a registrable domain also send each other their session cookies — harmless, since each verifies with its own key, but not hygiene |
    | `environments.<env>.account` / `region` | your AWS account ID and region |
    | `environments.<env>.hostedZone.name` / `id` | the Route 53 zone from C1 |
    | `environments.<env>.subdomains.portal` / `gateway` | e.g. `kelabo` and `gw.kelabo` → `kelabo.mycompany.com`, `gw.kelabo.mycompany.com` |

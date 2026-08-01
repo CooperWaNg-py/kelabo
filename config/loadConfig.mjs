@@ -17,13 +17,28 @@ export function loadConfig(env,   configPath = join(here, "kelabo.json")) {
   const block = raw.environments?.[env];
   if (!block) throw new Error(`kelabo config: unknown env "${env}" (have: ${Object.keys(raw.environments || {}).join(", ")})`);
 
-  // An environment may live on its own registrable domain (dev/test on
-  // kelabo.dev, production on kelabo.me): cookies are scoped to
-  // .<portalDomain>, so environments sharing one registrable domain send each
-  // other their session cookies — harmless (different signing keys) but not
-  // hygiene. Per-env baseDomain keeps non-prod traffic off the production
-  // domain entirely.
-  const baseDomain = block.baseDomain ?? raw.baseDomain;
+  // The registrable domain this environment answers on — declared by the
+  // environment itself, with no shared default.
+  //
+  // Environments routinely live on different domains (test on kelabo.dev,
+  // production on kelabo.me), because cookies are scoped to .<portalDomain>:
+  // two environments under one registrable domain send each other their session
+  // cookies. Harmless — each verifies with its own signing key — but not
+  // hygiene, and production tokens have no business transiting a test host.
+  //
+  // A root-level fallback used to supply this. It was dropped because it made
+  // the most important fact about an environment the one thing its own block
+  // did not state, and because it failed silently: an absent value is
+  // `undefined`, and `gw.${undefined}` is the string "gw.undefined", so a typo
+  // bought a certificate request, DNS records and cookies for a domain nobody
+  // owns rather than an error.
+  const baseDomain = block.baseDomain;
+  if (!baseDomain) {
+    throw new Error(
+      `kelabo config: env "${env}" has no baseDomain. Every environment declares its own ` +
+        `(e.g. "baseDomain": "example.com"); there is deliberately no shared default.`
+    );
+  }
   const portalDomain = block.subdomains.portal
     ? `${block.subdomains.portal}.${baseDomain}`
     : baseDomain;

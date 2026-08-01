@@ -1,0 +1,96 @@
+# 19 — Optional capabilities & graceful degradation
+
+Every external provider Kelabo uses can be absent: no Deepgram key, an expired
+Cloudflare token, no LLM configured, a tier that opted a room out of the
+assistant. None of that is an error. It is a *smaller kelabo*, and the product
+must shrink to fit it rather than jam.
+
+This doc names the pattern so new code lands inside it instead of rediscovering
+it one incident at a time.
+
+## 1. The floor and the ladder
+
+Capabilities are ordered. Each rung depends only on the rungs below it, and the
+bottom rung is the product's floor — the thing that must work when everything
+optional is gone:
+
+| Rung | Capability | Needs | When it is absent |
+|------|-----------|-------|-------------------|
+| 0 | join + presence + typed messages | gateway only | (never — this is the floor) |
+| 1 | P2P call (mesh) | rung 0 | messages-only room |
+| 2 | SFU conference, TURN | Cloudflare creds | fall back to mesh (capped) |
+| 3 | live transcription | Deepgram key | typed messages only |
+| 4 | assistant / board | LLM key or dev agent | no board tab, no @kelabo |
+| 5 | minutes, records, history | archive + rung 3 | no record after the kelabo |
+
+**The rule that keeps the ladder honest: no capability may own state that a
+lower rung needs.** A rung can *consume* what is below it; it must never be a
+gatekeeper for it.
+
+The incident that named this rule: `muted` — the flag that gates the outgoing
+*call* track (rung 1) — lived in the STT hook (rung 3) and was only cleared
+inside the Deepgram socket's `onopen`. "Unmute" therefore *meant* "successfully
+connect to Deepgram", and on any deployment where Deepgram was absent or broken
+the mic could never be unmuted while the UI complained about transcription.
+Two visible bugs, one inverted dependency.
+
+## 2. Absence is a status with a reason, not an exception
+
+A capability is in one of three states, and every state is renderable:
+
+- **on** — configured, healthy.
+- **off** — not configured, or policy says no (`reason: not_configured |
+  policy | quota`). Known *before* anything is attempted; the UI simply does
+  not offer the affordance (no Transcript tab, no board, no captions toggle).
+- **degraded** — was on, is currently failing (`reason: token_expired |
+  unreachable | reconnecting`). Announced as a chip or toast on the capability
+  itself ("Transcription unavailable — board still works"), while every other
+  rung continues untouched.
+
+The existing conformers, which new code should imitate:
+
+- Gateway without Cloudflare creds answers `/rtc/*` with `rtc_unavailable` and
+  the kelabo runs as transcript + board (Makefile notes, docs 15).
+- `transcriptAccess` on `/caption/history`: the server states the policy, the
+  SPA offers or withholds the Transcript tab from it (docs 09 §10).
+- The STT socket exhausting reconnects demotes itself to `stt_unavailable`
+  with a toast — captions stop, the room does not.
+
+## 3. The server computes it, the client renders it
+
+The client must never *infer* a capability from a sibling component's failure —
+that is how a Deepgram error became a frozen mic. The decision has three
+inputs, and all three live server-side:
+
+1. **Deployment config** — is the secret present, is the feature compiled in
+   (`rtcMode`, `mcpEnabled`, …).
+2. **Policy** — what this tier/room/participant is allowed
+   (`guestTranscriptAccess`, guest rooms with no assistant, quotas).
+3. **Runtime health** — the token mint failed, the provider is down.
+
+Target shape (adopt incrementally — new capabilities should join it rather
+than inventing parallel flags): the join/META response carries a `capabilities`
+map, `{ name: { on, reason?, mode? } }`, per participant. `transcriptAccess`
+is the first field of this shape in production; fold future flags into the map
+rather than accreting booleans.
+
+## 4. Public repo = mechanism, private repo = policy
+
+The public repo builds the ladder, the statuses and the fallbacks, with
+**permissive defaults** (self-hosting a full deployment needs no tuning). The
+private repo changes *configuration only*: flip a default
+(`guestTranscriptAccess: false`), set quotas (`guestRooms.*`), mark a tier's
+rooms as `assistant: off`. If a hosted-tier behaviour needs a UI fork or a new
+code path rather than a config value, the mechanism is missing here — add it
+here first, then configure it there. (Precedent: the Messages/Transcript tab
+split, built here, consumed there as one config default.)
+
+## 5. Checklist for touching a provider integration
+
+- Does anything a lower rung needs live in your module? Move it down.
+- On failure, do you demote *yourself* with a reason, and nothing else?
+- Is "not configured" handled before the first network attempt, not as a
+  retry loop that eventually gives up?
+- Does the UI affordance come from a server-stated status rather than from
+  observing your errors?
+- Can the private repo get its behaviour from your config knob alone?

@@ -359,7 +359,6 @@ export function useCapture({ kelaboId, enabled, finalOnly, startedAt, language =
       composerRef.current.reset()
       setSpeakingOnce(false)
       setState('live')
-      setMuted(false)
       clearKeepAlive()
       keepAliveRef.current = setInterval(pingIfIdle, 2000)
     }
@@ -467,12 +466,27 @@ export function useCapture({ kelaboId, enabled, finalOnly, startedAt, language =
   }, [closeSocket, sealAndFlush])
 
   const unmute = useCallback(() => {
+    // Unmuting is a CALL action: `muted` is what gates the outgoing conference
+    // track (useRtc), so it flips here, immediately and unconditionally — the
+    // room hears the speaker the moment they ask. Transcription is a tap on the
+    // same stream, restarted *afterwards* and only where this kelabo transcribes
+    // at all; its failure demotes captions ("Transcription unavailable"), never
+    // the audio. Flipping `muted` only inside the Deepgram socket's onopen —
+    // the old behaviour — made "unmute" mean "successfully connect to
+    // Deepgram", which froze the mic on every deployment where Deepgram was
+    // absent, unconfigured or broken.
+    setMuted(false)
+    if (!enabled || stoppedRef.current) {
+      setState(s => (s === 'muted' ? 'idle' : s))
+      return
+    }
+    setState('connecting')
     reconnectsRef.current = 0
     // Analysis pipeline may have been torn down (e.g. the shared stream was
     // re-acquired while muted).
     if (!streamRef.current || !ctxRef.current) start()
     else connectSocket()
-  }, [connectSocket, start])
+  }, [enabled, connectSocket, start])
 
   const stop = useCallback(() => {
     stoppedRef.current = true

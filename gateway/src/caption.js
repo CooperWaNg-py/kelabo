@@ -123,6 +123,9 @@ export async function handleCaptionPost(c, req, res) {
     tEnd: post.tEnd,
     isFinal: true,
     tenantId: participant.tenantId,
+    // Persisted, so the record and its download can tell a typed line from a
+    // transcribed one. Absent means speech — the pre-2026-08 rows say so.
+    ...(typed ? { source: "typed" } : {}),
   };
 
   try {

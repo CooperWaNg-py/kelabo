@@ -42,6 +42,7 @@ export async function endKelabo(c, kelaboId) {
     tEnd: i.tEnd,
     isFinal: true,
     tenantId: i.tenantId,
+    ...(i.source ? { source: i.source } : {}),
   }));
   const board = sessionArchive?.board ?? (await queryContrib(c, kelaboId)).map((i) => ({
     id: i.id ?? `${kelaboId}:${i.SK}`,

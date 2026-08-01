@@ -35,7 +35,7 @@ Partition per kelabo: `PK = KELABO#<kelaboId>`.
 | Item | PK | SK | Key attributes |
 |------|----|----|----------------|
 | kelabo meta | `KELABO#<id>` | `META` | `status`(scheduled/active/ended/cancelled), `tenantStatus`, `title`, `hostIdentity`, `createdAt`, `scheduledAt?`, `durationMinutes?`, `note?`, `startedAt`, `hostJoinedAt?`, `endedAt?`, `participants[]`, `mode`(dev/server/unknown), `isDeveloperPresent`, `agentRuntime?`, `agentLabel?`, `rtcMode`, `mcpEnabled`, `hasMinutes`, `tenantId`, `ttl?` |
-| utterance | `KELABO#<id>` | `UTT#<tStartPadded>#<seq>` | `speaker`, `text`, `tStart`, `tEnd`, `clientId`, `tenantId` |
+| utterance | `KELABO#<id>` | `UTT#<tStartPadded>#<seq>` | `speaker`, `text`, `tStart`, `tEnd`, `clientId`, `tenantId`, `source?`(typed — absent means speech) |
 | contribution | `KELABO#<id>` | `CONTRIB#<at:13>#<rand6>` | `tag`, `kind`, `to`, `title`, `markdown`, `sources`, `author`, `origin`(server/local/opencode), `runtime?`, `agentLabel?`, `at`, `tenantId` |
 | minutes | `KELABO#<id>` | `MINUTES` | `MinutesDoc` fields, `generatedAt`, `generatedBy` |
 | agent binding (dev) | `KELABO#<id>` | `PROMOTION` | `runtime`, `sessionRef`, `workspace`, `label`, `boundBy`, `boundAt` — records **which local agent session receives transcript** (docs 16). Runtime-agnostic: `sessionRef` and `workspace` are opaque. Rows written before docs 16 carry `opencodeSessionId`/`opencodeProjectId`/`opencodeDirectory` instead and are read as `runtime: "opencode"`. |

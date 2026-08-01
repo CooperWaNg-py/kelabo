@@ -219,6 +219,11 @@ export default function RecordDetail() {
                   <SpeakerTag name={u.speaker} />
                   <span className="text">
                     <span className="tstamp">{fmtClock(u.tStart)}</span>
+                    {/* Same marker as the live panel: a typed line is something
+                        somebody wrote, not Deepgram's hearing of them. */}
+                    {u.source === 'typed' && (
+                      <Icon name="pencil" size={11} className="chat-typed line-typed" label="Typed" />
+                    )}
                     {u.text}
                   </span>
                 </div>

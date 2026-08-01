@@ -15,6 +15,7 @@
  * @property {string}  [tenantId]
  * @property {string}  [lang]
  * @property {string}  [tr]
+ * @property {"speech"|"typed"} [source] absent = "speech" (pre-2026-08 rows)
  */
 
 /**

@@ -12,6 +12,12 @@ export const utteranceSchema = z.object({
   tenantId: z.string().optional(),
   lang: z.string().optional(),
   tr: z.string().optional(),
+  // How the words came to exist — same meaning as captionPostSchema.source.
+  // Absent means "speech": the field was introduced 2026-08 and rows written
+  // before it exist only for spoken words, so absence and "speech" are the
+  // same statement. Carried through persistence and the archive so the record
+  // (and its download) can tell a typed line from a transcribed one.
+  source: z.enum(["speech", "typed"]).optional(),
 });
 
 export const captionPostSchema = z.object({

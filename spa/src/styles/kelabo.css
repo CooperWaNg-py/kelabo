@@ -2018,6 +2018,10 @@ h5.md-h, h6.md-h { font-size: var(--text-sm); color: var(--text-2); }
    it sits inside a metadata row that is already three items wide in a 22%-width
    panel, and how the words arrived is the least important thing on that row. */
 .chat-typed { color: var(--text-3); }
+/* The same glyph in an archived record's transcript line, where it sits inline
+   between the timestamp and the words and needs the gap the row's flex layout
+   provided for free in the live panel. */
+.line-typed { margin-right: var(--space-2); }
 
 /* ---------- LLM debug panel ---------- */
 /* Raw request/response blocks. A class rather than an inline style so the

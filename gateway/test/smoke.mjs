@@ -298,6 +298,32 @@ async function main() {
   }
 
   {
+    // A typed message keeps its provenance all the way into the transcript row:
+    // the record view and its download tell a typed line from a transcribed one
+    // by this attribute, so losing it at persistence is losing it everywhere.
+    const text = "typing this rather than saying it";
+    const res = await req(port, {
+      method: "POST",
+      path: "/caption",
+      headers: { cookie: `kelabo_participant=${participantCookie}` },
+      body: { kelaboId: KELABO, text, isFinal: true, turnComplete: true, kind: "sealed", source: "typed", messageId: "m-typed", tStart: 7000, tEnd: 7000 },
+    });
+    assert.equal(res.status, 202);
+    const typedUtt = calls.puts.find((p) => String(p.Item.SK).startsWith("UTT#") && p.Item.text === text);
+    assert.ok(typedUtt, "typed message is persisted");
+    assert.equal(typedUtt.Item.source, "typed", "persisted row records that it was typed");
+    const typedEvent = await waitFor(() =>
+      sse.events.find((e) => e.event === "utterance" && e.data.messageId === "m-typed" && e.data.partial === false),
+    );
+    assert.equal(typedEvent.data.source, "typed", "fan-out marks the line as typed for the room");
+    // Spoken rows say nothing: absence is "speech", exactly like every row
+    // written before the attribute existed.
+    const spokenUtt = calls.puts.find((p) => String(p.Item.SK).startsWith("UTT#") && p.Item.text === "ship it on Friday");
+    assert.ok(spokenUtt && spokenUtt.Item.source === undefined, "a spoken row carries no source attribute");
+    console.log("ok: typed message persists source=typed; spoken rows stay bare");
+  }
+
+  {
     const res = await req(port, {
       method: "POST",
       path: "/caption",

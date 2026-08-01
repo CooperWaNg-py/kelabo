@@ -59,6 +59,7 @@ export async function putUtt(c, utt) {
         tEnd: utt.tEnd,
         clientId: utt.clientId,
         tenantId: utt.tenantId,
+        ...(utt.source ? { source: utt.source } : {}),
       },
     })
   );

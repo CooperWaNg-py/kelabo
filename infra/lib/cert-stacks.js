@@ -20,6 +20,9 @@ export class CertStackUsEast1 extends Stack {
 
     this.portalCert = new acm.Certificate(this, "PortalCert", {
       domainName: cfg.portalDomain,
+      // The apex (or any other alias) the portal also answers on — a browser
+      // never falls back from kelabo.me to www.kelabo.me by itself.
+      ...(cfg.portalAliases?.length ? { subjectAlternativeNames: cfg.portalAliases } : {}),
       validation: acm.CertificateValidation.fromDns(zone),
     });
   }

@@ -67,6 +67,13 @@ export class GatewayEcsStack extends Stack {
       serviceName: `${cfg.app}-${cfg.endpoint}-gateway`,
       cpu: cfg.gateway.cpu,
       memoryLimitMiB: cfg.gateway.memoryMiB,
+      // Graviton when the config says so — the image must be built for the
+      // same architecture (scripts/build-push-gateway.sh reads the same knob).
+      runtimePlatform: {
+        operatingSystemFamily: ecs.OperatingSystemFamily.LINUX,
+        cpuArchitecture:
+          cfg.gateway.arch === "arm64" ? ecs.CpuArchitecture.ARM64 : ecs.CpuArchitecture.X86_64,
+      },
       desiredCount: cfg.gateway.desiredCount,
       taskSubnets: { subnetType: ec2.SubnetType.PUBLIC },
       assignPublicIp: true,

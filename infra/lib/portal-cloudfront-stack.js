@@ -47,7 +47,7 @@ export class PortalCloudFrontStack extends Stack {
 
     this.distribution = new cloudfront.Distribution(this, "Distribution", {
       certificate: portalCert,
-      domainNames: [cfg.portalDomain],
+      domainNames: [cfg.portalDomain, ...(cfg.portalAliases ?? [])],
       defaultRootObject: "index.html",
       defaultBehavior: {
         origin: s3Origin,
@@ -61,15 +61,21 @@ export class PortalCloudFrontStack extends Stack {
       },
     });
 
-    new route53.ARecord(this, "PortalARecord", {
-      zone,
-      recordName: cfg.portalDomain,
-      target: route53.RecordTarget.fromAlias(new targets.CloudFrontTarget(this.distribution)),
-    });
-    new route53.AaaaRecord(this, "PortalAaaaRecord", {
-      zone,
-      recordName: cfg.portalDomain,
-      target: route53.RecordTarget.fromAlias(new targets.CloudFrontTarget(this.distribution)),
+    // The portal's own name plus every alias (e.g. the bare apex beside www) —
+    // each needs its own A/AAAA pair; nothing redirects a browser from
+    // kelabo.me to www.kelabo.me except us serving both.
+    [cfg.portalDomain, ...(cfg.portalAliases ?? [])].forEach((domain, i) => {
+      const suffix = i === 0 ? "" : `Alias${i}`;
+      new route53.ARecord(this, `PortalARecord${suffix}`, {
+        zone,
+        recordName: domain,
+        target: route53.RecordTarget.fromAlias(new targets.CloudFrontTarget(this.distribution)),
+      });
+      new route53.AaaaRecord(this, `PortalAaaaRecord${suffix}`, {
+        zone,
+        recordName: domain,
+        target: route53.RecordTarget.fromAlias(new targets.CloudFrontTarget(this.distribution)),
+      });
     });
 
     new CfnOutput(this, "PortalUrl", { value: cfg.portalUrl });

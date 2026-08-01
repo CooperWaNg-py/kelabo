@@ -188,6 +188,32 @@ function summarizeSdp(sdp) {
   return sections
 }
 
+/**
+ * The video codecs we may offer the SFU: everything the browser can send
+ * EXCEPT H.265.
+ *
+ * Cloudflare drops H.265 from its answer but echoes the paired RTX anyway —
+ * `a=rtpmap:117 rtx/90000` with `a=fmtp:117 apt=116` and no 116 in the
+ * m-section. A dangling apt reference is malformed, and Chrome refuses the
+ * whole answer ("Failed to set remote video description send parameters"),
+ * which until now killed every session the moment a camera was published:
+ * the rebuild brought the session back, the budget refilled on `connected`,
+ * the camera publish failed identically, and the call flickered up and down
+ * for the rest of the kelabo (generation 32 in one log). Not offering H.265
+ * leaves Cloudflare nothing to mangle. Returns null when capabilities are
+ * unavailable, meaning "leave the browser's defaults alone".
+ */
+function publishableVideoCodecs() {
+  try {
+    const caps = RTCRtpSender.getCapabilities?.('video')
+    if (!caps?.codecs?.length) return null
+    const keep = caps.codecs.filter(c => !/\bh265\b/i.test(c.mimeType))
+    return keep.length ? keep : null
+  } catch {
+    return null
+  }
+}
+
 export function createSfuTransport({ kelaboId, iceServers, onRemoteTrack, onStateChange, onError, onFatal }) {
   const pc = new RTCPeerConnection({ iceServers, bundlePolicy: 'max-bundle' })
   // trackKey ("<participantId>/<kind>") -> { mid, live, lastAt }.
@@ -518,6 +544,10 @@ export function createSfuTransport({ kelaboId, iceServers, onRemoteTrack, onStat
         if (closed) return
         await ensureSession()
         transceiver = pc.addTransceiver(track, { direction: 'sendonly' })
+        if (kind !== 'audio' && transceiver.setCodecPreferences) {
+          const codecs = publishableVideoCodecs()
+          if (codecs) transceiver.setCodecPreferences(codecs)
+        }
         published.set(kind, transceiver.sender)
         await pc.setLocalDescription(await pc.createOffer())
         await waitForIceGathering(pc, wantRelay())

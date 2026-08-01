@@ -22,6 +22,12 @@ export function loadConfig(env,   configPath = join(here, "kelabo.json")) {
     ? `${block.subdomains.portal}.${baseDomain}`
     : baseDomain;
   const gatewayDomain = `${block.subdomains.gateway}.${baseDomain}`;
+  // Extra full domains the portal answers on, e.g. the bare apex when the
+  // portal lives on www: browsers never fall back from kelabo.me to
+  // www.kelabo.me on their own, so the apex must be served explicitly — cert
+  // SAN, CloudFront alias and DNS records all come from this list. Every entry
+  // must live inside the env's hosted zone (DNS-validated cert).
+  const portalAliases = Array.isArray(block.portalAliases) ? block.portalAliases : [];
 
   const portalUrl = `https://${portalDomain}`;
   const gatewayBaseUrl = `https://${gatewayDomain}`;
@@ -122,6 +128,7 @@ export function loadConfig(env,   configPath = join(here, "kelabo.json")) {
     },
     baseDomain,
     portalDomain,
+    portalAliases,
     gatewayDomain,
     portalUrl,
     gatewayBaseUrl,

@@ -17,7 +17,13 @@ export function loadConfig(env,   configPath = join(here, "kelabo.json")) {
   const block = raw.environments?.[env];
   if (!block) throw new Error(`kelabo config: unknown env "${env}" (have: ${Object.keys(raw.environments || {}).join(", ")})`);
 
-  const baseDomain = raw.baseDomain;
+  // An environment may live on its own registrable domain (dev/test on
+  // kelabo.dev, production on kelabo.me): cookies are scoped to
+  // .<portalDomain>, so environments sharing one registrable domain send each
+  // other their session cookies — harmless (different signing keys) but not
+  // hygiene. Per-env baseDomain keeps non-prod traffic off the production
+  // domain entirely.
+  const baseDomain = block.baseDomain ?? raw.baseDomain;
   const portalDomain = block.subdomains.portal
     ? `${block.subdomains.portal}.${baseDomain}`
     : baseDomain;

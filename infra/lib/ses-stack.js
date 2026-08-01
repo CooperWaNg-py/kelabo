@@ -23,6 +23,27 @@ export class SesStack extends Stack {
       identity: ses.Identity.publicHostedZone(sesZone),
     });
 
+    // DMARC tells a receiving mailbox what to do when a message claiming this
+    // domain authenticates as neither SPF-aligned nor DKIM-aligned. Easy DKIM
+    // above already signs every message with the domain, so the alignment that
+    // makes DMARC pass is in place — publishing the policy is what lets a
+    // recipient act on it, and its absence is one of the first things a
+    // deliverability review looks for.
+    //
+    // `p=none` monitors without asking anyone to reject, which is the only safe
+    // opening position: a stricter policy on a domain whose other senders are
+    // not yet inventoried quarantines that domain's own legitimate mail.
+    if (cfg.ses.dmarc) {
+      const parts = [`v=DMARC1`, `p=${cfg.ses.dmarc.policy}`];
+      if (cfg.ses.dmarc.rua) parts.push(`rua=${cfg.ses.dmarc.rua}`);
+      new route53.TxtRecord(this, "DmarcRecord", {
+        zone: sesZone,
+        recordName: "_dmarc",
+        values: [`${parts.join("; ")};`],
+      });
+      new CfnOutput(this, "SesDmarcPolicy", { value: `${parts.join("; ")};` });
+    }
+
     new CfnOutput(this, "SesIdentityDomain", { value: sesZone.zoneName });
     new CfnOutput(this, "SesFromAddress", { value: cfg.ses.fromAddress });
   }

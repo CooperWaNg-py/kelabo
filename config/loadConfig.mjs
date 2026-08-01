@@ -93,8 +93,26 @@ export function loadConfig(env,   configPath = join(here, "kelabo.json")) {
   // production stays sandboxed) is only expressible that way. Defaults to the
   // environment's own region, which is what a single-region deployment wants
   // and what every kelabo.json written before this knob existed means.
+  //
+  // DMARC is opt-in rather than on by default, even though `p=none` is
+  // harmless, because the record is a singleton per domain: a self-hoster whose
+  // domain already carries a DMARC policy from their corporate mail provider
+  // would get a second `_dmarc` record and a failed deploy, and the failure
+  // would arrive as CloudFormation noise rather than as advice. Set it and the
+  // SES stack publishes the policy beside the DKIM CNAMEs it already writes.
+  //
+  // `rua` is optional and deliberately unset by default: an aggregate-report
+  // address that nobody reads is worse than none, and an address at another
+  // domain only receives reports if THAT domain publishes a
+  // `<sender>._report._dmarc` authorisation record — so a plausible-looking
+  // mailto: silently collects nothing.
+  const dmarc = block.ses?.dmarc
+    ? { policy: "none", ...(block.ses.dmarc === true ? {} : block.ses.dmarc) }
+    : null;
+
   const ses = {
     ...block.ses,
+    dmarc,
     // `||`, not `??`: this file is hand-edited JSON, and an empty string left
     // behind from a template is "unset", not "region named the empty string".
     region: block.ses?.region || block.region,

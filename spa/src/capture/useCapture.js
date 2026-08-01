@@ -530,6 +530,34 @@ export function useCapture({ kelaboId, enabled, finalOnly, startedAt, language =
     return event
   }, [])
 
+  /**
+   * Persisted messages fetched on (re)entry — the backfill that makes leaving
+   * and re-entering a room show the conversation instead of an empty panel.
+   *
+   * Rows go through `fromWire` into the same reducer as live events, under the
+   * same messageId the live event carried, and `apply` ignores a messageId that
+   * is already sealed — so seeding after a reconnect cannot duplicate a message
+   * that also arrived live. No `by`-echo filter here: my own past messages are
+   * exactly what a backfill is for.
+   */
+  const seedHistory = useCallback(rows => {
+    if (!Array.isArray(rows) || rows.length === 0) return
+    setTranscript(prev => {
+      let next = prev
+      for (const utt of rows) {
+        const event = fromWire(utt)
+        if (!event) continue
+        // Display only. Persisted rows carry no author identity, so fall back
+        // to the display name the row was attributed to.
+        const mine =
+          (!!utt.by && utt.by === myIdentityRef.current) ||
+          (!utt.by && !!utt.speaker && utt.speaker === displayNameRef.current)
+        next = apply(next, event, { mine, at: utt.at })
+      }
+      return next
+    })
+  }, [])
+
   // Someone else's speech, arriving over SSE. It goes through `fromWire` into
   // the SAME reducer my own speech goes through — there is no separate remote
   // path to drift from the local one.
@@ -603,6 +631,7 @@ export function useCapture({ kelaboId, enabled, finalOnly, startedAt, language =
     stop,
     renameSpeaker,
     addRemoteUtterance,
+    seedHistory,
     sendTyped,
     gateStats,
   }

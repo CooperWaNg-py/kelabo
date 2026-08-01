@@ -10,7 +10,7 @@ import { createAgentDispatcher } from "./agent/runner.js";
 import { createMessageBuffer } from "./agent/messageBuffer.js";
 import { createRtcRoom } from "./rtc/room.js";
 import { RTC_PATHS, handleRtc } from "./rtc/routes.js";
-import { handleCaptionPost, handleCaptionRename, readJson, send } from "./caption.js";
+import { handleCaptionPost, handleCaptionRename, handleCaptionHistory, transcriptEntitled, readJson, send } from "./caption.js";
 import { endKelabo, cancelKelabo, rescheduleKelabo } from "./archive.js";
 import { generateMinutes } from "./minutes.js";
 import { log, logError } from "./log.js";
@@ -47,7 +47,7 @@ async function route(c, req, res) {
   const path = url.pathname;
   const method = req.method;
 
-  const captionPaths = path === "/caption" || path === "/caption/replies" || path === "/caption/rename";
+  const captionPaths = path === "/caption" || path === "/caption/replies" || path === "/caption/rename" || path === "/caption/history";
   // Same browser-origin rules as the caption channel: the SPA calls all of these
   // from the portal host with credentials. `/presence/stream` is the first
   // non-kelabo-scoped one (docs 18 §5).
@@ -81,7 +81,17 @@ async function route(c, req, res) {
     if (!kelaboId || kelaboId !== participant.kelaboId) return send(res, 403, { error: "forbidden" });
     // The participant identity travels with the subscription so mesh signalling
     // can address one peer, and so a dropped stream removes them from the call.
-    return c.sseHub.subscribe(kelaboId, res, participant.identity);
+    // Transcript entitlement is decided here, where the cookie is verified, and
+    // enforced inside the hub's fan-out.
+    return c.sseHub.subscribe(kelaboId, res, participant.identity, {
+      transcriptEntitled: transcriptEntitled(c, participant),
+    });
+  }
+
+  // Persisted messages for a participant (re)entering a live kelabo, filtered
+  // by the same entitlement the fan-out enforces.
+  if (method === "GET" && path === "/caption/history") {
+    return handleCaptionHistory(c, req, res, url);
   }
 
   // Contact presence (docs 18 §5). Authenticated by the browser SESSION cookie,

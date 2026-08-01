@@ -8,7 +8,20 @@ import {
   stripAddress,
 } from "@kelabo/contracts";
 import { parseCookies, verifyParticipantCookie } from "./cookies.js";
-import { putUtt, getMeta, updateMeta, renameSpeakerUtts } from "./db.js";
+import { putUtt, getMeta, updateMeta, renameSpeakerUtts, queryUtt } from "./db.js";
+
+/** May this participant receive the spoken transcript? Guests are entitled by
+ *  default (self-hosted deployments trust link guests); a hosted deployment
+ *  sets `guestTranscriptAccess: false` and its guests get typed messages only.
+ *  One function, used by both the SSE fan-out and the history endpoint, so the
+ *  live stream and the backfill can never disagree about what someone may see. */
+export function transcriptEntitled(c, participant) {
+  return !participant.isGuest || c.config.guestTranscriptAccess !== false;
+}
+
+// A rejoin needs recent context, not the whole afternoon verbatim — and the
+// archive serves the full record once the kelabo ends.
+const HISTORY_LIMIT = 500;
 
 const DIARIZATION_LABEL = /^[A-Z]$/;
 
@@ -126,6 +139,11 @@ export async function handleCaptionPost(c, req, res) {
     // Persisted, so the record and its download can tell a typed line from a
     // transcribed one. Absent means speech — the pre-2026-08 rows say so.
     ...(typed ? { source: "typed" } : {}),
+    // Wall clock and the speaker's message id, so a history backfill can hand
+    // back rows the SPA reducer treats exactly like the live events it already
+    // saw — same id means a reconnect seeds without duplicating anything.
+    at: Date.now(),
+    ...(post.messageId ? { messageId: post.messageId } : {}),
   };
 
   try {
@@ -214,6 +232,55 @@ export async function handleCaptionPost(c, req, res) {
   }
 
   return send(res, 202, { ok: true });
+}
+
+/**
+ * The persisted messages of a LIVE kelabo, for a participant (re)entering it.
+ * Before this existed, leaving and re-entering a room meant an empty panel —
+ * everything said or typed while you were gone, or before you arrived, was in
+ * the database and nowhere else.
+ *
+ * Entitlement is applied here exactly as at the SSE fan-out: a participant who
+ * may not receive speech gets typed messages only. The response says which,
+ * so the SPA can hide the Transcript tab rather than show it empty forever.
+ */
+export async function handleCaptionHistory(c, req, res, url) {
+  const cookies = parseCookies(req);
+  const key = await c.getCookieKey();
+  const participant = verifyParticipantCookie(cookies[COOKIE_PARTICIPANT], key);
+  if (!participant) return send(res, 401, { error: "unauthenticated" });
+
+  const kelaboId = url.searchParams.get("kelaboId") ?? "";
+  if (!kelaboId || kelaboId !== participant.kelaboId) return send(res, 403, { error: "forbidden" });
+
+  const entitled = transcriptEntitled(c, participant);
+  let rows;
+  try {
+    // Newest N, returned oldest-first so the SPA appends in display order.
+    rows = await queryUtt(c, kelaboId, { limit: HISTORY_LIMIT, desc: true });
+  } catch (err) {
+    c.logError("caption_history_failed", err, { kelaboId });
+    return send(res, 500, { error: "internal_error" });
+  }
+  rows.reverse();
+
+  const visible = entitled ? rows : rows.filter((i) => i.source === "typed");
+  return send(res, 200, {
+    transcriptAccess: entitled,
+    utterances: visible.map((i) => ({
+      // Rows persisted before messageId was stored fall back to the sort key —
+      // stable across refetches, so re-seeding still cannot duplicate them.
+      messageId: i.messageId || i.SK,
+      speaker: i.speaker,
+      text: i.text,
+      tStart: i.tStart,
+      tEnd: i.tEnd,
+      at: i.at,
+      kind: "sealed",
+      partial: false,
+      ...(i.source ? { source: i.source } : {}),
+    })),
+  });
 }
 
 export async function handleCaptionRename(c, req, res) {

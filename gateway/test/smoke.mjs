@@ -70,6 +70,15 @@ const db = {
       if (sk === "INVITE#" && typeof pk === "string") {
         return { Items: invites[pk.slice("KELABO#".length)] ?? [] };
       }
+      // Serve transcript queries from what the test actually persisted, so the
+      // history endpoint reads exactly the rows the caption handler wrote.
+      if (sk === "UTT#" && pk === `KELABO#${KELABO}`) {
+        return {
+          Items: calls.puts
+            .filter((p) => p.TableName === "t-kelabos" && String(p.Item.SK).startsWith("UTT#"))
+            .map((p) => p.Item),
+        };
+      }
       if (input.IndexName === "participant-index" && input.ExpressionAttributeValues?.[":p"] === "alice@example.com") {
         return { Items: [{ kelaboId: "past1", title: "Sprint planning", endedAt: 1722300000000, participantIdentity: "alice@example.com" }] };
       }
@@ -96,6 +105,9 @@ const config = {
   secrets: { llm: "t/llm", cookieSigningKey: "t/cookie", mcpPrefix: "t/mcp/", cloudflareRealtime: "t/cf" },
   rtcApiBase: "http://rtc.test/v1",
   rtc: { defaultMode: "sfu", meshMaxParticipants: 6, iceTtlSeconds: 3600, video: false },
+  // The hosted-deployment posture, so the entitlement machinery is what gets
+  // tested: guests must receive typed messages only. (Public default is true.)
+  guestTranscriptAccess: false,
   llm: { provider: "fake", model: "fake", smallModel: "fake" },
   openaiBaseUrl: "http://unused",
   gateway: { agent: { maxConcurrentRuns: 2, sensitivity: "medium", maxContributionsPerMinute: 3, cooldownSeconds: 45, rollingWindowSize: 10, turnTimeoutSeconds: 0.1 } },
@@ -104,6 +116,10 @@ const config = {
 
 const participantCookie = signJwt(
   { kind: "participant", kelaboId: KELABO, identity: "alice@example.com", tenantId: "example.com", isGuest: false, exp: Math.floor(NOW / 1000) + 3600 },
+  KEY
+);
+const guestCookie = signJwt(
+  { kind: "participant", kelaboId: KELABO, identity: "guest-1", tenantId: "example.com", isGuest: true, exp: Math.floor(NOW / 1000) + 3600 },
   KEY
 );
 const agentToken = signJwt(
@@ -143,10 +159,10 @@ function req(port, { method = "GET", path, headers = {}, body } = {}) {
   });
 }
 
-function connectSse(port, kelaboId) {
+function connectSse(port, kelaboId, cookie = participantCookie) {
   return new Promise((resolve, reject) => {
     const r = http.request(
-      { host: "127.0.0.1", port, path: `/caption/replies?kelaboId=${kelaboId}`, method: "GET", headers: { cookie: `kelabo_participant=${participantCookie}` } },
+      { host: "127.0.0.1", port, path: `/caption/replies?kelaboId=${kelaboId}`, method: "GET", headers: { cookie: `kelabo_participant=${cookie}` } },
       (res) => {
         if (res.statusCode !== 200) return reject(new Error(`sse status ${res.statusCode}`));
         const events = [];
@@ -321,6 +337,64 @@ async function main() {
     const spokenUtt = calls.puts.find((p) => String(p.Item.SK).startsWith("UTT#") && p.Item.text === "ship it on Friday");
     assert.ok(spokenUtt && spokenUtt.Item.source === undefined, "a spoken row carries no source attribute");
     console.log("ok: typed message persists source=typed; spoken rows stay bare");
+  }
+
+  {
+    // Isolation: on a deployment that withholds the transcript from guests
+    // (guestTranscriptAccess: false above), a guest must never receive speech —
+    // not live over SSE, and not from the history backfill. Typed messages
+    // reach them on both paths: those are the room's chat.
+    const guestSse = await connectSse(port, KELABO, guestCookie);
+
+    const spokenText = "the quarterly numbers look fine";
+    const spoken = await req(port, {
+      method: "POST",
+      path: "/caption",
+      headers: { cookie: `kelabo_participant=${participantCookie}` },
+      body: { kelaboId: KELABO, text: spokenText, isFinal: true, turnComplete: true, kind: "sealed", messageId: "m-spk-1", tStart: 8000, tEnd: 9000 },
+    });
+    assert.equal(spoken.status, 202);
+    await waitFor(() => sse.events.find((e) => e.event === "utterance" && e.data.messageId === "m-spk-1"));
+
+    const typedGuest = await req(port, {
+      method: "POST",
+      path: "/caption",
+      headers: { cookie: `kelabo_participant=${guestCookie}` },
+      body: { kelaboId: KELABO, text: "typed by the guest", isFinal: true, turnComplete: true, kind: "sealed", source: "typed", messageId: "m-typed-guest", tStart: 9500, tEnd: 9500 },
+    });
+    assert.equal(typedGuest.status, 202);
+    // The typed message reaching the guest proves their stream is live and has
+    // processed everything up to and past the speech they must not have.
+    await waitFor(() => guestSse.events.find((e) => e.event === "utterance" && e.data.messageId === "m-typed-guest"));
+    assert.ok(
+      !guestSse.events.some((e) => e.event === "utterance" && e.data.messageId === "m-spk-1"),
+      "speech never reached the unentitled guest's stream"
+    );
+    assert.ok(
+      sse.events.find((e) => e.event === "utterance" && e.data.messageId === "m-typed-guest"),
+      "the guest's typed message reached the entitled participant"
+    );
+
+    // The history backfill applies the same entitlement, in the same place.
+    const full = await req(port, { path: `/caption/history?kelaboId=${KELABO}`, headers: { cookie: `kelabo_participant=${participantCookie}` } });
+    assert.equal(full.status, 200);
+    const fullBody = JSON.parse(full.body);
+    assert.equal(fullBody.transcriptAccess, true);
+    assert.ok(fullBody.utterances.some((u) => u.messageId === "m-spk-1"), "entitled history has speech");
+    assert.ok(fullBody.utterances.some((u) => u.messageId === "m-typed-guest" && u.source === "typed"), "entitled history has typed messages");
+
+    const guestHist = await req(port, { path: `/caption/history?kelaboId=${KELABO}`, headers: { cookie: `kelabo_participant=${guestCookie}` } });
+    assert.equal(guestHist.status, 200);
+    const guestBody = JSON.parse(guestHist.body);
+    assert.equal(guestBody.transcriptAccess, false);
+    assert.ok(guestBody.utterances.length > 0, "guest history is not empty");
+    assert.ok(guestBody.utterances.every((u) => u.source === "typed"), "guest history is typed-only");
+
+    const noAuth = await req(port, { path: `/caption/history?kelaboId=${KELABO}` });
+    assert.equal(noAuth.status, 401);
+
+    guestSse.res.destroy();
+    console.log("ok: transcript isolation — guest SSE and history are typed-only, entitled see everything");
   }
 
   {

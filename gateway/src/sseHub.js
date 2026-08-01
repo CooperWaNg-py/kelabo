@@ -120,7 +120,13 @@ export function createSseHub(c) {
   // A subscriber is { res, participantId } rather than a bare response: mesh
   // signalling has to reach exactly one participant, and a peer that drops its
   // stream must be removed from the call roster.
-  function subscribe(kelaboId, res, participantId = "") {
+  //
+  // `transcriptEntitled: false` marks a subscriber who may not receive spoken
+  // words (a guest on a deployment that withholds the transcript from guests).
+  // The filter lives HERE, at the fan-out, because this is the one place every
+  // utterance passes through — a client-side filter would still deliver the
+  // speech to the guest's browser, which is not isolation at all.
+  function subscribe(kelaboId, res, participantId = "", { transcriptEntitled = true } = {}) {
     res.writeHead(200, {
       "Content-Type": "text/event-stream",
       "Cache-Control": "no-cache, no-transform",
@@ -135,7 +141,7 @@ export function createSseHub(c) {
       set = new Set();
       c.state.sseSubscribers.set(kelaboId, set);
     }
-    const sub = { res, participantId };
+    const sub = { res, participantId, transcriptEntitled };
     set.add(sub);
     res.on("close", () => {
       // Re-read the set rather than closing over the one that was current at
@@ -236,12 +242,19 @@ export function createSseHub(c) {
     for (const sub of subs) writeEvent(sub.res, SSE_EVENT_DEBUG, payload);
   }
 
-  // Fan out a finalized spoken utterance to every participant (not persisted here;
-  // persistence happens via putUtt in the caption handler).
+  // Fan out an utterance (not persisted here; persistence happens via putUtt in
+  // the caption handler). Typed messages reach everyone; speech — live
+  // fragments and sealed messages alike — only reaches transcript-entitled
+  // subscribers. Fragments never carry `source`, so they are speech by
+  // construction and cannot leak past the entitlement check.
   function utterance(kelaboId, payload) {
     const subs = c.state.sseSubscribers.get(kelaboId);
     if (!subs) return;
-    for (const sub of subs) writeEvent(sub.res, SSE_EVENT_UTTERANCE, payload);
+    const typedMessage = payload.source === "typed";
+    for (const sub of subs) {
+      if (!typedMessage && sub.transcriptEntitled === false) continue;
+      writeEvent(sub.res, SSE_EVENT_UTTERANCE, payload);
+    }
   }
 
   // Conference-audio signalling (docs 15). Roster changes go to the whole room;

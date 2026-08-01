@@ -336,10 +336,10 @@ export function ControlBar({
           <Icon name="captions" size={18} />
         </button>
         <button
-          className={'cbtn' + (panel === 'transcript' ? ' is-on' : '')}
-          aria-pressed={panel === 'transcript'}
-          title="Transcript — the whole conversation, in a side panel"
-          onClick={() => onPanel('transcript')}
+          className={'cbtn' + (panel === 'messages' || panel === 'transcript' ? ' is-on' : '')}
+          aria-pressed={panel === 'messages' || panel === 'transcript'}
+          title="Conversation — messages and transcript, in a side panel"
+          onClick={() => onPanel(panel === 'transcript' ? 'transcript' : 'messages')}
         >
           <Icon name="panel-right" size={18} />
         </button>

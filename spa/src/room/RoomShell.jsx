@@ -87,6 +87,7 @@ export function RoomShell({
   stt,
   micPrefs,
   diarize,
+  transcriptAccess = true,
   onToggleDebug,
   debugOn,
   onInvite,
@@ -101,7 +102,7 @@ export function RoomShell({
   const [layout, setLayoutState] = useState(loadLayout)
   const [focusId, setFocusId] = useState('assistant')
   const [activeSpeaker, setActiveSpeaker] = useState(null)
-  const [panel, setPanel] = useState(null) // null | 'transcript' | 'board'
+  const [panel, setPanel] = useState(null) // null | 'messages' | 'transcript' | 'board'
   const [captionsOn, setCaptionsOn] = useState(() => localStorage.getItem(CAPTIONS_KEY) !== '0')
 
   const flip = useFlip()
@@ -281,7 +282,9 @@ export function RoomShell({
           return
         case 't':
           e.preventDefault()
-          h.togglePanel('transcript')
+          // Toggle whichever conversation tab is open; open on Messages — the
+          // tab every participant has — when neither is.
+          h.togglePanel(h.panel === 'transcript' ? 'transcript' : 'messages')
           return
         case 'b':
           e.preventDefault()
@@ -486,6 +489,7 @@ export function RoomShell({
             focusSignal={board.focusSignal}
             ended={ended}
             onHold={chrome.hold}
+            transcriptAccess={transcriptAccess}
           />
         )}
       </main>

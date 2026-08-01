@@ -23,6 +23,12 @@ function fromEnv() {
       contacts: e.KELABO_TABLE_CONTACTS,
     },
     contacts: { external: e.KELABO_CONTACTS_EXTERNAL === "true" },
+    // May a link-joined guest receive the spoken transcript? Default yes: on a
+    // self-hosted deployment a guest is a trusted colleague without an account.
+    // A hosted/SaaS deployment sets this false, and guests then receive only
+    // typed messages — enforced at the SSE fan-out and the history endpoint,
+    // never by the client.
+    guestTranscriptAccess: e.KELABO_GUEST_TRANSCRIPT_ACCESS !== "false",
     archiveBucket: e.KELABO_ARCHIVE_BUCKET,
     archiveKeyPrefix: e.KELABO_ARCHIVE_KEY_PREFIX || "archives",
     secrets: {
@@ -78,6 +84,7 @@ function fromBase(base) {
       contacts: base.tableNames.contacts,
     },
     contacts: { external: !!base.contacts?.external },
+    guestTranscriptAccess: base.guestTranscriptAccess !== false,
     archiveBucket: base.archiveBucket,
     archiveKeyPrefix: base.archiveKeyPrefix || "archives",
     secrets: {

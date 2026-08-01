@@ -60,6 +60,8 @@ export async function putUtt(c, utt) {
         clientId: utt.clientId,
         tenantId: utt.tenantId,
         ...(utt.source ? { source: utt.source } : {}),
+        ...(typeof utt.at === "number" ? { at: utt.at } : {}),
+        ...(utt.messageId ? { messageId: utt.messageId } : {}),
       },
     })
   );

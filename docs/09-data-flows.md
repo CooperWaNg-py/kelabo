@@ -272,11 +272,23 @@ SPA                    REST                 Gateway
  │ EventSource error (drop)                   │
  │ GET /kelabos/:id/board?since=<lastAt> ▶ backfill gap
  │◀ missed contributions                       │
+ │ GET /caption/history?kelaboId ───────────▶│ persisted messages
+ │◀ { transcriptAccess, utterances }          │ (entitlement-filtered)
  │ re-open GET /caption/replies?kelaboId ───▶│ resume live tail
  │◀ contributions                              │
 ```
 Gateway SSE has no replay, so the SPA closes the gap via the REST board endpoint
-(`?since=<lastAt>`) before/around re-subscribing.
+(`?since=<lastAt>`) and the Gateway's `/caption/history` before/around
+re-subscribing. History rows carry the speaker's `messageId`, and the SPA's
+transcript reducer ignores an id it already sealed — so backfill-after-reconnect
+cannot duplicate a message that also arrived live. The same fetch runs on first
+mount, which is what fills the panel for someone (re)entering mid-kelabo.
+
+**Transcript entitlement.** Both `/caption/history` and the SSE fan-out apply
+one rule (`transcriptEntitled`, gateway/src/caption.js): a guest on a deployment
+with `guestTranscriptAccess: false` receives typed messages only — speech never
+reaches their connection. The SPA's Messages/Transcript tab split is a *view* of
+this; the enforcement is server-side.
 
 ---
 

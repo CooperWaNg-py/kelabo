@@ -168,6 +168,12 @@ export function renameSpeaker({ kelaboId, from, to }) {
   return request(config.gatewayBase, '/caption/rename', { method: 'POST', body: { kelaboId, from, to } })
 }
 
+/** The persisted messages of a live kelabo, entitlement-filtered server-side.
+ *  Returns { transcriptAccess, utterances } — see gateway/src/caption.js. */
+export function getCaptionHistory(kelaboId) {
+  return request(config.gatewayBase, `/caption/history?kelaboId=${encodeURIComponent(kelaboId)}`)
+}
+
 export function boardStreamUrl(kelaboId) {
   return `${config.gatewayBase}/caption/replies?kelaboId=${encodeURIComponent(kelaboId)}`
 }

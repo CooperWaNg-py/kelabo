@@ -103,6 +103,12 @@ function KelaboRoom() {
   const me = localStorage.getItem('kelabo-name') || displayName(identity)
 
   const [streamStatus, setStreamStatus] = useState('connecting')
+  // May this participant see the spoken transcript? The server says so on every
+  // history response; until it does, assume yes — on self-hosted deployments
+  // that is always the answer, and a guest on a withholding deployment merely
+  // sees the Transcript tab disappear after the first fetch. The server never
+  // sent them speech either way; this only controls what the panel offers.
+  const [transcriptAccess, setTranscriptAccess] = useState(true)
   // Live agent presence from the SSE `agent` event (docs 16). `null` until one
   // arrives, at which point it supersedes whatever the META said at page load.
   const [agent, setAgent] = useState(null)
@@ -194,6 +200,10 @@ function KelaboRoom() {
     onEnded: handleEnded,
     onRename: capture.renameSpeaker,
     onUtterance: capture.addRemoteUtterance,
+    onHistory: h => {
+      if (typeof h?.transcriptAccess === 'boolean') setTranscriptAccess(h.transcriptAccess)
+      capture.seedHistory?.(h?.utterances)
+    },
     onDebug: onDebugEvent,
     onRtc: call.onServerEvent,
     onAgent: setAgent,
@@ -382,6 +392,7 @@ function KelaboRoom() {
         speaker={speaker}
         board={board}
         diarize={diarize}
+        transcriptAccess={transcriptAccess}
         stt={{
           lang: sttLang,
           onLang: onSttLangChange,

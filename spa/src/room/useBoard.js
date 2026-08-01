@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { api, boardStreamUrl, postCaption } from '../api'
+import { api, boardStreamUrl, getCaptionHistory, postCaption } from '../api'
 import { useToast } from '../components/Toaster'
 import { notifyBoard } from '../notify'
 
@@ -28,6 +28,7 @@ export function useBoard({
   onEnded,
   onRename,
   onUtterance,
+  onHistory,
   onDebug,
   onRtc,
   onAgent,
@@ -46,6 +47,8 @@ export function useBoard({
   onRenameRef.current = onRename
   const onUtteranceRef = useRef(onUtterance)
   onUtteranceRef.current = onUtterance
+  const onHistoryRef = useRef(onHistory)
+  onHistoryRef.current = onHistory
   const onDebugRef = useRef(onDebug)
   onDebugRef.current = onDebug
   const onRtcRef = useRef(onRtc)
@@ -123,11 +126,24 @@ export function useBoard({
     const mark = () => { lastEventAt = Date.now() }
 
     const backfill = async since => {
-      try {
-        const data = await api.getBoard(kelaboId, since ? { since } : { limit: 50 })
-        const list = Array.isArray(data) ? data : (data?.contributions || [])
-        if (!cancelled) push(list)
-      } catch {}
+      // Board and message history side by side — neither waits on the other,
+      // and one failing must not cost the other its backfill.
+      await Promise.all([
+        api.getBoard(kelaboId, since ? { since } : { limit: 50 })
+          .then(data => {
+            const list = Array.isArray(data) ? data : (data?.contributions || [])
+            if (!cancelled) push(list)
+          })
+          .catch(() => {}),
+        // Messages persisted while this client was away (or before it arrived).
+        // The seeding side dedupes by messageId, so refetching the same rows
+        // after every reconnect is safe — this is the gap repair.
+        getCaptionHistory(kelaboId)
+          .then(history => {
+            if (!cancelled && history) onHistoryRef.current?.(history)
+          })
+          .catch(() => {}),
+      ])
     }
 
     // Close the stream for good — used when the kelabo ends. The browser's

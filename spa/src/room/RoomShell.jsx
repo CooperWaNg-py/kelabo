@@ -370,7 +370,19 @@ export function RoomShell({
               ? <span className="chip chip-ended">ended</span>
               : <span className="chip chip-live"><span className="dot"></span>Live</span>}
             <RoomClock startedAt={kelabo?.startedAt} />
-            <span className="chip"><Icon name="users" size={12} />{participantCount || tiles.length - 1}</span>
+            {/* Who is in the kelabo now, from the `roster` SSE event — not the
+                call roster (which cannot see board-only participants) and not
+                the tile count (which counts a shared screen as a person). Null
+                until the stream delivers the first one; no number beats a
+                wrong one. */}
+            {typeof participantCount === 'number' && (
+              <span
+                className="chip"
+                title={ended ? `${participantCount} took part` : `${participantCount} in the kelabo now`}
+              >
+                <Icon name="users" size={12} />{participantCount}
+              </span>
+            )}
             {call.mode === 'mesh' && (
               <span
                 className="chip chip-accent"

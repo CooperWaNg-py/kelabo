@@ -31,6 +31,7 @@ export function useBoard({
   onDebug,
   onRtc,
   onAgent,
+  onRoster,
   onStreamStatus,
   authorName,
 }) {
@@ -51,6 +52,8 @@ export function useBoard({
   onRtcRef.current = onRtc
   const onAgentRef = useRef(onAgent)
   onAgentRef.current = onAgent
+  const onRosterRef = useRef(onRoster)
+  onRosterRef.current = onRoster
   const onStreamStatusRef = useRef(onStreamStatus)
   onStreamStatusRef.current = onStreamStatus
   const onEndedRef = useRef(onEnded)
@@ -173,6 +176,13 @@ export function useBoard({
       es.addEventListener('agent', e => {
         mark()
         try { onAgentRef.current?.(JSON.parse(e.data)) } catch {}
+      })
+      // Who is attached to the kelabo right now — sent on subscribe and again
+      // whenever it changes. Not the same as the call roster: a board-only
+      // participant is here, holding this stream, and never joins the call.
+      es.addEventListener('roster', e => {
+        mark()
+        try { onRosterRef.current?.(JSON.parse(e.data)) } catch {}
       })
       // The server's liveness pulse. Carries nothing; its arrival IS the data.
       es.addEventListener('ping', mark)

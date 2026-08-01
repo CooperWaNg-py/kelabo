@@ -18,6 +18,8 @@ import { useScreenShare } from '../rtc/useScreenShare'
 import { useSpeakerDevice } from '../rtc/useSpeakerDevice'
 import { useRtc } from '../rtc/useRtc'
 import { useBoard } from '../room/useBoard'
+import { useSingleTab } from '../room/useSingleTab'
+import { TabTaken } from '../room/TabTaken'
 import { RoomShell } from '../room/RoomShell'
 import { DebugPanel } from '../board/DebugPanel'
 import { pushSettings } from '../settings'
@@ -35,7 +37,31 @@ import { useLeaveGuard } from '../useLeaveGuard'
  * anything on this page.
  */
 
+/**
+ * The one-tab gate, and the reason it is a separate component.
+ *
+ * `KelaboRoom` opens the microphone, the Deepgram capture, the conference
+ * transport and the SSE stream — each from a hook, on mount. So a second tab
+ * cannot merely be told it is a duplicate: it must not mount the room at all,
+ * or it has already taken a second `getUserMedia` and stolen the conference
+ * seat (see `tabClaim.js`). Not mounting is also what makes "Open here instead"
+ * work: unmounting runs every one of those cleanups in the tab that gives the
+ * kelabo up, before the tab taking it opens anything.
+ */
 export default function Kelabo() {
+  const { id } = useParams()
+  const tab = useSingleTab(id)
+
+  // `checking` lasts one message round trip inside this browser. Rendering
+  // nothing beats a spinner that would flash on every open.
+  if (tab.phase === 'checking') return null
+  if (!tab.held) {
+    return <TabTaken kelaboId={id} onTakeOver={tab.takeOver} busy={tab.phase === 'taking'} />
+  }
+  return <KelaboRoom />
+}
+
+function KelaboRoom() {
   const { id } = useParams()
   const toast = useToast()
   const confirm = useConfirm()
@@ -79,6 +105,9 @@ export default function Kelabo() {
   // Live agent presence from the SSE `agent` event (docs 16). `null` until one
   // arrives, at which point it supersedes whatever the META said at page load.
   const [agent, setAgent] = useState(null)
+  // Live headcount from the SSE `roster` event: distinct identities holding a
+  // stream on this kelabo right now. `null` until the first one arrives.
+  const [roster, setRoster] = useState(null)
   // `gateStats()` is a getter, not state — sampled while the drawer is open so
   // the VAD readout stays live without re-rendering the room every frame.
   const [gateStats, setGateStats] = useState(null)
@@ -167,6 +196,7 @@ export default function Kelabo() {
     onDebug: onDebugEvent,
     onRtc: call.onServerEvent,
     onAgent: setAgent,
+    onRoster: setRoster,
     onStreamStatus: setStreamStatus,
     authorName: me,
   })
@@ -264,7 +294,15 @@ export default function Kelabo() {
   // and an agent dropping mid-kelabo used to be entirely invisible (docs 16).
   const agentPresent = agent ? agent.attached : !!kelabo?.isDeveloperPresent
   const agentLabel = agent?.label || agent?.runtime || kelabo?.agentLabel || kelabo?.agentRuntime || ''
-  const participantCount = kelabo?.participantCount ?? (kelabo?.participants || []).length
+  // The kelabo META's `participants` is an append-only join ledger — nobody is
+  // ever removed from it — so it answers "who has ever been here". That is the
+  // right number for a kelabo that is over, and the wrong one for a live room,
+  // where it only ever climbs and two people who both left still read "2".
+  // While the kelabo is live the answer comes from the `roster` SSE event, and
+  // until the first one arrives there is nothing honest to show: `null` hides
+  // the chip rather than guessing.
+  const everJoinedCount = kelabo?.participantCount ?? (kelabo?.participants || []).length
+  const participantCount = ended ? everJoinedCount : (roster ? roster.count : null)
 
   const copyInvite = async () => {
     try { await navigator.clipboard.writeText(`${config.portalUrl}/join/${id}`) } catch {}

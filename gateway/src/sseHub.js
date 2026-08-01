@@ -1,4 +1,4 @@
-import { SSE_EVENT_AGENT, SSE_EVENT_CONTRIBUTION, SSE_EVENT_DEBUG, SSE_EVENT_ENDED, SSE_EVENT_PING, SSE_EVENT_RENAME, SSE_EVENT_RTC, SSE_EVENT_UTTERANCE } from "@kelabo/contracts";
+import { SSE_EVENT_AGENT, SSE_EVENT_CONTRIBUTION, SSE_EVENT_DEBUG, SSE_EVENT_ENDED, SSE_EVENT_PING, SSE_EVENT_RENAME, SSE_EVENT_ROSTER, SSE_EVENT_RTC, SSE_EVENT_UTTERANCE } from "@kelabo/contracts";
 import { putContrib } from "./db.js";
 
 const PING_INTERVAL_MS = 25_000;
@@ -25,6 +25,97 @@ export function createSseHub(c) {
   }, PING_INTERVAL_MS);
   pingTimer.unref?.();
   c.shutdownHooks.push(async () => clearInterval(pingTimer));
+
+  // --- Live roster -------------------------------------------------------
+  //
+  // Who is in the kelabo *now*. `sseSubscribers` is the only signal that knows
+  // it: the kelabo META's `participants` list is append-only (a join ledger, so
+  // it never goes down), and the call roster misses board-only participants,
+  // who hold a stream but never POST /rtc/join.
+  //
+  // How long an identity keeps its place after its last stream closes. The same
+  // window the call uses before `peer_away` (rtc/room.js), for the same reason:
+  // an EventSource blip or a reload would otherwise make the headcount visibly
+  // dip and recover on every refresh.
+  const departureGraceMs = Math.max(0, (c.config.rtc?.disconnectGraceSeconds ?? 20) * 1000);
+  /** kelaboId -> Map<participantId, timer>: no stream, still counted. */
+  const leaving = new Map();
+  /** kelaboId -> last roster fanned out, so a reconnect does not emit no-ops. */
+  const lastRoster = new Map();
+
+  /** Distinct identities holding a live stream, plus those inside the grace window. */
+  function liveParticipants(kelaboId) {
+    const ids = new Set();
+    for (const sub of c.state.sseSubscribers.get(kelaboId) ?? []) {
+      if (sub.participantId) ids.add(sub.participantId);
+    }
+    for (const id of leaving.get(kelaboId)?.keys() ?? []) ids.add(id);
+    return [...ids].sort();
+  }
+
+  function rosterPayload(kelaboId) {
+    const participants = liveParticipants(kelaboId);
+    return { count: participants.length, participants };
+  }
+
+  /** @returns {boolean} whether anything was written. */
+  function fanRoster(kelaboId) {
+    const subs = c.state.sseSubscribers.get(kelaboId);
+    if (!subs?.size) {
+      lastRoster.delete(kelaboId);
+      return false;
+    }
+    const payload = rosterPayload(kelaboId);
+    const signature = payload.participants.join("\n");
+    if (lastRoster.get(kelaboId) === signature) return false;
+    lastRoster.set(kelaboId, signature);
+    for (const sub of subs) writeEvent(sub.res, SSE_EVENT_ROSTER, payload);
+    c.log("roster_fanned", { kelaboId, count: payload.count, subscribers: subs.size });
+    return true;
+  }
+
+  function forgetDeparture(kelaboId, participantId) {
+    const pending = leaving.get(kelaboId);
+    pending?.delete(participantId);
+    if (pending && !pending.size) leaving.delete(kelaboId);
+  }
+
+  function scheduleDeparture(kelaboId, participantId) {
+    let pending = leaving.get(kelaboId);
+    if (!pending) {
+      pending = new Map();
+      leaving.set(kelaboId, pending);
+    }
+    if (pending.has(participantId)) return;
+    const drop = () => {
+      forgetDeparture(kelaboId, participantId);
+      fanRoster(kelaboId);
+    };
+    if (departureGraceMs <= 0) {
+      drop();
+      return;
+    }
+    const timer = setTimeout(drop, departureGraceMs);
+    timer.unref?.();
+    pending.set(participantId, timer);
+  }
+
+  function cancelDeparture(kelaboId, participantId) {
+    const timer = leaving.get(kelaboId)?.get(participantId);
+    if (!timer) return;
+    clearTimeout(timer);
+    forgetDeparture(kelaboId, participantId);
+  }
+
+  function clearDepartures(kelaboId) {
+    for (const timer of leaving.get(kelaboId)?.values() ?? []) clearTimeout(timer);
+    leaving.delete(kelaboId);
+    lastRoster.delete(kelaboId);
+  }
+
+  c.shutdownHooks.push(async () => {
+    for (const kelaboId of [...leaving.keys()]) clearDepartures(kelaboId);
+  });
 
   // A subscriber is { res, participantId } rather than a bare response: mesh
   // signalling has to reach exactly one participant, and a peer that drops its
@@ -65,13 +156,19 @@ export function createSseHub(c) {
       // replacement has already subscribed — evicting a participant who is
       // sitting right there. That is what left one participant missing from
       // everyone else's call roster.
-      if (!participantId) return;
+      if (!participantId) {
+        fanRoster(kelaboId);
+        return;
+      }
       let remaining = 0;
       for (const other of current ?? []) if (other.participantId === participantId) remaining += 1;
       if (remaining > 0) {
         c.log("sse_resubscribed", { kelaboId, participantId, streams: remaining });
         return;
       }
+      // Still counted for the grace window; `scheduleDeparture` fans the drop
+      // when it expires, and `subscribe` cancels it if they come back.
+      scheduleDeparture(kelaboId, participantId);
       c.rtcRoom?.handleDisconnect(kelaboId, participantId);
       // Their last caption stream in any kelabo closed → tell contact-presence
       // watchers they are no longer in a kelabo (docs 18 §5). Deferred a tick so
@@ -81,7 +178,13 @@ export function createSseHub(c) {
     c.log("sse_subscribed", { kelaboId, participantId, subscribers: set.size });
     // Back inside the disconnect grace window: the pending eviction is
     // cancelled and the room is told the peer never really left.
-    if (participantId) c.rtcRoom?.cancelDisconnect?.(kelaboId, participantId);
+    if (participantId) {
+      cancelDeparture(kelaboId, participantId);
+      c.rtcRoom?.cancelDisconnect?.(kelaboId, participantId);
+    }
+    // The headcount changed for everyone, or — on a reconnect that changed
+    // nothing — only this stream still needs its opening value.
+    if (!fanRoster(kelaboId)) writeEvent(res, SSE_EVENT_ROSTER, rosterPayload(kelaboId));
     // Entering a kelabo flips `inKelabo` for contact-presence watchers.
     if (participantId && c.presence) c.presence.refreshKelaboState(participantId);
   }
@@ -183,10 +286,11 @@ export function createSseHub(c) {
       }
       c.state.sseSubscribers.delete(kelaboId);
     }
+    clearDepartures(kelaboId);
     c.log("sse_ended", { kelaboId, subscribers: subs?.size ?? 0 });
   }
 
-  return { subscribe, publish, rename, debug, utterance, rtc, rtcTo, agent, ended, writeEvent };
+  return { subscribe, publish, rename, debug, utterance, rtc, rtcTo, agent, ended, roster: rosterPayload, writeEvent };
 }
 
 function writeRaw(res, chunk) {

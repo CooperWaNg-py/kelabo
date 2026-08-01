@@ -350,6 +350,31 @@ extracted from the old `BoardPanel` so that no layout decision can drop a
 stream) — and nothing about how the room looks. `room/RoomShell.jsx` owns the
 entire presentation and none of the connections.
 
+**The headcount chip (`👥`) is live, not cumulative.** It comes from the `roster`
+SSE event (docs 03 §5.1) — distinct identities holding a stream on this kelabo
+right now. It is deliberately not the kelabo's `participants` list, which is
+append-only and so only ever climbs (two people who both left still read "2"),
+and not the tile count, which counts a shared screen as a person and cannot see
+a board-only participant. Until the first `roster` arrives there is no chip:
+no number beats a wrong one. An **ended** kelabo shows the cumulative count
+instead, which is the honest number for a record of who took part.
+
+**One tab per kelabo** (`room/tabClaim.js` + `room/useSingleTab.js`). A second
+tab of the same kelabo, in the same browser, is refused with a page offering
+"Open here instead" (`room/TabTaken.jsx`). Not cosmetic: a second tab takes a
+second `getUserMedia` on a device the room holds exactly once — echo, and every
+sentence transcribed twice under one identity — and the conference seat is keyed
+by identity, so the Gateway treats the new tab as a *rejoin* and the first tab's
+call silently dies. Nothing server-side can catch it, because the SSE hub
+deliberately tolerates two streams per identity so EventSource reconnects
+survive. The gate is a `BroadcastChannel` probe with a 400ms window, so a
+crashed tab leaves no stale lock; the room component is **not mounted** while
+blocked, which is also what makes the takeover clean — the losing tab's cleanups
+release the mic and leave the call before the winning tab opens anything. The
+protocol is a pure reducer so the races (simultaneous opens, a holder that never
+answers) are testable: `spa/test/tabClaim.mjs`. Scope is one browser profile —
+a phone and a laptop are a legitimate pair of tabs.
+
 **Multilingual (not built):** participants may speak different languages in the same
 kelabo — **no per-participant language setting**: Deepgram's `detect_language`
 identifies each speaker's language automatically. Translation is a **host

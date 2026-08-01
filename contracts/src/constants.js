@@ -118,4 +118,10 @@ export const SSE_EVENT_ENDED = "ended";
 export const SSE_EVENT_PING = "ping";
 export const SSE_EVENT_RTC = "rtc";
 export const SSE_EVENT_RENAME = "rename";
+// Who is attached to THIS kelabo right now, derived from live SSE streams.
+// Named `roster` rather than `presence` because `presence` is already the
+// contact-presence stream's event name (docs 18 §5), which is per-identity and
+// kelabo-agnostic. Distinct from the RTC roster: a board-only participant holds
+// a stream but never joins the call, so only this one counts them.
+export const SSE_EVENT_ROSTER = "roster";
 export const SSE_EVENT_UTTERANCE = "utterance";

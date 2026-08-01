@@ -65,7 +65,7 @@ Lambda); anything else gets 401.
 |-----------|-------|---------|
 | `tunnelByKelabo` | `Map<kelaboId, Conn>` | the agent **attending** each kelabo — transcript routes here |
 | `prepByKelabo` | `Map<kelaboId, Conn>` | the agent **preparing for** a scheduled kelabo. Separate map on purpose: `caption.js` never reads it, so a prep binding cannot receive transcript (docs 16 §5) |
-| `sseSubscribers` | `Map<kelaboId, Set<res>>` | board subscribers per kelabo |
+| `sseSubscribers` | `Map<kelaboId, Set<{res, participantId}>>` | board subscribers per kelabo. The identity travels with the subscription so mesh signalling can address one peer, a dropped stream can remove them from the call, and the **live roster** below can be derived |
 | `promotedByKelabo` | `Map<kelaboId, {runtime, sessionRef, workspace, …}>` | which local agent session is bound (dev mode); runtime-agnostic |
 | `agentWorkers` | `Map<kelaboId, WorkerHandle>` | in-task agent context per active server-mode kelabo |
 
@@ -150,6 +150,29 @@ nothing on screen to say so.
 SSE hub keys strictly on the **server-known kelaboId**, never a value claimed in a
 frame. Every fanned Contribution is also **persisted** (`CONTRIB#`) so late-comers
 can backfill — including ones written before the kelabo started.
+
+### 5.1 Live roster — who is in the kelabo *now*
+
+`sseSubscribers` is the only thing that knows. The kelabo META's `participants`
+is an **append-only join ledger** — nobody is ever removed from it — so it
+answers "who has ever been here", which is the right number for an ended kelabo
+and the wrong one for a live room. The call roster (`state.rtcRooms`) cannot
+answer it either: a **board-only** participant holds a stream and never calls
+`/rtc/join`.
+
+So `sseHub` derives it and fans a `roster` event `{count, participants[]}`:
+
+- on subscribe (so a tab learns the headcount immediately — the REST API is a
+  Lambda and cannot see this state), and again whenever it changes;
+- deduplicated **by identity**, so two tabs of one person are one person;
+- a departure is deferred by `rtc.disconnectGraceSeconds` (default 20s), the
+  same window the call uses before `peer_away`, so a reload does not make the
+  number visibly dip and recover;
+- suppressed when nothing changed, so an EventSource reconnect emits no events.
+
+The assistant and a paired coding agent are **not** in it: neither holds an SSE
+stream (the bridge is on WSS `/rig`). They have their own chip in the room.
+Tests: `gateway/test/roster.mjs`.
 
 ---
 

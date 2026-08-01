@@ -10,6 +10,11 @@ import { Button } from '../components/ui/Button'
 import { useToast } from '../components/Toaster'
 import { useTypeAnywhere } from '../useTypeAnywhere'
 import { previewRandomAppearance, restoreSavedAppearance } from '../theme'
+import { normaliseDomain, resolveEmail } from '../emailDomain.js'
+
+// The deployment's locked domain, or '' for open registration. Read once: it
+// is baked into the bundle at build time, so it cannot change under us.
+const lockedDomain = normaliseDomain(config.allowedEmailDomain)
 
 function otpErrorMessage(err) {
   switch (err?.code) {
@@ -17,7 +22,11 @@ function otpErrorMessage(err) {
     case 'code_expired':
       return 'Incorrect or expired code — try again.'
     case 'domain_not_allowed':
-      return "This deployment only allows your organization's email domain."
+      // Reachable despite the check in sendCode: the server is the authority,
+      // and a stale bundle can disagree with it after the domain is changed.
+      return lockedDomain
+        ? `Only @${lockedDomain} addresses can sign in.`
+        : "This deployment only allows your organization's email domain."
     case 'rate_limited':
       return 'Too many attempts — wait a moment and try again.'
     case 'email_not_verified':
@@ -82,12 +91,19 @@ export default function Login() {
   }, [])
 
   const sendCode = async () => {
-    const value = email.trim()
-    if (!value.includes('@')) {
-      toast('Enter your work email')
+    // On a locked deployment a bare local part is enough — the domain is
+    // filled in here. A wrong domain is refused without a round-trip.
+    const resolved = resolveEmail(email, lockedDomain)
+    if (!resolved.ok) {
+      if (resolved.reason === 'wrong_domain') setError(`Only @${lockedDomain} addresses can sign in.`)
+      else toast(lockedDomain ? `Enter your name, or your full @${lockedDomain} address` : 'Enter your work email')
       emailRef.current?.focus()
       return
     }
+    const value = resolved.email
+    // Show what was actually sent: the OTP step, resend and verify all read
+    // this, so leaving a half-typed address in state would break verify.
+    if (value !== email) setEmail(value)
     if (countdown > 0) return
     setState('sending')
     setError(null)
@@ -151,7 +167,10 @@ export default function Login() {
             <h1 className="page-title">Sign in</h1>
             {/* Work email leads: on a self-hosted deployment the business
                 address IS the identity — the tenant, the directory, presence.
-                Social sign-in still works, but as the fallback, below. */}
+                Social sign-in still works, but as the fallback, below.
+                The domain itself is named once only, in the note under the
+                button, beside the field where it is actually typed — saying it
+                here as well would make the card repeat itself. */}
             <p className="page-sub">Use your work email — we'll send you a sign-in code.</p>
 
             {error && <Banner kind="danger">{error}</Banner>}
@@ -161,7 +180,7 @@ export default function Login() {
                 className="input"
                 ref={emailRef}
                 type="email"
-                placeholder="you@company.com"
+                placeholder={lockedDomain ? `you@${lockedDomain}` : 'you@company.com'}
                 autoComplete="email"
                 value={email}
                 onChange={e => setEmail(e.target.value)}
@@ -171,7 +190,11 @@ export default function Login() {
             <Button variant="primary" block onClick={sendCode} disabled={state === 'sending' || countdown > 0}>
               {state === 'sending' ? 'Sending…' : countdown > 0 ? `Send code (${countdown}s)` : 'Send code'}
             </Button>
-            <p className="form-note">Only addresses on this deployment's allowed domain can sign in.</p>
+            <p className="form-note">
+              {lockedDomain
+                ? <>Only <strong>@{lockedDomain}</strong> addresses can sign in — you can leave the domain off.</>
+                : <>Only addresses on this deployment's allowed domain can sign in.</>}
+            </p>
 
             {/* Social sign-in exists only where the deployment configured it
                 (socialProviders + OAuth secrets) — a self-hosted org gets a

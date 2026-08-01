@@ -65,14 +65,36 @@ function useFollowingScroll(dep, enabled) {
   return { ref, pinned, jump, onScroll: () => { if (pinned && atBottom()) setPinned(false) } }
 }
 
-function MessageList({ items, scroll, empty }) {
+function MessageList({ items, scroll, empty, history }) {
   // Day dividers appear only when the list actually spans days (annotateDays) —
   // a room that has run for a week reads like a chat history, a one-hour
   // kelabo stays exactly as clean as before.
   const dated = useMemo(() => annotateDays(items), [items])
+
+  // A button rather than infinite scroll, deliberately: digging days back is
+  // rare, and prepending on a scroll event has to fight the viewport for
+  // position. The prepended page grows the list ABOVE the reader, so the
+  // scroll offset is restored manually to keep what they were looking at
+  // exactly where it was.
+  const loadEarlier = async () => {
+    const el = scroll.ref.current
+    const prevHeight = el?.scrollHeight ?? 0
+    const prevTop = el?.scrollTop ?? 0
+    await history.onLoadEarlier()
+    requestAnimationFrame(() => {
+      const now = scroll.ref.current
+      if (now) now.scrollTop = prevTop + (now.scrollHeight - prevHeight)
+    })
+  }
+
   return (
     <>
       <div className="side-scroll" ref={scroll.ref} onScroll={scroll.onScroll}>
+        {history?.hasMore && (
+          <button className="chip chip-btn load-earlier" disabled={history.loading} onClick={loadEarlier}>
+            {history.loading ? 'Loading…' : 'Load earlier messages'}
+          </button>
+        )}
         {items.length === 0 && <div className="empty">{empty}</div>}
         {dated.map(({ item: m, divider }) => (
           <Fragment key={m.messageId}>
@@ -107,7 +129,7 @@ function MessageList({ items, scroll, empty }) {
  * an explicit mention is the one way to make the assistant answer without
  * waiting for it to decide the room wanted an answer.
  */
-function MessagesTab({ capture, ended, assistantOn }) {
+function MessagesTab({ capture, ended, assistantOn, history }) {
   const { messages, sendTyped } = capture
   const typed = useMemo(() => messages.filter(m => m.source === 'typed'), [messages])
   const scroll = useFollowingScroll(typed, true)
@@ -130,6 +152,7 @@ function MessagesTab({ capture, ended, assistantOn }) {
         items={typed}
         scroll={scroll}
         empty="No messages yet. Type below — everyone in the kelabo sees it."
+        history={history}
       />
 
       {!ended && (
@@ -152,7 +175,7 @@ function MessagesTab({ capture, ended, assistantOn }) {
 
 /** What was spoken, as it was transcribed. Read-only: writing belongs to the
  *  Messages tab, where everyone — transcript-entitled or not — can see it. */
-function TranscriptTab({ capture, diarize, kelaboId, boardOnly }) {
+function TranscriptTab({ capture, diarize, kelaboId, boardOnly, history }) {
   const { state, messages, renameSpeaker } = capture
   const spoken = useMemo(() => messages.filter(m => m.source !== 'typed'), [messages])
   const scroll = useFollowingScroll(spoken, true)
@@ -207,6 +230,7 @@ function TranscriptTab({ capture, diarize, kelaboId, boardOnly }) {
             ? 'Watch-only — you joined without a microphone. Everyone else’s words still appear here.'
             : 'Speak — everyone’s words appear here as they are transcribed.'
         }
+        history={history}
       />
 
       <div className="side-foot">
@@ -286,6 +310,7 @@ export function SidePanel({
   onHold,
   transcriptAccess = true,
   assistantOn = true,
+  history,
 }) {
   // A participant without transcript access can still be steered here with
   // tab === 'transcript' (a keyboard shortcut, a stale preference). Falling
@@ -349,9 +374,11 @@ export function SidePanel({
         <div className="side-note"><span className="chip">reconnecting…</span></div>
       )}
 
-      {active === 'messages' && <MessagesTab capture={capture} ended={ended} assistantOn={assistantOn} />}
+      {active === 'messages' && (
+        <MessagesTab capture={capture} ended={ended} assistantOn={assistantOn} history={history} />
+      )}
       {active === 'transcript' && (
-        <TranscriptTab capture={capture} diarize={diarize} kelaboId={kelaboId} boardOnly={boardOnly} />
+        <TranscriptTab capture={capture} diarize={diarize} kelaboId={kelaboId} boardOnly={boardOnly} history={history} />
       )}
       {active === 'board' && assistantOn && (
         <BoardTab

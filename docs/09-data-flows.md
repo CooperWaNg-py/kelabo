@@ -284,6 +284,12 @@ transcript reducer ignores an id it already sealed — so backfill-after-reconne
 cannot duplicate a message that also arrived live. The same fetch runs on first
 mount, which is what fills the panel for someone (re)entering mid-kelabo.
 
+`/caption/history` pages backwards for rooms that outlive one sitting: no
+cursor returns the newest page, `before=<nextBefore>` returns the next older
+one, `hasMore` says when to stop. The SPA's "Load earlier messages" button
+walks this; its cursor only ever moves older, so a reconnect's newest-page
+refetch cannot reset a reader who has paged back.
+
 **Transcript entitlement.** Both `/caption/history` and the SSE fan-out apply
 one rule (`transcriptEntitled`, gateway/src/caption.js): a guest on a deployment
 with `guestTranscriptAccess: false` receives typed messages only — speech never

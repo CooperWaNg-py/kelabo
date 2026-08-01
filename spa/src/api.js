@@ -168,10 +168,14 @@ export function renameSpeaker({ kelaboId, from, to }) {
   return request(config.gatewayBase, '/caption/rename', { method: 'POST', body: { kelaboId, from, to } })
 }
 
-/** The persisted messages of a live kelabo, entitlement-filtered server-side.
- *  Returns { transcriptAccess, utterances } — see gateway/src/caption.js. */
-export function getCaptionHistory(kelaboId) {
-  return request(config.gatewayBase, `/caption/history?kelaboId=${encodeURIComponent(kelaboId)}`)
+/** The persisted messages of a live kelabo, entitlement-filtered server-side
+ *  and paged newest-first: pass `before` (the previous response's `nextBefore`)
+ *  to fetch the next older page. Returns { transcriptAccess, utterances,
+ *  hasMore, nextBefore? } — see gateway/src/caption.js. */
+export function getCaptionHistory(kelaboId, { before } = {}) {
+  const params = new URLSearchParams({ kelaboId })
+  if (before) params.set('before', before)
+  return request(config.gatewayBase, `/caption/history?${params}`)
 }
 
 export function boardStreamUrl(kelaboId) {

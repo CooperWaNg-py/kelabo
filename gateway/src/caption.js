@@ -240,6 +240,13 @@ export async function handleCaptionPost(c, req, res) {
  * everything said or typed while you were gone, or before you arrived, was in
  * the database and nowhere else.
  *
+ * Pages backwards: no cursor returns the newest page; `before=<sk>` returns
+ * the page older than that row. `nextBefore` in the response is the cursor for
+ * the next older page and `hasMore` says whether one exists — a room that has
+ * run for weeks is read newest-first, a page at a time. The cursor is computed
+ * BEFORE entitlement filtering, so a guest whose page is mostly speech they
+ * may not see still advances through it instead of stalling.
+ *
  * Entitlement is applied here exactly as at the SSE fan-out: a participant who
  * may not receive speech gets typed messages only. The response says which,
  * so the SPA can hide the Transcript tab rather than show it empty forever.
@@ -253,20 +260,33 @@ export async function handleCaptionHistory(c, req, res, url) {
   const kelaboId = url.searchParams.get("kelaboId") ?? "";
   if (!kelaboId || kelaboId !== participant.kelaboId) return send(res, 403, { error: "forbidden" });
 
+  const before = url.searchParams.get("before") || "";
+  const limitParam = Math.floor(Number(url.searchParams.get("limit")));
+  const limit =
+    Number.isFinite(limitParam) && limitParam > 0 ? Math.min(limitParam, HISTORY_LIMIT) : HISTORY_LIMIT;
+
   const entitled = transcriptEntitled(c, participant);
   let rows;
   try {
-    // Newest N, returned oldest-first so the SPA appends in display order.
-    rows = await queryUtt(c, kelaboId, { limit: HISTORY_LIMIT, desc: true });
+    // Newest first from the cursor; +2 headroom covers the cursor row itself
+    // (BETWEEN is inclusive) and the one-extra row that detects hasMore.
+    rows = await queryUtt(c, kelaboId, { limit: limit + 2, desc: true, ...(before ? { before } : {}) });
   } catch (err) {
     c.logError("caption_history_failed", err, { kelaboId });
     return send(res, 500, { error: "internal_error" });
   }
-  rows.reverse();
+  if (before) rows = rows.filter((i) => i.SK < before);
+  const hasMore = rows.length > limit;
+  const page = rows.slice(0, limit);
+  // Oldest-first so the SPA appends in display order.
+  page.reverse();
+  const nextBefore = page[0]?.SK || "";
 
-  const visible = entitled ? rows : rows.filter((i) => i.source === "typed");
+  const visible = entitled ? page : page.filter((i) => i.source === "typed");
   return send(res, 200, {
     transcriptAccess: entitled,
+    hasMore,
+    ...(nextBefore ? { nextBefore } : {}),
     utterances: visible.map((i) => ({
       // Rows persisted before messageId was stored fall back to the sort key —
       // stable across refetches, so re-seeding still cannot duplicate them.

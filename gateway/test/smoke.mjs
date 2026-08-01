@@ -71,13 +71,19 @@ const db = {
         return { Items: invites[pk.slice("KELABO#".length)] ?? [] };
       }
       // Serve transcript queries from what the test actually persisted, so the
-      // history endpoint reads exactly the rows the caption handler wrote.
+      // history endpoint reads exactly the rows the caption handler wrote —
+      // honouring the cursor, sort direction and limit the way DynamoDB would,
+      // so the pagination test exercises real behaviour.
       if (sk === "UTT#" && pk === `KELABO#${KELABO}`) {
-        return {
-          Items: calls.puts
-            .filter((p) => p.TableName === "t-kelabos" && String(p.Item.SK).startsWith("UTT#"))
-            .map((p) => p.Item),
-        };
+        const before = input.ExpressionAttributeValues?.[":before"];
+        let items = calls.puts
+          .filter((p) => p.TableName === "t-kelabos" && String(p.Item.SK).startsWith("UTT#"))
+          .map((p) => p.Item)
+          .filter((i) => !before || i.SK <= before)
+          .sort((a, b) => (a.SK < b.SK ? -1 : 1));
+        if (input.ScanIndexForward === false) items.reverse();
+        if (input.Limit) items = items.slice(0, input.Limit);
+        return { Items: items };
       }
       if (input.IndexName === "participant-index" && input.ExpressionAttributeValues?.[":p"] === "alice@example.com") {
         return { Items: [{ kelaboId: "past1", title: "Sprint planning", endedAt: 1722300000000, participantIdentity: "alice@example.com" }] };
@@ -395,6 +401,37 @@ async function main() {
 
     guestSse.res.destroy();
     console.log("ok: transcript isolation — guest SSE and history are typed-only, entitled see everything");
+  }
+
+  {
+    // Backward paging: newest page first, `nextBefore` walks older, pages never
+    // overlap, and the walk terminates with hasMore=false at the oldest row.
+    const fetchPage = async (before) => {
+      const q = `kelaboId=${KELABO}&limit=2${before ? `&before=${encodeURIComponent(before)}` : ""}`;
+      const res = await req(port, { path: `/caption/history?${q}`, headers: { cookie: `kelabo_participant=${participantCookie}` } });
+      assert.equal(res.status, 200);
+      return JSON.parse(res.body);
+    };
+
+    const total = calls.puts.filter((p) => p.TableName === "t-kelabos" && String(p.Item.SK).startsWith("UTT#")).length;
+    const seen = [];
+    let page = await fetchPage();
+    let hops = 0;
+    while (true) {
+      for (const u of page.utterances) {
+        assert.ok(!seen.includes(u.messageId), `page overlap on ${u.messageId}`);
+        seen.push(u.messageId);
+      }
+      assert.ok(page.utterances.length <= 2, "page respects the limit");
+      if (!page.hasMore) break;
+      assert.ok(page.nextBefore, "a further page implies a cursor");
+      page = await fetchPage(page.nextBefore);
+      hops += 1;
+      assert.ok(hops < 20, "pagination terminates");
+    }
+    assert.equal(seen.length, total, "walking the cursor visits every persisted row exactly once");
+    assert.ok(hops >= 1, "the fixture is big enough to actually paginate");
+    console.log(`ok: history pages backwards — ${total} rows over ${hops + 1} pages, no overlap, clean end`);
   }
 
   {

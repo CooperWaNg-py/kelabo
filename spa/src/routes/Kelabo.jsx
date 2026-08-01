@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
-import { api } from '../api'
+import { api, getCaptionHistory } from '../api'
 import { useAuth, displayName } from '../auth'
 import { useToast } from '../components/Toaster'
 import { useConfirm } from '../components/ConfirmDialog'
@@ -116,6 +116,11 @@ function KelaboRoom() {
   // sees the Transcript tab disappear after the first fetch. The server never
   // sent them speech either way; this only controls what the panel offers.
   const [transcriptAccess, setTranscriptAccess] = useState(true)
+  // Backward paging through persisted messages. The cursor tracks the OLDEST
+  // row seen so far: reconnect backfills re-fetch the newest page, whose
+  // cursor must never drag the pager forward again.
+  const historyCursor = useRef({ nextBefore: '', hasMore: false })
+  const [historyPager, setHistoryPager] = useState({ hasMore: false, loading: false })
   // Live agent presence from the SSE `agent` event (docs 16). `null` until one
   // arrives, at which point it supersedes whatever the META said at page load.
   const [agent, setAgent] = useState(null)
@@ -198,6 +203,33 @@ function KelaboRoom() {
     if (call.screenDenied) screen.stop()
   }, [call.screenDenied, screen.stop])
 
+  // Fold one history response in: seed the transcript, adopt the entitlement
+  // flag, and advance the backward cursor — but only to something OLDER than
+  // what we already hold, so a reconnect's newest-page refetch cannot reset
+  // the pager a reader has been walking backwards.
+  const adoptHistory = h => {
+    if (typeof h?.transcriptAccess === 'boolean') setTranscriptAccess(h.transcriptAccess)
+    capture.seedHistory?.(h?.utterances)
+    const cur = historyCursor.current
+    if (h?.nextBefore && (!cur.nextBefore || h.nextBefore < cur.nextBefore)) {
+      historyCursor.current = { nextBefore: h.nextBefore, hasMore: !!h.hasMore }
+      setHistoryPager(p => ({ ...p, hasMore: !!h.hasMore }))
+    }
+  }
+
+  const loadEarlierMessages = useCallback(async () => {
+    const cur = historyCursor.current
+    if (!cur.hasMore || !cur.nextBefore) return
+    setHistoryPager(p => ({ ...p, loading: true }))
+    try {
+      adoptHistory(await getCaptionHistory(id, { before: cur.nextBefore }))
+    } catch {
+      // Leave hasMore as it was — the button stays and the next click retries.
+    } finally {
+      setHistoryPager(p => ({ ...p, loading: false }))
+    }
+  }, [id]) // eslint-disable-line react-hooks/exhaustive-deps
+
   // The kelabo's one EventSource. Everything the server pushes rides it —
   // contributions, transcript echo, LLM debug, conference signalling — so it is
   // mounted here, once, above every view that reads from it.
@@ -207,10 +239,7 @@ function KelaboRoom() {
     onEnded: handleEnded,
     onRename: capture.renameSpeaker,
     onUtterance: capture.addRemoteUtterance,
-    onHistory: h => {
-      if (typeof h?.transcriptAccess === 'boolean') setTranscriptAccess(h.transcriptAccess)
-      capture.seedHistory?.(h?.utterances)
-    },
+    onHistory: h => adoptHistory(h),
     onDebug: onDebugEvent,
     onRtc: call.onServerEvent,
     onAgent: setAgent,
@@ -405,6 +434,7 @@ function KelaboRoom() {
         board={board}
         diarize={diarize}
         transcriptAccess={transcriptAccess}
+        history={{ hasMore: historyPager.hasMore, loading: historyPager.loading, onLoadEarlier: loadEarlierMessages }}
         stt={{
           lang: sttLang,
           onLang: onSttLangChange,

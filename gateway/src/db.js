@@ -98,12 +98,21 @@ export async function putContrib(c, contribution) {
   return sk;
 }
 
-export async function queryKelaboItems(c, kelaboId, skPrefix, { limit, desc = false } = {}) {
+export async function queryKelaboItems(c, kelaboId, skPrefix, { limit, desc = false, before } = {}) {
   const out = await c.db.send(
     new QueryCommand({
       TableName: kelabosTable(c),
-      KeyConditionExpression: "PK = :pk AND begins_with(SK, :sk)",
-      ExpressionAttributeValues: { ":pk": kelaboPk(kelaboId), ":sk": skPrefix },
+      // `before` pages backwards through a partition: BETWEEN is the only way
+      // to bound the sort key alongside its prefix in one key condition, and
+      // it is INCLUSIVE — callers drop the row equal to their own cursor.
+      KeyConditionExpression: before
+        ? "PK = :pk AND SK BETWEEN :sk AND :before"
+        : "PK = :pk AND begins_with(SK, :sk)",
+      ExpressionAttributeValues: {
+        ":pk": kelaboPk(kelaboId),
+        ":sk": skPrefix,
+        ...(before ? { ":before": before } : {}),
+      },
       ScanIndexForward: !desc,
       ...(limit ? { Limit: limit } : {}),
     })

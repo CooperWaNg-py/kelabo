@@ -2042,6 +2042,10 @@ h5.md-h, h6.md-h { font-size: var(--text-sm); color: var(--text-2); }
   border-top: 1px solid var(--border);
 }
 
+/* Backward paging through a long room's history — sits at the very top of the
+   message scroll, above the oldest loaded page. */
+.load-earlier { display: block; margin: var(--space-2) auto var(--space-3); }
+
 /* ---------- LLM debug panel ---------- */
 /* Raw request/response blocks. A class rather than an inline style so the
    fullscreen drawer rule above can grow them. */

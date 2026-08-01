@@ -88,6 +88,7 @@ export function RoomShell({
   micPrefs,
   diarize,
   transcriptAccess = true,
+  history,
   onToggleDebug,
   debugOn,
   onInvite,
@@ -512,6 +513,7 @@ export function RoomShell({
             // at all) — either alone leaves a tab that can never fill.
             transcriptAccess={transcriptAccess && sttOn}
             assistantOn={assistantOn}
+            history={history}
           />
         )}
       </main>

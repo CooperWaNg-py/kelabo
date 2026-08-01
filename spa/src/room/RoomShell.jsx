@@ -90,6 +90,7 @@ export function RoomShell({
   debugOn,
   onToggleDebug,
   onCopyInvite,
+  onJoinCode,
   onGenerateMinutes,
   onLeave,
   onBack,
@@ -522,6 +523,7 @@ export function RoomShell({
         debugOn={debugOn}
         onToggleDebug={onToggleDebug}
         onCopyInvite={onCopyInvite}
+        onJoinCode={onJoinCode}
         onGenerateMinutes={onGenerateMinutes}
         onToggleTheme={onToggleTheme}
         onScheme={onScheme}

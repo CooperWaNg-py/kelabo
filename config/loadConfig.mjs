@@ -90,6 +90,20 @@ export function loadConfig(env,   configPath = join(here, "kelabo.json")) {
     ...(block.auth ?? {}),
   };
 
+  // Join codes (rest-api/src/joinCode.js): the two-minute spoken stand-in for a
+  // kelabo URL. Always available — it needs no third-party service and no
+  // secret, so there is nothing for a deployment to turn on. What a deployment
+  // may want to move are the abuse dials: `redeemPerIp*` bounds guessing and is
+  // the one to tighten, `mintPerKelaboPerHour` bounds how many codes a single
+  // room can have live at once.
+  const joinCode = {
+    ttlSeconds: 120,
+    mintPerKelaboPerHour: 20,
+    redeemPerIpWindowSeconds: 3600,
+    redeemPerIpMaxRequests: 20,
+    ...(block.joinCode ?? {}),
+  };
+
   return {
     ...block,
     env,
@@ -98,6 +112,7 @@ export function loadConfig(env,   configPath = join(here, "kelabo.json")) {
     rtc,
     contacts,
     auth,
+    joinCode,
     secrets: {
       ...block.secrets,
       // Same defaulting reason as `rtc` above: keep a pre-conference-audio

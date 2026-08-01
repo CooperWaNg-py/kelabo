@@ -25,6 +25,27 @@ export const AGENT_USER_CODE_LENGTH = 8;
 export const AGENT_DEVICE_CODE_TTL_SECONDS = 600;
 export const AGENT_DEVICE_POLL_SECONDS = 5;
 
+// Join code: what you read down a phone so somebody can get into the kelabo you
+// are already in. A kelabo URL is an unguessable id and unspeakable out loud;
+// this is six characters, alternating letter and digit (`A5B4C7`), which is
+// short enough to say once and be heard right.
+//
+// Same font-ambiguity exclusions as the device code above — no I/L/O, no 0/1 —
+// which is not fussiness: the failure mode is a person reading "1" and another
+// typing "l", and neither of them ever finding out why it did not work.
+//
+// The alternation is doing real work too. It halves the alphabet a listener has
+// to disambiguate at each position (they know whether to expect a letter or a
+// digit), and it makes a malformed code detectable before any lookup.
+export const JOIN_CODE_LETTERS = "ABCDEFGHJKMNPQRSTUVWXYZ";
+export const JOIN_CODE_DIGITS = "23456789";
+export const JOIN_CODE_PAIRS = 3;
+export const JOIN_CODE_LENGTH = JOIN_CODE_PAIRS * 2;
+// Two minutes. The code is deliberately far weaker than the URL it stands for
+// (23*8 per pair, ~7.1M in total, versus a 128-bit id), so the window and the
+// per-IP redeem cap — not the length — are what make guessing pointless.
+export const JOIN_CODE_TTL_SECONDS = 120;
+
 // `[LLM_CON]` and `:KELABO-END` are no longer part of the agent wire protocol
 // (docs 16 §2.A). They survive here because the opencode adapter still parses
 // the marker as a fallback, and the server agent still renders it.
@@ -89,6 +110,10 @@ export const ERROR_CODES = [
   "authorization_pending",
   "device_code_invalid",
   "device_code_expired",
+  // Join codes. `join_code_invalid` covers malformed and unknown alike — a
+  // redeemer must not learn from the error whether a code they guessed exists.
+  "join_code_invalid",
+  "join_code_expired",
   "agent_token_revoked",
   "not_invited",
   // Cancel/reschedule (docs 18 §2, §3). `kelabo_cancelled` is distinct from

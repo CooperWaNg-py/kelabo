@@ -83,6 +83,7 @@ export function ControlBar({
   debugOn,
   onToggleDebug,
   onCopyInvite,
+  onJoinCode,
   onGenerateMinutes,
   onToggleTheme,
   onScheme,
@@ -470,6 +471,12 @@ export function ControlBar({
             <>
               <MenuItem icon={<Icon name="link" />} onClick={() => { close(); onCopyInvite() }}>
                 Copy invite link
+              </MenuItem>
+              {/* Sits beside Copy invite link because it answers the same
+                  question — "get one more person in here" — for the case where
+                  you cannot paste anything to them. */}
+              <MenuItem icon={<Icon name="phone" />} onClick={() => { close(); onJoinCode() }}>
+                Join code
               </MenuItem>
               <MenuItem icon={<Icon name="file-text" />} onClick={() => { close(); onGenerateMinutes() }}>
                 Generate minutes

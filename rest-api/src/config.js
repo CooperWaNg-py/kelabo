@@ -15,6 +15,16 @@ const DEFAULTS = {
     perIpWindowSeconds: 3600,
     perIpMaxRequests: 30,
   },
+  // Join codes (rest-api/src/joinCode.js). `redeemPerIp*` is the control that
+  // actually bounds guessing, so it is the one to tighten if a deployment ever
+  // sees fishing; `mintPerKelaboPerHour` bounds how many codes one room can
+  // have live at once, which is the multiplier on that same guess surface.
+  joinCode: {
+    ttlSeconds: 120,
+    mintPerKelaboPerHour: 20,
+    redeemPerIpWindowSeconds: 3600,
+    redeemPerIpMaxRequests: 20,
+  },
   rtc: {
     defaultMode: "sfu",
     meshMaxParticipants: 6,
@@ -111,6 +121,12 @@ function fromEnv() {
       perIpWindowSeconds: num(env.KELABO_OTP_PER_IP_WINDOW_SECONDS, DEFAULTS.otp.perIpWindowSeconds),
       perIpMaxRequests: num(env.KELABO_OTP_PER_IP_MAX_REQUESTS, DEFAULTS.otp.perIpMaxRequests),
     },
+    joinCode: {
+      ttlSeconds: num(env.KELABO_JOIN_CODE_TTL_SECONDS, DEFAULTS.joinCode.ttlSeconds),
+      mintPerKelaboPerHour: num(env.KELABO_JOIN_CODE_MINT_PER_KELABO_PER_HOUR, DEFAULTS.joinCode.mintPerKelaboPerHour),
+      redeemPerIpWindowSeconds: num(env.KELABO_JOIN_CODE_REDEEM_PER_IP_WINDOW_SECONDS, DEFAULTS.joinCode.redeemPerIpWindowSeconds),
+      redeemPerIpMaxRequests: num(env.KELABO_JOIN_CODE_REDEEM_PER_IP_MAX_REQUESTS, DEFAULTS.joinCode.redeemPerIpMaxRequests),
+    },
     retentionDays: num(env.KELABO_RETENTION_DAYS, DEFAULTS.retentionDays),
   };
 }
@@ -152,6 +168,7 @@ function fromLoadConfig(c) {
     ses: { fromAddress: c.ses?.fromAddress },
     rtc: { ...DEFAULTS.rtc, ...(c.rtc || {}) },
     otp: { ...DEFAULTS.otp, ...(c.otp || {}) },
+    joinCode: { ...DEFAULTS.joinCode, ...(c.joinCode || {}) },
     retentionDays: c.retentionDays ?? DEFAULTS.retentionDays,
   };
 }

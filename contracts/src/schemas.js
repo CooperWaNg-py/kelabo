@@ -595,6 +595,13 @@ export const agentApproveBodySchema = z.object({
   userCode: z.string().min(1).max(32),
 });
 
+// POST /join-code/redeem — somebody types the code they were told. Loose here
+// on purpose: case, spaces and dashes are the typist's, and normalising them is
+// the server's job (rest-api/src/joinCode.js), not a reason to 400.
+export const joinCodeRedeemBodySchema = z.object({
+  code: z.string().min(1).max(32),
+});
+
 export const modelConfigSchema = z.object({
   provider: z.string(),
   model: z.string(),

@@ -105,6 +105,15 @@ export const api = {
   revokeAgent: jti => apiRequest(`/agent/tokens/${encodeURIComponent(jti)}`, { method: 'DELETE' }),
   joinKelabo: (id, displayName, mode) =>
     apiRequest(`/kelabos/${id}/join`, { method: 'POST', body: { displayName, mode } }),
+
+  // --- join codes -----------------------------------------------------------
+  // A two-minute code you can read down a phone. Minting takes the participant
+  // cookie the room already holds; redeeming needs nothing, because the person
+  // holding a code is by definition someone with no link and maybe no account.
+  // Redeem resolves to a kelaboId and stops — the caller then goes to /join/:id
+  // like anybody else, so there is only ever one way into a kelabo.
+  mintJoinCode: id => apiRequest(`/kelabos/${id}/join-code`, { method: 'POST' }),
+  redeemJoinCode: code => apiRequest('/join-code/redeem', { method: 'POST', body: { code } }),
   endKelabo: id => apiRequest(`/kelabos/${id}/end`, { method: 'POST' }),
   startKelabo: id => apiRequest(`/kelabos/${id}/start`, { method: 'POST' }),
   generateMinutes: id => apiRequest(`/kelabos/${id}/minutes`, { method: 'POST' }),

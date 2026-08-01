@@ -21,6 +21,7 @@ import { useBoard } from '../room/useBoard'
 import { useSingleTab } from '../room/useSingleTab'
 import { TabTaken } from '../room/TabTaken'
 import { RoomShell } from '../room/RoomShell'
+import { JoinCodeDialog } from '../room/JoinCodeDialog'
 import { DebugPanel } from '../board/DebugPanel'
 import { pushSettings } from '../settings'
 import { joinPrefs } from '../joinPrefs'
@@ -309,6 +310,10 @@ function KelaboRoom() {
     toast('Invite link copied')
   }
 
+  // Nothing is minted until this opens — a code the room never showed anybody
+  // would still be a live code, and still count against the room's hourly cap.
+  const [joinCodeOpen, setJoinCodeOpen] = useState(false)
+
   const generateMinutes = async () => {
     try {
       await api.generateMinutes(id)
@@ -409,6 +414,7 @@ function KelaboRoom() {
         debugOn={debugEnabled}
         onToggleDebug={toggleDebug}
         onCopyInvite={copyInvite}
+        onJoinCode={() => setJoinCodeOpen(true)}
         onGenerateMinutes={generateMinutes}
         onLeave={leave}
         onBack={back}
@@ -418,6 +424,8 @@ function KelaboRoom() {
         scheme={scheme}
         themeIcon={icon}
       />
+
+      <JoinCodeDialog kelaboId={id} open={joinCodeOpen} onClose={() => setJoinCodeOpen(false)} />
 
       {ended && (
         <Modal

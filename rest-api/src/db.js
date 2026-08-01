@@ -720,6 +720,56 @@ export function createDb({ config, client } = {}) {
     await doc.send(new DeleteCommand({ TableName: T.otp, Key: { PK: `USERCODE#${item.userCode}` } }));
   }
 
+  // Join codes (rest-api/src/joinCode.js). Short-lived keyed items with a TTL,
+  // so the `otp` table again — same reasoning as device codes above, and the
+  // same avoided deploy-ordering hazard.
+
+  async function putJoinCode(item) {
+    await doc.send(
+      new PutCommand({
+        TableName: T.otp,
+        Item: { PK: `JOINCODE#${item.code}`, ...item },
+        // Two kelabos behind one code would send someone into a room they were
+        // never told about. The caller retries with a fresh code on this.
+        ConditionExpression: "attribute_not_exists(PK)",
+      })
+    );
+  }
+
+  async function getJoinCode(code) {
+    const res = await doc.send(new GetCommand({ TableName: T.otp, Key: { PK: `JOINCODE#${code}` } }));
+    return res.Item || null;
+  }
+
+  async function deleteJoinCode(code) {
+    await doc.send(new DeleteCommand({ TableName: T.otp, Key: { PK: `JOINCODE#${code}` } }));
+  }
+
+  /**
+   * Join-code abuse budget. Its own key space, like the OTP counter it copies:
+   * `scope` is `ip:<ip>` for redeem guessing and `k:<kelaboId>` for minting, so
+   * a room that mints a lot cannot spend the budget that bounds guessing.
+   *
+   * Fixed window rather than sliding — `#ttl` is only set `if_not_exists`, so
+   * the window opens on the first request and both it and the count vanish when
+   * DynamoDB sweeps the row.
+   */
+  async function bumpJoinCodeCounter(scope, windowSeconds) {
+    const now = Math.floor(Date.now() / 1000);
+    const res = await doc.send(
+      new UpdateCommand({
+        TableName: T.otp,
+        Key: { PK: `JCODE#${scope}` },
+        // `ttl` is a DynamoDB reserved word — aliased, never written bare.
+        UpdateExpression: "SET #c = if_not_exists(#c, :zero) + :one, #ttl = if_not_exists(#ttl, :ttl)",
+        ExpressionAttributeNames: { "#c": "count", "#ttl": "ttl" },
+        ExpressionAttributeValues: { ":zero": 0, ":one": 1, ":ttl": now + windowSeconds },
+        ReturnValues: "ALL_NEW",
+      })
+    );
+    return res.Attributes;
+  }
+
   async function putAgentToken(item) {
     await doc.send(new PutCommand({ TableName: T.refresh, Item: { PK: `AGT#${item.jti}`, ...item } }));
   }
@@ -788,6 +838,10 @@ export function createDb({ config, client } = {}) {
     getDeviceCodeByUserCode,
     approveDeviceCode,
     deleteDeviceCode,
+    putJoinCode,
+    getJoinCode,
+    deleteJoinCode,
+    bumpJoinCodeCounter,
     putAgentToken,
     getAgentToken,
     setAgentTokenRevoked,

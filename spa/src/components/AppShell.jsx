@@ -343,6 +343,14 @@ export function AppShell({ children }) {
               <Icon name="calendar" />
               <span className="sidebar-label">Schedule</span>
             </Link>
+            {/* The third way to end up in a kelabo, beside starting one now and
+                putting one in the diary: somebody read you a code. It belongs
+                in this block rather than the nav below because it is a thing
+                you do, not a place you go. */}
+            <Link className="sidebar-item sidebar-new sidebar-new-alt" to="/enter" title="Join with a code">
+              <Icon name="arrow-right" />
+              <span className="sidebar-label">Join</span>
+            </Link>
           </div>
 
           <nav className="sidebar-nav">

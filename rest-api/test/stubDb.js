@@ -272,6 +272,30 @@ export function createDb() {
       otp.delete(`DEVICE#${item.deviceCode}`);
       otp.delete(`USERCODE#${item.userCode}`);
     },
+    // Join codes reuse the otp table too. The conditional put is mirrored
+    // faithfully because the mint loop retries on exactly that exception.
+    async putJoinCode(item) {
+      const k = `JOINCODE#${item.code}`;
+      if (otp.has(k)) {
+        const e = new Error("conditional check failed");
+        e.name = "ConditionalCheckFailedException";
+        throw e;
+      }
+      otp.set(k, { PK: k, ...item });
+    },
+    async getJoinCode(code) {
+      return otp.get(`JOINCODE#${code}`) || null;
+    },
+    async deleteJoinCode(code) {
+      otp.delete(`JOINCODE#${code}`);
+    },
+    async bumpJoinCodeCounter(scope, windowSeconds) {
+      const k = `JCODE#${scope}`;
+      const item = otp.get(k) || { PK: k, count: 0, ttl: Math.floor(Date.now() / 1000) + windowSeconds };
+      item.count += 1;
+      otp.set(k, item);
+      return item;
+    },
     async putAgentToken(item) {
       refresh.set(`AGT#${item.jti}`, { PK: `AGT#${item.jti}`, ...item });
     },

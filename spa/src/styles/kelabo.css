@@ -1269,6 +1269,33 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
   transform: rotate(-45deg);
 }
 
+/* The join code, in the room's dialog. Big and widely tracked because the job
+   it has is to be read off a screen and said down a phone by someone who is
+   also talking to a room — every point of size here is a character not
+   misheard. Tabular figures so the digits sit under each other rather than
+   drifting as the code changes. */
+.joincode {
+  display: flex; justify-content: center;
+  margin: var(--space-4) 0 var(--space-2);
+}
+.joincode-value {
+  font-family: var(--mono); font-variant-numeric: tabular-nums;
+  font-size: 2.25rem; font-weight: 600; letter-spacing: .22em;
+  /* The tracking is on the right of every glyph including the last, which
+     otherwise pushes the whole string visibly off-centre. */
+  text-indent: .22em;
+  color: var(--text); user-select: all;
+}
+.joincode-waiting { color: var(--text-3); letter-spacing: .18em; }
+/* Expired: still shown, so the person can see it is the one they just read
+   out, but plainly dead rather than quietly wrong. */
+.joincode-dead { color: var(--text-3); text-decoration: line-through; }
+.joincode-left {
+  margin: 0; text-align: center;
+  font-size: var(--text-sm); color: var(--text-2); font-variant-numeric: tabular-nums;
+}
+.joincode-left-dead { color: var(--danger); }
+
 /* Labelled search field (Contacts). The strip IS the field: the input inside it
    keeps its own border and radius, so what you saw was a rounded box drawn
    inside another rounded box with the caret between them (notes #10). The input

@@ -14,6 +14,7 @@ import Schedule from './routes/Schedule'
 import ScheduledKelabo from './routes/ScheduledKelabo'
 import Invitation from './routes/Invitation'
 import PairAgent from './routes/PairAgent'
+import EnterCode from './routes/EnterCode'
 import Lobby from './routes/Lobby'
 import Join from './routes/Join'
 import Kelabo from './routes/Kelabo'
@@ -89,6 +90,11 @@ export default function App() {
                     URL in whatever browser the developer has, which may not be
                     signed in yet. */}
                 <Route path="/pair" element={<PairAgent />} />
+                {/* Outside the authenticated group for the same reason as
+                    /join: whoever was read a join code is the one person
+                    certain not to have a link, and may well have no account.
+                    Short path because it gets said out loud too. */}
+                <Route path="/enter" element={<EnterCode />} />
                 <Route path="/m/:id/lobby" element={<Lobby />} />
                 <Route path="/m/:id" element={<Kelabo />} />
                 {/* Overlay-provided pages (empty in default builds). */}

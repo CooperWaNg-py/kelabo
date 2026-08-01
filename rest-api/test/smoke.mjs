@@ -11,6 +11,7 @@ import { createScheduling } from "../src/scheduling.js";
 import { createContacts } from "../src/contacts.js";
 import { createHuddle } from "../src/huddle.js";
 import { createJoin } from "../src/join.js";
+import { createJoinCodes, generateJoinCode, normalizeJoinCode } from "../src/joinCode.js";
 import { createRecords } from "../src/records.js";
 import { cutoffFromAge } from "@kelabo/contracts/retention";
 import { createDeepgramToken } from "../src/deepgramToken.js";
@@ -42,6 +43,12 @@ const config = {
     perEmailMaxRequests: 5,
     perIpWindowSeconds: 3600,
     perIpMaxRequests: 30,
+  },
+  joinCode: {
+    ttlSeconds: 120,
+    mintPerKelaboPerHour: 20,
+    redeemPerIpWindowSeconds: 3600,
+    redeemPerIpMaxRequests: 20,
   },
   retentionDays: 30,
 };
@@ -170,6 +177,7 @@ const scheduling = createScheduling({ config, db, mailer: ses, internal });
 const contacts = createContacts({ config, db });
 const huddle = createHuddle({ config, db, internal, kelabos });
 const join = createJoin({ config, db, secrets });
+const joinCodes = createJoinCodes({ config, db });
 const s3Deletes = [];
 const s3Objects = {}; // key -> JSON string served by the GetObject stub
 const records = createRecords({
@@ -191,7 +199,7 @@ const mcpOauth = createMcpOauth({ config, db, secrets, fetchImpl: mcpFetch });
 
 const agent = createAgent({ config, db, secrets });
 
-const app = createApp({ config, db, secrets, ses, sessions, auth, kelabos, join, records, deepgramToken, internal, mcpOauth, scheduling, contacts, huddle, agent, version: "test" });
+const app = createApp({ config, db, secrets, ses, sessions, auth, kelabos, join, joinCodes, records, deepgramToken, internal, mcpOauth, scheduling, contacts, huddle, agent, version: "test" });
 
 function cookieValue(res, name) {
   const c = (res.cookies || []).find((s) => s.startsWith(`${name}=`));
@@ -330,6 +338,166 @@ await test("POST /kelabos/:id/join as guest mints participant cookie", async () 
   const meta = await db.getKelaboMeta(kelaboId);
   assert.equal(meta.participants.length, 1);
   assert.equal(meta.participants[0].displayName, "Bob");
+});
+
+// --- join codes (rest-api/src/joinCode.js) ----------------------------------
+// The two-minute spoken stand-in for a kelabo URL. Everything here is about a
+// code surviving the trip through a phone call and a stranger's keyboard, and
+// about being worthless the moment it should be.
+
+// Letters minus I/L/O, digits minus 0/1, strictly alternating.
+const CODE_RE = /^([A-HJKMNP-Z][2-9]){3}$/;
+
+await test("join code: shape is the promise — no I/L/O, no 0/1, letter-digit x3", async () => {
+  // The exclusions are the whole reason the alphabet is not A-Z0-9: someone
+  // reads "1" aloud and someone else types "l", and neither ever finds out why
+  // it did not work. Generated directly and in bulk — a sampling bug that only
+  // shows up one code in a thousand is exactly the kind this has to catch.
+  const seen = new Set();
+  for (let i = 0; i < 2000; i += 1) {
+    const code = generateJoinCode();
+    assert.match(code, CODE_RE, `bad code: ${code}`);
+    assert.equal(/[ILO01]/.test(code), false, `ambiguous glyph in ${code}`);
+    seen.add(code);
+  }
+  // Nothing stuck: a generator returning a handful of values would still pass
+  // every assertion above.
+  assert.ok(seen.size > 1900, `only ${seen.size} distinct codes in 2000 draws`);
+});
+
+await test("join code: normalizing accepts what a human types, rejects what we never issue", async () => {
+  assert.equal(normalizeJoinCode("A5B4C7"), "A5B4C7");
+  assert.equal(normalizeJoinCode("a5b4c7"), "A5B4C7", "case is the typist's");
+  assert.equal(normalizeJoinCode(" a5 b4-c7 "), "A5B4C7", "so are spaces and dashes");
+  // The alternating shape is ours, so a string without it cannot be one of ours
+  // and is refused before it costs a lookup.
+  assert.equal(normalizeJoinCode("AAAAAA"), "");
+  assert.equal(normalizeJoinCode("555555"), "");
+  assert.equal(normalizeJoinCode("A5B4C"), "", "too short");
+  assert.equal(normalizeJoinCode("A5B4C77"), "", "too long");
+  // The excluded glyphs are excluded on the way in too, so "I" is never
+  // silently accepted as a letter we would not have printed.
+  assert.equal(normalizeJoinCode("I5B4C7"), "");
+  assert.equal(normalizeJoinCode("A0B4C7"), "");
+  assert.equal(normalizeJoinCode("A1B4C7"), "");
+  assert.equal(normalizeJoinCode(""), "");
+  assert.equal(normalizeJoinCode(null), "");
+});
+
+await test("join code: minting needs the participant cookie, not a session", async () => {
+  // Being in the room is the authority. It is the right one — you can only give
+  // away a way in to a kelabo you are already in — and the only one a guest
+  // with no account can hold.
+  const anon = await call("POST", `/kelabos/${kelaboId}/join-code`);
+  assert.equal(anon.statusCode, 401);
+  assert.equal(anon.json.error, "unauthenticated");
+
+  // A session for the host is not a participant cookie for this kelabo.
+  const sessionOnly = await call("POST", `/kelabos/${kelaboId}/join-code`, { cookies: sessionCookies });
+  assert.equal(sessionOnly.statusCode, 401);
+
+  const ok = await call("POST", `/kelabos/${kelaboId}/join-code`, { cookies: participantCookies });
+  assert.equal(ok.statusCode, 200);
+  assert.equal(ok.json.expiresInSeconds, 120);
+  assert.ok(ok.json.expiresAt > Date.now());
+});
+
+await test("join code: redeeming resolves to the kelabo, however it was typed", async () => {
+  const mint = await call("POST", `/kelabos/${kelaboId}/join-code`, { cookies: participantCookies });
+  const code = mint.json.code;
+
+  // Exactly what someone repeats back down a phone: lower case, with spaces.
+  const typed = `${code.slice(0, 2)} ${code.slice(2, 4)} ${code.slice(4)}`.toLowerCase();
+  const res = await call("POST", "/join-code/redeem", { body: { code: typed } });
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.json.kelaboId, kelaboId);
+  assert.equal(res.json.title, "Standup", "so they can see they reached the right room");
+  assert.equal(res.json.joinUrl, `https://test.example.com/join/${kelaboId}`);
+
+  // Redeeming resolves and stops: no cookie is minted here, because joining is
+  // /kelabos/:id/join and there must be exactly one way in.
+  assert.equal(cookieValue(res, "kelabo_participant"), null);
+});
+
+await test("join code: one code, several people — it is not burned on first use", async () => {
+  // You read a code to three people. If the first use burned it, the second
+  // person's failure would be indistinguishable from a typo.
+  const mint = await call("POST", `/kelabos/${kelaboId}/join-code`, { cookies: participantCookies });
+  for (let i = 0; i < 3; i += 1) {
+    const res = await call("POST", "/join-code/redeem", { body: { code: mint.json.code }, ip: `5.5.5.${i}` });
+    assert.equal(res.statusCode, 200, `redeem ${i + 1} should still work`);
+    assert.equal(res.json.kelaboId, kelaboId);
+  }
+});
+
+await test("join code: an unknown code and a malformed one are the same answer", async () => {
+  // A guesser must not be able to tell "wrong shape" from "no such code" —
+  // that difference is a free oracle over a 7.1M space.
+  const unknown = await call("POST", "/join-code/redeem", { body: { code: "A5B4C7" }, ip: "6.6.6.1" });
+  const malformed = await call("POST", "/join-code/redeem", { body: { code: "ZZZZZZ" }, ip: "6.6.6.2" });
+  assert.equal(unknown.statusCode, 404);
+  assert.equal(unknown.json.error, "join_code_invalid");
+  assert.equal(malformed.statusCode, unknown.statusCode);
+  assert.equal(malformed.json.error, unknown.json.error);
+});
+
+await test("join code: two minutes and it is gone", async () => {
+  const mint = await call("POST", `/kelabos/${kelaboId}/join-code`, { cookies: participantCookies });
+  const item = await db.getJoinCode(mint.json.code);
+  // Correctness rests on the millisecond clock, never on DynamoDB's sweeper —
+  // TTL deletion is best-effort and can lag by two days.
+  item.expiresAt = Date.now() - 1;
+
+  const res = await call("POST", "/join-code/redeem", { body: { code: mint.json.code }, ip: "6.6.6.3" });
+  assert.equal(res.statusCode, 410);
+  assert.equal(res.json.error, "join_code_expired");
+  assert.equal(await db.getJoinCode(mint.json.code), null, "an expired code is deleted, not left to rot");
+});
+
+await test("join code: a code for a kelabo that has ended does not let anyone in", async () => {
+  const mint = await call("POST", `/kelabos/${kelaboId}/join-code`, { cookies: participantCookies });
+  await db.updateKelaboMeta(kelaboId, { status: "ended" });
+  const res = await call("POST", "/join-code/redeem", { body: { code: mint.json.code }, ip: "6.6.6.4" });
+  assert.equal(res.statusCode, 410);
+  assert.equal(res.json.error, "kelabo_ended");
+
+  // Nor can one be minted for it.
+  const again = await call("POST", `/kelabos/${kelaboId}/join-code`, { cookies: participantCookies });
+  assert.equal(again.statusCode, 410);
+  assert.equal(again.json.error, "kelabo_ended");
+  await db.updateKelaboMeta(kelaboId, { status: "active" });
+});
+
+await test("join code: guessing is bounded per IP, malformed guesses included", async () => {
+  // The per-code attempt counter the OTP uses would never see this attacker:
+  // they are not attacking one code, they are fishing for any code live
+  // anywhere. The IP counter is the control that does.
+  const ip = "7.7.7.7";
+  let limited = 0;
+  for (let i = 0; i < 25; i += 1) {
+    // Deliberately malformed — a guesser who could spend those for free would
+    // spend those.
+    const res = await call("POST", "/join-code/redeem", { body: { code: "!!!!!!" }, ip });
+    if (res.statusCode === 429) limited += 1;
+  }
+  assert.ok(limited > 0, "the cap never engaged");
+  const after = await call("POST", "/join-code/redeem", { body: { code: "A5B4C7" }, ip });
+  assert.equal(after.statusCode, 429, "a spent budget stays spent");
+  assert.equal(after.json.error, "rate_limited");
+});
+
+await test("join code: one room cannot hold unlimited live codes", async () => {
+  // Every extra live code multiplies the guess surface, so minting is capped
+  // per kelabo per hour even though the minter is already inside the room.
+  const counter = await db.bumpJoinCodeCounter(`k:${kelaboId}`, 3600);
+  counter.count = 0;
+  let limited = 0;
+  for (let i = 0; i < 25; i += 1) {
+    const res = await call("POST", `/kelabos/${kelaboId}/join-code`, { cookies: participantCookies });
+    if (res.statusCode === 429) limited += 1;
+  }
+  assert.ok(limited > 0, "the mint cap never engaged");
+  counter.count = 0;
 });
 
 await test("the host's join stamps their language on the kelabo", async () => {

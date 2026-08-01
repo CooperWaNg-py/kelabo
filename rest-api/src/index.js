@@ -22,6 +22,7 @@ import {
   agentDeviceCodeBodySchema,
   agentDeviceTokenBodySchema,
   agentApproveBodySchema,
+  joinCodeRedeemBodySchema,
 } from "@kelabo/contracts";
 import { ZodError } from "zod";
 import { ensureConfig } from "./config.js";
@@ -37,6 +38,7 @@ import { createScheduling } from "./scheduling.js";
 import { createContacts } from "./contacts.js";
 import { createHuddle } from "./huddle.js";
 import { createJoin } from "./join.js";
+import { createJoinCodes } from "./joinCode.js";
 import { createRecords } from "./records.js";
 import { createDeepgramToken } from "./deepgramToken.js";
 import { createInternal } from "./internal.js";
@@ -76,7 +78,7 @@ function htmlErrorPage(status, code) {
 }
 
 export function createApp(deps) {
-  const { config, sessions, auth, kelabos, join, records, deepgramToken, db, secrets, mcpOauth, scheduling, contacts, huddle, agent } = deps;
+  const { config, sessions, auth, kelabos, join, joinCodes, records, deepgramToken, db, secrets, mcpOauth, scheduling, contacts, huddle, agent } = deps;
 
   /** `Authorization: Bearer <token>` — the agent bridge's only credential. */
   function bearerToken(req) {
@@ -699,6 +701,28 @@ export function createApp(deps) {
         return { status: 200, body: result.body, cookies: result.cookies };
       },
     },
+    // --- join codes (rest-api/src/joinCode.js) -----------------------------
+    // Minting takes the participant cookie, not a session: the authority is
+    // "you are in this kelabo", which is the right one and the only one a guest
+    // with no account can hold. Redeeming is unauthenticated by design — the
+    // person holding a code is precisely someone who has no link and may have
+    // no account.
+    {
+      method: "POST",
+      pattern: "/kelabos/:id/join-code",
+      handle: async (req) => {
+        await requireParticipant(req, req.params.id);
+        return { status: 200, body: await joinCodes.mint({ kelaboId: req.params.id }) };
+      },
+    },
+    {
+      method: "POST",
+      pattern: "/join-code/redeem",
+      handle: async (req) => {
+        const { code } = joinCodeRedeemBodySchema.parse(req.body || {});
+        return { status: 200, body: await joinCodes.redeem({ code, ip: req.ip }) };
+      },
+    },
     {
       method: "GET",
       pattern: "/records",
@@ -893,10 +917,11 @@ export async function handler(event, context) {
     const contacts = createContacts({ config, db });
     const huddle = createHuddle({ config, db, internal, kelabos });
     const join = createJoin({ config, db, secrets });
+    const joinCodes = createJoinCodes({ config, db });
     const records = createRecords({ config, db });
     const deepgramToken = createDeepgramToken({ config, db, secrets });
     const agent = createAgent({ config, db, secrets });
-    defaultApp = createApp({ config, db, secrets, ses, sessions, auth, kelabos, join, records, deepgramToken, internal, mcpOauth, scheduling, contacts, huddle, agent });
+    defaultApp = createApp({ config, db, secrets, ses, sessions, auth, kelabos, join, joinCodes, records, deepgramToken, internal, mcpOauth, scheduling, contacts, huddle, agent });
   }
   return defaultApp(event, context);
 }

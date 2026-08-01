@@ -103,9 +103,11 @@ export function JoinCodeDialog({ kelaboId, open, onClose }) {
           <Banner kind="danger">{error}</Banner>
         ) : (
           <>
+            {/* Read verbatim down a phone: it is a complete instruction, and the
+                host comes from config so the same line is right on dev and on
+                prod rather than naming one of them. */}
             <p>
-              Tell someone this code. They open <strong>{portalHost()}/enter</strong> and
-              type it in.
+              Join from <strong>{portalHost()}/enter</strong> with code below:
             </p>
             <div className="joincode" aria-live="polite">
               {state === 'minting' && <span className="joincode-value joincode-waiting">······</span>}

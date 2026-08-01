@@ -87,7 +87,6 @@ export function RoomShell({
   stt,
   micPrefs,
   diarize,
-  debugOn,
   onToggleDebug,
   onCopyInvite,
   onJoinCode,
@@ -520,7 +519,6 @@ export function RoomShell({
         boardCount={board.contributions.length}
         layout={layout}
         onLayout={changeLayout}
-        debugOn={debugOn}
         onToggleDebug={onToggleDebug}
         onCopyInvite={onCopyInvite}
         onJoinCode={onJoinCode}

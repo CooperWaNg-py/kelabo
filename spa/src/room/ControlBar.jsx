@@ -80,7 +80,6 @@ export function ControlBar({
   boardCount,
   layout,
   onLayout,
-  debugOn,
   onToggleDebug,
   onCopyInvite,
   onJoinCode,
@@ -450,13 +449,15 @@ export function ControlBar({
             </>
           )}
         </Menu>
+        {/* A flat button, not a menu item, because you reach for it mid-call —
+            under the same time pressure as the code itself. */}
         <button
-          className={'cbtn' + (debugOn ? ' is-on' : '')}
-          aria-pressed={debugOn}
-          title="Debug: show messages submitted to the LLM and its raw responses"
-          onClick={onToggleDebug}
+          className="cbtn"
+          title="Join code: read a six-character code down a phone"
+          aria-label="Join code"
+          onClick={onJoinCode}
         >
-          <Icon name="bug" size={18} />
+          <Icon name="phone" size={18} />
         </button>
         <Menu
           ariaLabel="More kelabo actions"
@@ -472,14 +473,11 @@ export function ControlBar({
               <MenuItem icon={<Icon name="link" />} onClick={() => { close(); onCopyInvite() }}>
                 Copy invite link
               </MenuItem>
-              {/* Sits beside Copy invite link because it answers the same
-                  question — "get one more person in here" — for the case where
-                  you cannot paste anything to them. */}
-              <MenuItem icon={<Icon name="phone" />} onClick={() => { close(); onJoinCode() }}>
-                Join code
-              </MenuItem>
               <MenuItem icon={<Icon name="file-text" />} onClick={() => { close(); onGenerateMinutes() }}>
                 Generate minutes
+              </MenuItem>
+              <MenuItem icon={<Icon name="bug" />} onClick={() => { close(); onToggleDebug() }}>
+                Debug log
               </MenuItem>
             </>
           )}

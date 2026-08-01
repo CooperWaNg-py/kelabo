@@ -1296,6 +1296,21 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
 }
 .joincode-left-dead { color: var(--danger); }
 
+/* The two invite paths in InviteDialog: each way gets a label and its own
+   copy affordance, so the choice between "paste a link" and "read a code
+   down a phone" is made next to both. */
+.invite-way { margin-bottom: var(--space-4); }
+.invite-way:last-child { margin-bottom: 0; }
+.invite-way-label { margin: 0 0 var(--space-2); font-size: var(--text-sm); color: var(--text-2); }
+.invite-link-row { display: flex; align-items: center; gap: var(--space-2); }
+.invite-link {
+  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-family: var(--mono); font-size: var(--text-sm);
+  padding: var(--space-2) var(--space-3); background: var(--surface-2); border-radius: var(--radius-sm);
+  user-select: all;
+}
+.invite-code-actions { display: flex; justify-content: center; margin-top: var(--space-2); }
+
 /* Labelled search field (Contacts). The strip IS the field: the input inside it
    keeps its own border and radius, so what you saw was a rounded box drawn
    inside another rounded box with the caret between them (notes #10). The input

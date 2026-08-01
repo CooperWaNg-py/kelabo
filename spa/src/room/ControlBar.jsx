@@ -81,9 +81,8 @@ export function ControlBar({
   layout,
   onLayout,
   onToggleDebug,
-  onCopyInvite,
-  onJoinCode,
-  onGenerateMinutes,
+  debugOn,
+  onInvite,
   onToggleTheme,
   onScheme,
   scheme,
@@ -449,39 +448,35 @@ export function ControlBar({
             </>
           )}
         </Menu>
-        {/* A flat button, not a menu item, because you reach for it mid-call —
-            under the same time pressure as the code itself. */}
+        {/* A flat button, not a menu item, because you reach for it mid-call.
+            Both ways in — the link and the speakable code — live in the one
+            dialog it opens, so the choice is made next to both copies. The
+            paper plane, not user-plus: that glyph is already Add people, in
+            the top-right of the room, and two identical icons doing different
+            things is how the wrong one gets pressed. */}
         <button
           className="cbtn"
-          title="Join code: read a six-character code down a phone"
-          aria-label="Join code"
-          onClick={onJoinCode}
+          title="Invite someone: copy the link, or read a six-character code down a phone"
+          aria-label="Invite someone"
+          onClick={onInvite}
         >
-          <Icon name="phone" size={18} />
+          <Icon name="send" size={18} />
         </button>
-        <Menu
-          ariaLabel="More kelabo actions"
-          onOpenChange={onHold}
-          renderTrigger={props => (
-            <button className="cbtn" title="More" {...props}>
-              <Icon name="more-horizontal" size={18} />
-            </button>
-          )}
-        >
-          {({ close }) => (
-            <>
-              <MenuItem icon={<Icon name="link" />} onClick={() => { close(); onCopyInvite() }}>
-                Copy invite link
-              </MenuItem>
-              <MenuItem icon={<Icon name="file-text" />} onClick={() => { close(); onGenerateMinutes() }}>
-                Generate minutes
-              </MenuItem>
-              <MenuItem icon={<Icon name="bug" />} onClick={() => { close(); onToggleDebug() }}>
-                Debug log
-              </MenuItem>
-            </>
-          )}
-        </Menu>
+        {/* Debug is for when a call is being diagnosed, not for every room:
+            the button exists only while the `kelabo-debug` flag is set (the
+            same flag the call log in the drawer captures on), so turning it
+            off here also removes the button. `debugOn` carries both facts —
+            the flag is set, and the drawer is on. */}
+        {debugOn && (
+          <button
+            className="cbtn is-on"
+            aria-pressed="true"
+            title="Debug log: LLM exchanges and the persisted WebRTC/SFU/ICE call log"
+            onClick={onToggleDebug}
+          >
+            <Icon name="bug" size={18} />
+          </button>
+        )}
       </div>
     </div>
   )

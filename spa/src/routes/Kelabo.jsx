@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { api } from '../api'
-import { config } from '../config'
 import { useAuth, displayName } from '../auth'
 import { useToast } from '../components/Toaster'
 import { useConfirm } from '../components/ConfirmDialog'
@@ -21,7 +20,7 @@ import { useBoard } from '../room/useBoard'
 import { useSingleTab } from '../room/useSingleTab'
 import { TabTaken } from '../room/TabTaken'
 import { RoomShell } from '../room/RoomShell'
-import { JoinCodeDialog } from '../room/JoinCodeDialog'
+import { InviteDialog } from '../room/InviteDialog'
 import { DebugPanel } from '../board/DebugPanel'
 import { CallLogPanel } from '../board/CallLogPanel'
 import { pushSettings } from '../settings'
@@ -306,23 +305,9 @@ function KelaboRoom() {
   const everJoinedCount = kelabo?.participantCount ?? (kelabo?.participants || []).length
   const participantCount = ended ? everJoinedCount : (roster ? roster.count : null)
 
-  const copyInvite = async () => {
-    try { await navigator.clipboard.writeText(`${config.portalUrl}/join/${id}`) } catch {}
-    toast('Invite link copied')
-  }
-
   // Nothing is minted until this opens — a code the room never showed anybody
   // would still be a live code, and still count against the room's hourly cap.
-  const [joinCodeOpen, setJoinCodeOpen] = useState(false)
-
-  const generateMinutes = async () => {
-    try {
-      await api.generateMinutes(id)
-      toast('Minutes requested — they will appear on the record')
-    } catch {
-      toast('Could not generate minutes right now')
-    }
-  }
+  const [inviteOpen, setInviteOpen] = useState(false)
 
   const leave = () => {
     navigate(identity ? '/' : '/login')
@@ -413,9 +398,8 @@ function KelaboRoom() {
           held: hiddenMuteHeld,
         }}
         onToggleDebug={toggleDebug}
-        onCopyInvite={copyInvite}
-        onJoinCode={() => setJoinCodeOpen(true)}
-        onGenerateMinutes={generateMinutes}
+        debugOn={debugEnabled}
+        onInvite={() => setInviteOpen(true)}
         onLeave={leave}
         onBack={back}
         onEndKelabo={endKelabo}
@@ -425,7 +409,7 @@ function KelaboRoom() {
         themeIcon={icon}
       />
 
-      <JoinCodeDialog kelaboId={id} open={joinCodeOpen} onClose={() => setJoinCodeOpen(false)} />
+      <InviteDialog kelaboId={id} open={inviteOpen} onClose={() => setInviteOpen(false)} />
 
       {ended && (
         <Modal

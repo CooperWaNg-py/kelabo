@@ -88,9 +88,8 @@ export function RoomShell({
   micPrefs,
   diarize,
   onToggleDebug,
-  onCopyInvite,
-  onJoinCode,
-  onGenerateMinutes,
+  debugOn,
+  onInvite,
   onLeave,
   onBack,
   onEndKelabo,
@@ -520,9 +519,8 @@ export function RoomShell({
         layout={layout}
         onLayout={changeLayout}
         onToggleDebug={onToggleDebug}
-        onCopyInvite={onCopyInvite}
-        onJoinCode={onJoinCode}
-        onGenerateMinutes={onGenerateMinutes}
+        debugOn={debugOn}
+        onInvite={onInvite}
         onToggleTheme={onToggleTheme}
         onScheme={onScheme}
         scheme={scheme}

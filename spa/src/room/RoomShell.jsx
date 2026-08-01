@@ -99,6 +99,17 @@ export function RoomShell({
   scheme,
   themeIcon,
 }) {
+  // Deployment capabilities (docs 19 §2/§3), stated by the server on the
+  // kelabo META. `on !== false` throughout: an older server without the map,
+  // or a kelabo still loading, renders the full room — permissive default. An
+  // `off` capability leaves no trace in this component; a capability that is
+  // `on` but failing keeps its UI and wears its own status.
+  const caps = kelabo?.capabilities
+  const sttOn = caps?.stt?.on !== false
+  const assistantOn = caps?.assistant?.on !== false
+  const videoOn = caps?.video?.on !== false
+  const rtcOn = caps?.rtc?.on !== false
+
   const [layout, setLayoutState] = useState(loadLayout)
   const [focusId, setFocusId] = useState('assistant')
   const [activeSpeaker, setActiveSpeaker] = useState(null)
@@ -172,10 +183,16 @@ export function RoomShell({
       })
     }
     // The assistant is last for the same reason a bot is last in a member list:
-    // it is in the room, but the people came first.
-    list.push({ id: 'assistant', kind: 'assistant' })
+    // it is in the room, but the people came first. No assistant on this
+    // deployment means no tile at all — not an idle tile "listening" for an
+    // LLM that was never configured.
+    if (assistantOn) list.push({ id: 'assistant', kind: 'assistant' })
     return list
-  }, [boardOnly, me, mic.stream, cam.stream, cam.on, screen.on, screen.stream, call.state, capture.muted, call.peers, call.remoteStreams, call.remoteScreens, call.peerStatus])
+  }, [assistantOn, boardOnly, me, mic.stream, cam.stream, cam.on, screen.on, screen.stream, call.state, capture.muted, call.peers, call.remoteStreams, call.remoteScreens, call.peerStatus])
+
+  // Where the stage falls back when the requested tile is gone. With no
+  // assistant tile the first real tile takes its place.
+  const fallbackId = assistantOn ? 'assistant' : (tiles[0]?.id ?? null)
 
   // Someone ELSE's screen going up takes the stage, the way it does in every
   // other kelabo tool: their share is almost always the reason it was started.
@@ -214,10 +231,10 @@ export function RoomShell({
       if (shared) return shared.id
       const people = tiles.filter(t => t.kind === 'person')
       const active = people.find(t => t.id === activeSpeaker)
-      return active?.id ?? people[0]?.id ?? 'assistant'
+      return active?.id ?? people[0]?.id ?? fallbackId
     }
-    return tiles.some(t => t.id === focusId) ? focusId : 'assistant'
-  }, [layout, tiles, activeSpeaker, focusId])
+    return tiles.some(t => t.id === focusId) ? focusId : fallbackId
+  }, [layout, tiles, activeSpeaker, focusId, fallbackId])
 
   // --- interactions that move tiles ----------------------------------------
   const openTile = flip.withFlip(id => {
@@ -232,7 +249,7 @@ export function RoomShell({
   const collapseStage = flip.withFlip(() => setLayout('grid'))
 
   const changeLayout = flip.withFlip(next => {
-    if (next === 'focus' && !tiles.some(t => t.id === focusId)) setFocusId('assistant')
+    if (next === 'focus' && !tiles.some(t => t.id === focusId)) setFocusId(fallbackId)
     setLayout(next)
   })
 
@@ -251,7 +268,7 @@ export function RoomShell({
 
   // --- keyboard -------------------------------------------------------------
   const handlers = useRef({})
-  handlers.current = { openTile, collapseStage, changeLayout, togglePanel, toggleCaptions, capture, cam, screen, panel, layout, boardOnly }
+  handlers.current = { openTile, collapseStage, changeLayout, togglePanel, toggleCaptions, capture, cam, screen, panel, layout, boardOnly, assistantOn }
 
   useEffect(() => {
     const onKey = e => {
@@ -287,6 +304,7 @@ export function RoomShell({
           h.togglePanel(h.panel === 'transcript' ? 'transcript' : 'messages')
           return
         case 'b':
+          if (!h.assistantOn) return
           e.preventDefault()
           h.togglePanel('board')
           return
@@ -489,12 +507,16 @@ export function RoomShell({
             focusSignal={board.focusSignal}
             ended={ended}
             onHold={chrome.hold}
-            transcriptAccess={transcriptAccess}
+            // The Transcript tab needs both the policy (may this participant
+            // see speech) and the capability (does this deployment transcribe
+            // at all) — either alone leaves a tab that can never fill.
+            transcriptAccess={transcriptAccess && sttOn}
+            assistantOn={assistantOn}
           />
         )}
       </main>
 
-      <CaptionOverlay messages={capture.messages} visible={captionsOn} />
+      <CaptionOverlay messages={capture.messages} visible={captionsOn && sttOn} />
 
       <ControlBar
         ended={ended}
@@ -530,12 +552,19 @@ export function RoomShell({
         scheme={scheme}
         themeIcon={themeIcon}
         onHold={chrome.hold}
+        sttOn={sttOn}
+        assistantOn={assistantOn}
+        videoOn={videoOn}
+        rtcOn={rtcOn}
         conn={{
           boardStatus: board.status,
           captureState: capture.state,
           callState: call.state,
           callMode: call.mode,
-          transcribing: !boardOnly,
+          // No STT on this deployment → no Deepgram light at all, same as
+          // watch-only: it is simply not part of this kelabo.
+          transcribing: !boardOnly && sttOn,
+          callOn: rtcOn,
         }}
       />
     </div>

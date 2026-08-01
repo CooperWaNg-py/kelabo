@@ -4,11 +4,36 @@ import {
   CreateSecretCommand,
   PutSecretValueCommand,
   DeleteSecretCommand,
+  DescribeSecretCommand,
 } from "@aws-sdk/client-secrets-manager";
 
 export function createSecrets({ region } = {}) {
   const client = new SecretsManagerClient({ region: region || process.env.AWS_REGION });
   const cache = new Map();
+
+  // Capability probes (docs 19 §3): does a provider's secret exist at all?
+  // DescribeSecret, not GetSecretValue — the API can state that the LLM key
+  // exists without holding a grant to read it. Only a definitive
+  // ResourceNotFoundException means "off"; any other failure (throttle, an
+  // IAM gap on an older deployment) reads as "on", because a probe hiccup
+  // must never switch a working feature off — permissive default (docs 19 §4).
+  // `true` is cached for the process lifetime; `false` expires, so a key
+  // added to a running deployment is noticed without a redeploy.
+  const existsCache = new Map();
+  const EXISTS_NEGATIVE_TTL_MS = 5 * 60 * 1000;
+  async function secretExists(name) {
+    if (!name) return false;
+    const hit = existsCache.get(name);
+    if (hit && (hit.value || Date.now() - hit.at < EXISTS_NEGATIVE_TTL_MS)) return hit.value;
+    let value = true;
+    try {
+      await client.send(new DescribeSecretCommand({ SecretId: name }));
+    } catch (e) {
+      value = e?.name !== "ResourceNotFoundException";
+    }
+    existsCache.set(name, { value, at: Date.now() });
+    return value;
+  }
 
   async function getSecretRaw(name) {
     if (cache.has(name)) return cache.get(name);
@@ -52,6 +77,7 @@ export function createSecrets({ region } = {}) {
   return {
     getSecretRaw,
     getSecretJson,
+    secretExists,
     putMcpSecret,
     deleteMcpSecret,
     getCookieKey: (config) => getSecretRaw(config.secrets.cookieSigningKey),

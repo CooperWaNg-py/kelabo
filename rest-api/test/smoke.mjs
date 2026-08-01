@@ -533,6 +533,15 @@ await test("GET /kelabos/:id public vs participant views", async () => {
   // guest saw their own speech echoed back as a second speaker, while hosts
   // (always signed in) were unaffected, which is what hid the bug.
   assert.equal(full.json.me, guestIdentity, "participant-scoped view reports the caller's own identity");
+  // The capability map (docs 19 §3): stated to participants so the client
+  // renders absence instead of discovering it by failing. The stub wires no
+  // secrets module, and everything short of a definitive "secret missing"
+  // must read as on — the permissive default.
+  assert.deepEqual(Object.keys(full.json.capabilities).sort(), ["assistant", "rtc", "stt", "video"]);
+  assert.equal(full.json.capabilities.stt.on, true);
+  assert.equal(full.json.capabilities.assistant.on, true);
+  assert.equal(full.json.capabilities.rtc.mode, full.json.rtcMode);
+  assert.equal(pub.json.capabilities, undefined, "capabilities are participant-scoped");
 
   const missing = await call("GET", "/kelabos/nope");
   assert.equal(missing.statusCode, 404);

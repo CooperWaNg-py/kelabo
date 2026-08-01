@@ -2,7 +2,19 @@ import { randomUUID } from "node:crypto";
 import { RTC_MODES } from "@kelabo/contracts";
 import { err } from "./errors.js";
 
-export function createKelabos({ config, db, internal }) {
+export function createKelabos({ config, db, internal, secrets }) {
+  // Is this optional provider configured at all? Existence of its secret is
+  // the deployment-config signal (docs 19 §3). Anything short of a definitive
+  // "no" — no secrets module wired (tests), probe error — answers "on": a
+  // capability probe must never switch a working feature off (docs 19 §4).
+  const providerOn = async (secretName) => {
+    if (!secrets?.secretExists) return true;
+    try {
+      return await secrets.secretExists(secretName);
+    } catch {
+      return true;
+    }
+  };
   function toSummary(item) {
     return {
       kelaboId: item.kelaboId,
@@ -115,6 +127,22 @@ export function createKelabos({ config, db, internal }) {
       // "P2P secure" and "agent". A capability nobody can see is one nobody can
       // object to.
       body.historyEnabled = !!meta.historyEnabled;
+      // What this deployment can actually run (docs 19 §2/§3), stated up front
+      // so the client renders absence instead of discovering it by failing.
+      // `on: false` means OFF — the UI shows no trace of the capability;
+      // runtime failures of an `on` capability are the client's `degraded`
+      // path and are not represented here.
+      const [stt, assistant, rtc] = await Promise.all([
+        providerOn(config.secrets.deepgram),
+        providerOn(config.secrets.llm),
+        providerOn(config.secrets.cloudflareRealtime),
+      ]);
+      body.capabilities = {
+        stt: { on: stt },
+        assistant: { on: assistant },
+        video: { on: !!config.rtc.video },
+        rtc: { on: rtc, mode: body.rtcMode },
+      };
     }
     return body;
   }

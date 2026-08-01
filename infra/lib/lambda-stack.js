@@ -49,6 +49,10 @@ export class LambdaStack extends Stack {
         KELABO_ARCHIVE_BUCKET: cfg.archiveBucket,
         KELABO_ARCHIVE_KEY_PREFIX: cfg.archiveKeyPrefix,
         KELABO_SECRET_DEEPGRAM: cfg.secrets.deepgram,
+        // Existence-probed only (capability map, docs 19 §3) — the API never
+        // reads these values; see the DescribeSecret-only policy below.
+        KELABO_SECRET_LLM: cfg.secrets.llm,
+        KELABO_SECRET_CLOUDFLARE_RTC: cfg.secrets.cloudflareRealtime,
         KELABO_SECRET_COOKIE_KEY: cfg.secrets.cookieSigningKey,
         KELABO_SECRET_OIDC_GOOGLE: cfg.secrets.oidcGoogle,
         KELABO_SECRET_OIDC_APPLE: cfg.secrets.oidcApple,
@@ -136,6 +140,20 @@ export class LambdaStack extends Stack {
     })) {
       secretsmanager.Secret.fromSecretNameV2(this, `Secret${id}`, secretName).grantRead(this.fn);
     }
+
+    // The capability map (docs 19 §3) answers "is the assistant / conference
+    // audio configured at all?" from secret EXISTENCE. Describe-only on
+    // purpose: the API can state that the LLM key exists without being able
+    // to read it — those values stay gateway-owned.
+    this.fn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["secretsmanager:DescribeSecret"],
+        resources: [
+          `arn:aws:secretsmanager:${cfg.region}:${cfg.account}:secret:${cfg.secrets.llm}*`,
+          `arn:aws:secretsmanager:${cfg.region}:${cfg.account}:secret:${cfg.secrets.cloudflareRealtime}*`,
+        ],
+      }),
+    );
 
     new CfnOutput(this, "RestApiFnName", { value: this.fn.functionName });
     new CfnOutput(this, "RestApiFnArn", { value: this.fn.functionArn });

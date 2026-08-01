@@ -89,12 +89,22 @@ export function ControlBar({
   themeIcon,
   onHold,
   conn,
+  // Deployment capabilities (docs 19 §2): an `off` capability renders none of
+  // its controls — no disabled buttons, no dead menu entries. Defaults keep an
+  // older server (no capability map) on the full UI.
+  sttOn = true,
+  assistantOn = true,
+  videoOn = true,
+  rtcOn = true,
 }) {
+  // Only genuine microphone problems disable the mic button. `stt_unavailable`
+  // is deliberately NOT in this list: `muted` gates the outgoing CALL track,
+  // and a transcription failure (rung 3) must never freeze the room's
+  // mute/unmute control (rung 1) — docs 19 §1.
   const micDisabled =
     ended ||
     capture.state === 'mic_denied' ||
-    capture.state === 'insecure_context' ||
-    capture.state === 'stt_unavailable'
+    capture.state === 'insecure_context'
   const current = LAYOUTS.find(l => l.id === layout) ?? LAYOUTS[0]
 
   return (
@@ -108,7 +118,9 @@ export function ControlBar({
           controls people reach for every minute. */}
       <ConnStatus {...conn} />
 
-      {!boardOnly && (
+      {/* With neither a call nor transcription on this deployment the mic
+          feeds nothing — no button, rather than a control that does nothing. */}
+      {!boardOnly && (sttOn || rtcOn) && (
         <div className="cbar-group cbar-pair">
           <button
             className={'cbtn cbtn-mic' + (capture.muted ? ' is-off' : ' is-on')}
@@ -124,7 +136,11 @@ export function ControlBar({
             onClick={() => (capture.muted ? capture.unmute() : capture.mute())}
           >
             <Icon name={capture.muted ? 'mic-off' : 'mic'} size={18} />
-            <span className={'meter' + (capture.muted || capture.state !== 'live' ? ' muted' : '')} aria-hidden="true">
+            {/* The meter shows whether the ROOM can hear you — muted or a real
+                mic problem, not the Deepgram socket's mood. Keying it on
+                `state === 'live'` made a live call read as dead whenever
+                transcription was absent. */}
+            <span className={'meter' + (capture.muted || micDisabled ? ' muted' : '')} aria-hidden="true">
               <i></i><i></i><i></i><i></i><i></i>
             </span>
           </button>
@@ -199,15 +215,20 @@ export function ControlBar({
                 >
                   Auto mute
                 </MenuToggle>
-                <MenuValue
-                  icon={<Icon name="globe" />}
-                  value={LANG_LABEL[stt.lang] || stt.lang}
-                  disabled={ended}
-                  title="The language Deepgram transcribes this kelabo in."
-                  onClick={() => open('lang')}
-                >
-                  Language
-                </MenuValue>
+                {/* Transcription settings exist only where transcription does
+                    (docs 19 §2) — on an STT-less deployment the menu is mic
+                    and speaker output, nothing else. */}
+                {sttOn && (
+                  <MenuValue
+                    icon={<Icon name="globe" />}
+                    value={LANG_LABEL[stt.lang] || stt.lang}
+                    disabled={ended}
+                    title="The language Deepgram transcribes this kelabo in."
+                    onClick={() => open('lang')}
+                  >
+                    Language
+                  </MenuValue>
+                )}
                 {/* Only when the browser can actually switch outputs (Safari
                     cannot) — a picker that does nothing is worse than none. */}
                 {speaker?.supported && speaker.devices.length > 0 && (
@@ -224,40 +245,47 @@ export function ControlBar({
                     Speaker
                   </MenuValue>
                 )}
-                <MenuToggle
-                  icon={<Icon name="users" />}
-                  checked={stt.diarize}
-                  disabled={ended}
-                  title="Detect and label different speakers (A, B, …). You can rename them."
-                  onChange={stt.onDiarize}
-                >
-                  Speakers
-                </MenuToggle>
-                <MenuToggle
-                  icon={<Icon name="waveform" />}
-                  checked={stt.vad}
-                  disabled={ended}
-                  title="Only stream audio while you are speaking — silence is skipped, which is most of a kelabo for any one person. Turn off if quiet speech is being cut."
-                  onChange={stt.onVad}
-                >
-                  VAD
-                </MenuToggle>
-                <MenuToggle
-                  icon={<Icon name="captions" />}
-                  checked={stt.finalOnly}
-                  disabled={ended}
-                  title="Hide the unconfirmed tail of each utterance — only settled words."
-                  onChange={stt.onFinalOnly}
-                >
-                  Slow caption
-                </MenuToggle>
+                {sttOn && (
+                  <>
+                    <MenuToggle
+                      icon={<Icon name="users" />}
+                      checked={stt.diarize}
+                      disabled={ended}
+                      title="Detect and label different speakers (A, B, …). You can rename them."
+                      onChange={stt.onDiarize}
+                    >
+                      Speakers
+                    </MenuToggle>
+                    <MenuToggle
+                      icon={<Icon name="waveform" />}
+                      checked={stt.vad}
+                      disabled={ended}
+                      title="Only stream audio while you are speaking — silence is skipped, which is most of a kelabo for any one person. Turn off if quiet speech is being cut."
+                      onChange={stt.onVad}
+                    >
+                      VAD
+                    </MenuToggle>
+                    <MenuToggle
+                      icon={<Icon name="captions" />}
+                      checked={stt.finalOnly}
+                      disabled={ended}
+                      title="Hide the unconfirmed tail of each utterance — only settled words."
+                      onChange={stt.onFinalOnly}
+                    >
+                      Slow caption
+                    </MenuToggle>
+                  </>
+                )}
               </>
             ))}
           </Menu>
         </div>
       )}
 
-      {!boardOnly && (
+      {/* Video off for the deployment: no camera button at all — a disabled
+          control is a promise the deployment cannot keep (docs 19 §2).
+          `camAvailable` still handles the runtime cases when video is on. */}
+      {!boardOnly && videoOn && (
         <div className="cbar-group cbar-pair">
           <button
             className={'cbtn cbtn-cam' + (cam.on ? ' is-on' : '')}
@@ -304,7 +332,7 @@ export function ControlBar({
         </div>
       )}
 
-      {!boardOnly && (
+      {!boardOnly && videoOn && (
         <div className="cbar-group">
           <button
             className={'cbtn cbtn-share' + (screen.on ? ' is-on' : '')}
@@ -327,14 +355,16 @@ export function ControlBar({
       )}
 
       <div className="cbar-group">
-        <button
-          className={'cbtn' + (captionsOn ? ' is-on' : '')}
-          aria-pressed={captionsOn}
-          title={captionsOn ? 'Hide live captions' : 'Show live captions'}
-          onClick={onToggleCaptions}
-        >
-          <Icon name="captions" size={18} />
-        </button>
+        {sttOn && (
+          <button
+            className={'cbtn' + (captionsOn ? ' is-on' : '')}
+            aria-pressed={captionsOn}
+            title={captionsOn ? 'Hide live captions' : 'Show live captions'}
+            onClick={onToggleCaptions}
+          >
+            <Icon name="captions" size={18} />
+          </button>
+        )}
         <button
           className={'cbtn' + (panel === 'messages' || panel === 'transcript' ? ' is-on' : '')}
           aria-pressed={panel === 'messages' || panel === 'transcript'}
@@ -343,15 +373,17 @@ export function ControlBar({
         >
           <Icon name="panel-right" size={18} />
         </button>
-        <button
-          className={'cbtn' + (panel === 'board' ? ' is-on' : '')}
-          aria-pressed={panel === 'board'}
-          title="Board — assistant contributions and notes"
-          onClick={() => onPanel('board')}
-        >
-          <Icon name="message-square" size={18} />
-          {boardCount > 0 && <span className="cbtn-count">{boardCount}</span>}
-        </button>
+        {assistantOn && (
+          <button
+            className={'cbtn' + (panel === 'board' ? ' is-on' : '')}
+            aria-pressed={panel === 'board'}
+            title="Board — assistant contributions and notes"
+            onClick={() => onPanel('board')}
+          >
+            <Icon name="message-square" size={18} />
+            {boardCount > 0 && <span className="cbtn-count">{boardCount}</span>}
+          </button>
+        )}
       </div>
 
       <div className="cbar-group cbar-pair">

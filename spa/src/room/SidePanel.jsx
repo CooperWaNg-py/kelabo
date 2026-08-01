@@ -108,7 +108,7 @@ function MessageList({ items, scroll, empty }) {
  * an explicit mention is the one way to make the assistant answer without
  * waiting for it to decide the room wanted an answer.
  */
-function MessagesTab({ capture, ended }) {
+function MessagesTab({ capture, ended, assistantOn }) {
   const { messages, sendTyped } = capture
   const typed = useMemo(() => messages.filter(m => m.source === 'typed'), [messages])
   const scroll = useFollowingScroll(typed, true)
@@ -138,7 +138,8 @@ function MessagesTab({ capture, ended }) {
           <input
             className="input"
             ref={inputRef}
-            placeholder="Type a message, or @kelabo to ask…"
+            // No assistant on this deployment means no @kelabo to hint at.
+            placeholder={assistantOn ? 'Type a message, or @kelabo to ask…' : 'Type a message…'}
             aria-label="Type a message to the kelabo"
           />
           <Button type="submit" size="sm" iconOnly title="Send" aria-label="Send">
@@ -285,6 +286,7 @@ export function SidePanel({
   ended,
   onHold,
   transcriptAccess = true,
+  assistantOn = true,
 }) {
   // A participant without transcript access can still be steered here with
   // tab === 'transcript' (a keyboard shortcut, a stale preference). Falling
@@ -318,15 +320,19 @@ export function SidePanel({
               Transcript
             </button>
           )}
-          <button
-            role="tab"
-            aria-selected={active === 'board'}
-            className={active === 'board' ? 'is-on' : ''}
-            onClick={() => onTab('board')}
-          >
-            Board
-            {contributions.length > 0 && <span className="chip chip-accent">{contributions.length}</span>}
-          </button>
+          {/* The board is the assistant's surface; no assistant on this
+              deployment means no Board tab at all (docs 19 §2). */}
+          {assistantOn && (
+            <button
+              role="tab"
+              aria-selected={active === 'board'}
+              className={active === 'board' ? 'is-on' : ''}
+              onClick={() => onTab('board')}
+            >
+              Board
+              {contributions.length > 0 && <span className="chip chip-accent">{contributions.length}</span>}
+            </button>
+          )}
         </div>
         <Button variant="ghost" size="sm" iconOnly title="Close panel" aria-label="Close panel" onClick={onClose}>
           <Icon name="x" />
@@ -344,11 +350,11 @@ export function SidePanel({
         <div className="side-note"><span className="chip">reconnecting…</span></div>
       )}
 
-      {active === 'messages' && <MessagesTab capture={capture} ended={ended} />}
+      {active === 'messages' && <MessagesTab capture={capture} ended={ended} assistantOn={assistantOn} />}
       {active === 'transcript' && (
         <TranscriptTab capture={capture} diarize={diarize} kelaboId={kelaboId} boardOnly={boardOnly} />
       )}
-      {active === 'board' && (
+      {active === 'board' && assistantOn && (
         <BoardTab
           contributions={contributions}
           onPostNote={onPostNote}

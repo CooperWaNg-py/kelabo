@@ -90,6 +90,10 @@ function fromEnv() {
       oidcGoogle: env.KELABO_SECRET_OIDC_GOOGLE,
       oidcApple: env.KELABO_SECRET_OIDC_APPLE,
       mcpPrefix: env.KELABO_SECRET_MCP_PREFIX || "",
+      // Existence-probed only, for the capability map (docs 19 §3). The API
+      // holds no read grant on these values — they stay gateway-owned.
+      llm: env.KELABO_SECRET_LLM,
+      cloudflareRealtime: env.KELABO_SECRET_CLOUDFLARE_RTC,
     },
     auth: {
       sessionTtlSeconds: num(env.KELABO_SESSION_TTL_SECONDS, DEFAULTS.sessionTtlSeconds),
@@ -151,6 +155,8 @@ function fromLoadConfig(c) {
       oidcGoogle: c.secrets.oidcGoogle,
       oidcApple: c.secrets.oidcApple,
       mcpPrefix: c.secrets.mcpPrefix || "",
+      llm: c.secrets.llm,
+      cloudflareRealtime: c.secrets.cloudflareRealtime,
     },
     auth: {
       sessionTtlSeconds: c.auth?.sessionTtlSeconds ?? DEFAULTS.sessionTtlSeconds,

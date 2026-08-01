@@ -98,6 +98,13 @@ function KelaboRoom() {
 
   const mode = localStorage.getItem('kelabo-mode') || 'audio-board'
   const boardOnly = mode === 'board-only'
+  // Deployment capabilities from the kelabo META (docs 19 §3). Permissive
+  // until the META arrives or when a server predates the map: `on !== false`.
+  // An `off` capability is never attempted — no Deepgram token minting, no
+  // /rtc/join — which is what keeps "not configured" from ever being an error.
+  const sttOn = kelabo?.capabilities?.stt?.on !== false
+  const assistantOn = kelabo?.capabilities?.assistant?.on !== false
+  const rtcOn = kelabo?.capabilities?.rtc?.on !== false
   // Same precedence as everywhere else: the user's chosen name beats the
   // server identity, which is only ever the email local-part.
   const me = localStorage.getItem('kelabo-name') || displayName(identity)
@@ -145,7 +152,7 @@ function KelaboRoom() {
 
   const capture = useCapture({
     kelaboId: id,
-    enabled: micEnabled,
+    enabled: micEnabled && sttOn,
     finalOnly,
     startedAt: kelabo?.startedAt,
     language: sttLang,
@@ -175,7 +182,7 @@ function KelaboRoom() {
 
   const call = useRtc({
     kelaboId: id,
-    enabled: onCall && !!kelabo,
+    enabled: onCall && !!kelabo && rtcOn,
     stream: mic.stream,
     videoStream: cam.stream,
     screenStream: screen.stream,
@@ -359,13 +366,18 @@ function KelaboRoom() {
   const endKelabo = async () => {
     const ok = await confirm({
       title: 'End kelabo?',
-      body: `The kelabo ends for all ${participantCount || ''} participants. The agent will generate minutes and the record will be archived.`,
+      body: `The kelabo ends for all ${participantCount || ''} participants. ${
+        assistantOn
+          ? 'The agent will generate minutes and the record will be archived.'
+          : 'The record will be archived.'
+      }`,
       confirmLabel: 'End kelabo',
     })
     if (!ok) return
     try {
       await api.endKelabo(id)
-      toast('Kelabo ended — minutes generating…')
+      // Promise minutes only where an agent exists to write them (docs 19 §2).
+      toast(assistantOn ? 'Kelabo ended — minutes generating…' : 'Kelabo ended — record archived')
       setEnded(true)
     } catch {
       toast('Could not end the kelabo')
@@ -442,7 +454,11 @@ function KelaboRoom() {
             {board.contributions.length
               ? ` with ${board.contributions.length} board contribution${board.contributions.length === 1 ? '' : 's'}`
               : ''}.
-            {identity ? ' The record and minutes will be archived shortly.' : ''}
+            {identity
+              ? assistantOn
+                ? ' The record and minutes will be archived shortly.'
+                : ' The record will be archived shortly.'
+              : ''}
           </p>
         </Modal>
       )}

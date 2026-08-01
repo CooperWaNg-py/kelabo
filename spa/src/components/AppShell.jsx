@@ -216,7 +216,7 @@ export function AppShell({ children }) {
       title: `End “${m.title}”?`,
       body: `The kelabo ends for everyone still in it${
         m.participantCount ? ` (${m.participantCount} participant${m.participantCount === 1 ? '' : 's'})` : ''
-      }. Minutes are generated and the record is archived.`,
+      }. The record is archived.`,
       confirmLabel: 'End kelabo',
     })
     if (!ok) return
@@ -225,7 +225,9 @@ export function AppShell({ children }) {
       // The poll is 8 seconds away and the row is the thing that was just acted
       // on; leaving it reading "live" is the state the click was meant to change.
       setKelabos(list => (list || []).map(x => (x.kelaboId === m.kelaboId ? { ...x, status: 'ended' } : x)))
-      toast('Kelabo ended — minutes generating…')
+      // No capability map in this list view, so no promise about minutes —
+      // the record view says what actually arrived (docs 19 §2).
+      toast('Kelabo ended — archiving the record…')
     } catch (e) {
       toast(e?.code === 'already_ended' ? 'That kelabo had already ended' : 'Could not end that kelabo')
     }

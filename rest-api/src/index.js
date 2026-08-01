@@ -912,7 +912,7 @@ export async function handler(event, context) {
     const auth = createAuthProvider({ otp, oidc, sessions });
     const mcpOauth = createMcpOauth({ config, db, secrets });
     const internal = createInternal({ config, secrets });
-    const kelabos = createKelabos({ config, db, internal });
+    const kelabos = createKelabos({ config, db, internal, secrets });
     const scheduling = createScheduling({ config, db, mailer: ses, internal });
     const contacts = createContacts({ config, db });
     const huddle = createHuddle({ config, db, internal, kelabos });

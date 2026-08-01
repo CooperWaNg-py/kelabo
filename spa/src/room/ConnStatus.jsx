@@ -71,7 +71,7 @@ function Light({ icon, label, tone, title }) {
   )
 }
 
-export function ConnStatus({ boardStatus, captureState, callState, callMode, transcribing }) {
+export function ConnStatus({ boardStatus, captureState, callState, callMode, transcribing, callOn = true }) {
   const [kTone, kTitle] = look(KELABO, boardStatus)
   const [dTone, dTitle] = look(DEEPGRAM, captureState)
   const [cTone, cTitle] = look(CALL, callState)
@@ -81,14 +81,20 @@ export function ConnStatus({ boardStatus, captureState, callState, callMode, tra
       <Light icon="cloud" label="Kelabo" tone={kTone} title={kTitle} />
       {/* Watch-only participants have no capture pipeline at all, so reporting
           it as "off" would invite them to go looking for a fault they cannot
-          fix. It is simply not part of their kelabo. */}
+          fix. It is simply not part of their kelabo. Same for a deployment
+          with no STT configured — `transcribing` is false there too. */}
       {transcribing && <Light icon="waveform" label="Deepgram" tone={dTone} title={dTitle} />}
-      <Light
-        icon="broadcast"
-        label={callMode === 'mesh' ? 'P2P' : 'SFU'}
-        tone={cTone}
-        title={cTitle}
-      />
+      {/* And the same again for conference audio that was never configured:
+          a grey "off" light is a fault indicator for a service that is simply
+          not part of this deployment (docs 19 §2). */}
+      {callOn && (
+        <Light
+          icon="broadcast"
+          label={callMode === 'mesh' ? 'P2P' : 'SFU'}
+          tone={cTone}
+          title={cTitle}
+        />
+      )}
     </div>
   )
 }

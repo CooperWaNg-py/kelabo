@@ -86,11 +86,16 @@ inputs, and all three live server-side:
    (`guestTranscriptAccess`, guest rooms with no assistant, quotas).
 3. **Runtime health** — the token mint failed, the provider is down.
 
-Target shape (adopt incrementally — new capabilities should join it rather
-than inventing parallel flags): the join/META response carries a `capabilities`
-map, `{ name: { on, reason?, mode? } }`, per participant. `transcriptAccess`
-is the first field of this shape in production; fold future flags into the map
-rather than accreting booleans.
+The kelabo META response carries this as `capabilities`, a map of
+`{ name: { on, mode? } }` computed by the REST API (`rest-api/src/kelabos.js`):
+`stt`, `assistant` and `rtc` from provider-secret **existence** (DescribeSecret
+only — the API can state that the LLM key exists without being able to read
+it; `rest-api/src/secrets.js secretExists`), `video` from deployment config.
+Anything short of a definitive "the secret does not exist" answers `on` — a
+probe hiccup must never switch a working feature off. New capabilities join
+this map rather than inventing parallel booleans; `transcriptAccess` (a
+per-participant *policy*, not a deployment capability) stays on
+`/caption/history` beside the data it governs.
 
 ## 4. Public repo = mechanism, private repo = policy
 

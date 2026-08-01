@@ -126,6 +126,9 @@ export default function RecordDetail() {
   const [record, setRecord] = useState(null)
   const [error, setError] = useState(null)
   const [tab, setTab] = useState('transcript')
+  // The minutes poll gave up. Flipped so the tab can stop promising — a
+  // spinner that outlives its poll is an eternal promise (docs 19 §2/§3).
+  const [minutesTimedOut, setMinutesTimedOut] = useState(false)
 
   useEffect(() => {
     api.getRecord(id)
@@ -137,13 +140,26 @@ export default function RecordDetail() {
   // few times so they appear without a manual refresh.
   useEffect(() => {
     if (!record || record.minutes) return undefined
+    // Minutes land within a minute or two of the end. A record opened long
+    // after its kelabo ended and still without them is not "generating" —
+    // say so at once, and don't poll for something that is not coming.
+    const MINUTES_GRACE_MS = 10 * 60 * 1000
+    if (record.endedAt && Date.now() - record.endedAt > MINUTES_GRACE_MS) {
+      setMinutesTimedOut(true)
+      return undefined
+    }
     let tries = 0
     const t = setInterval(() => {
       tries += 1
       api.getRecord(id)
         .then(r => { if (r?.minutes) setRecord(r) })
         .catch(() => {})
-      if (tries >= 20) clearInterval(t)
+      // Give up out loud, not silently: the Minutes tab switches from a
+      // spinner to a status the moment nothing more is coming.
+      if (tries >= 20) {
+        clearInterval(t)
+        setMinutesTimedOut(true)
+      }
     }, 3000)
     return () => clearInterval(t)
   }, [record?.minutes, record == null, id]) // eslint-disable-line react-hooks/exhaustive-deps
@@ -247,10 +263,16 @@ export default function RecordDetail() {
 
           {tab === 'minutes' && (
             <section className="anim-in record-panel">
-              {!minutes && (
+              {!minutes && !minutesTimedOut && (
                 <div className="empty hstack">
                   <span className="con-spinner" aria-hidden="true"></span>
                   Minutes are being generated… they'll appear here shortly.
+                </div>
+              )}
+              {!minutes && minutesTimedOut && (
+                <div className="empty">
+                  No minutes yet. They may still be generating — reload to check —
+                  or minutes may not be enabled on this deployment.
                 </div>
               )}
               {minutes && (

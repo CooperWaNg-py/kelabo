@@ -47,14 +47,32 @@ A capability is in one of three states, and every state is renderable:
   itself ("Transcription unavailable — board still works"), while every other
   rung continues untouched.
 
+**The rendering rule follows from the state, mechanically:**
+
+| State | What the UI shows |
+|-------|-------------------|
+| on | the capability's UI, working |
+| off | **nothing.** No tab, no button, no greyed-out control, no empty panel, no "coming soon". A capability that is not meant to run leaves no trace it could have existed — a disabled control is a promise the deployment cannot keep, and an error about a service nobody configured is a bug report about nothing. |
+| degraded | the capability's UI stays where it is, wearing a **status indicator** — a chip, a toast, a reconnecting badge — on the capability itself. It was offered, so it must not vanish (a tab that disappears mid-kelabo reads as data loss); it must say what is wrong and what still works. |
+
+The distinction is *knowledge*: `off` is known before anything is attempted, so
+there is nothing to report and nothing to render; `degraded` is a broken
+promise, so it must be visible where the promise was made — and nowhere else.
+The frozen-mic incident violated both halves at once: a guest room (STT `off`)
+surfaced *degraded*-style complaints about a service that was never meant to
+run, from a retry loop that should never have started.
+
 The existing conformers, which new code should imitate:
 
 - Gateway without Cloudflare creds answers `/rtc/*` with `rtc_unavailable` and
   the kelabo runs as transcript + board (Makefile notes, docs 15).
 - `transcriptAccess` on `/caption/history`: the server states the policy, the
-  SPA offers or withholds the Transcript tab from it (docs 09 §10).
+  SPA withholds the Transcript tab entirely — not a disabled tab (docs 09 §10).
+- A guest kelabo has no assistant, so it has no Board tab and no `@kelabo`
+  placeholder hint — `off` rendered as absence.
 - The STT socket exhausting reconnects demotes itself to `stt_unavailable`
-  with a toast — captions stop, the room does not.
+  with a toast — captions stop, the room does not. `degraded` rendered as a
+  status on the thing that broke.
 
 ## 3. The server computes it, the client renders it
 
@@ -93,4 +111,6 @@ split, built here, consumed there as one config default.)
   retry loop that eventually gives up?
 - Does the UI affordance come from a server-stated status rather than from
   observing your errors?
+- When you are `off`, does every trace of your UI disappear — and when you are
+  `degraded`, does your UI stay put with a status indicator on it?
 - Can the private repo get its behaviour from your config knob alone?

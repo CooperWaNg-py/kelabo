@@ -19,6 +19,9 @@ Tags.of(app).add("endpoint", cfg.endpoint);
 
 const homeEnv = { account: cfg.account, region: cfg.region };
 const usEast1Env = { account: cfg.account, region: "us-east-1" };
+// Usually homeEnv. An environment that moved its mail elsewhere puts the
+// identity there instead, because an identity only exists in its own region.
+const sesEnv = { account: cfg.account, region: cfg.ses.region };
 const prefix = `${cfg.app}-${cfg.endpoint}`;
 
 let synthProps = {};
@@ -52,8 +55,21 @@ const ddb = new DynamoDbStack(app, `${prefix}-ddb`, { ...synthProps, env: homeEn
 // the same domain, exactly one of them owns the identity; the others set
 // ses.createIdentity: false and just use it (the send permission in the lambda
 // stack is identity-independent).
+//
+// That same scoping is why the stack goes in `sesEnv` rather than `homeEnv`:
+// sandbox status, sending quota, reputation and the bounce/complaint
+// suppression list are all per region, so moving an environment's mail to
+// another region is the only way to keep it from affecting another
+// environment's — and the identity has to be verified where the mail is sent
+// from, not where the rest of the environment lives.
 if (cfg.ses.createIdentity !== false) {
-  const ses = new SesStack(app, `${prefix}-ses`, { ...synthProps, env: homeEnv, cfg, zone: dns.zone });
+  const ses = new SesStack(app, `${prefix}-ses`, {
+    ...synthProps,
+    env: sesEnv,
+    crossRegionReferences: true,
+    cfg,
+    zone: dns.zone,
+  });
   ses.addDependency(dns);
 }
 

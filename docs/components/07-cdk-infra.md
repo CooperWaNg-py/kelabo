@@ -153,7 +153,14 @@ cdk deploy -c env=prod  --all
 - Gateway and Rig are Docker images (DockerImageAsset / ECR); the agent bridge is
   an npm package (`@kelabome/agents`), not an image.
 - SES must leave sandbox for prod (verified domain + production access); dev/staging
-  can use verified addresses.
+  can use verified addresses. Sandbox status, quota, reputation and the
+  bounce/complaint suppression list are all **account+region** scoped and nothing
+  inside an identity separates two domains sharing one, so `ses.region` puts an
+  environment's mail in another region when it must not affect another
+  environment's — e.g. granting production access to a test env while production
+  stays sandboxed. `SesStack` then deploys to that region (`sesEnv` in
+  `infra/bin/kelabo.js`) and the Lambda gets `KELABO_SES_REGION`; unset, it is
+  the environment's own region and nothing changes.
 
 ---
 

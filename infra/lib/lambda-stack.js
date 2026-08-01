@@ -58,6 +58,11 @@ export class LambdaStack extends Stack {
         KELABO_SECRET_OIDC_APPLE: cfg.secrets.oidcApple,
         KELABO_SECRET_MCP_PREFIX: cfg.secrets.mcpPrefix,
         KELABO_SES_FROM_ADDRESS: cfg.ses.fromAddress,
+        // Usually this stack's own region. It differs only when a deployment
+        // moved an environment's mail to another region to give it its own
+        // sandbox status and reputation, so the SES client cannot just take
+        // AWS_REGION from the Lambda it happens to run in.
+        KELABO_SES_REGION: cfg.ses.region,
         KELABO_SOCIAL_PROVIDERS: (cfg.auth?.socialProviders ?? []).join(","),
         KELABO_SESSION_TTL_SECONDS: String(cfg.auth.sessionTtlSeconds),
         KELABO_REFRESH_TTL_DAYS: String(cfg.auth.refreshTtlDays),

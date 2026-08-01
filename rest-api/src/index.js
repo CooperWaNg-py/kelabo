@@ -905,7 +905,9 @@ export async function handler(event, context) {
     const config = await ensureConfig();
     const db = createDb({ config });
     const secrets = createSecrets({ region: config.region });
-    const ses = createSesSender({ region: config.region });
+    // Not config.region: mail can be sent from another region deliberately, to
+    // give an environment its own SES sandbox status, quota and reputation.
+    const ses = createSesSender({ region: config.ses.region || config.region });
     const otp = createOtp({ config, db, ses });
     const sessions = createSessions({ config, db, secrets });
     const oidc = createOidc({ config, secrets });

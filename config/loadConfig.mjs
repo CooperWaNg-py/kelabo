@@ -52,6 +52,22 @@ export function loadConfig(env,   configPath = join(here, "kelabo.json")) {
     contacts: `kelabo-${block.endpoint}-contacts`,
   };
 
+  // SES sandbox status, sending quota, reputation and the bounce/complaint
+  // suppression list are all account+**region** scoped, and nothing inside an
+  // identity separates two domains that share one — configuration sets give
+  // per-set metrics and IP pools, never a per-set sandbox. So a deployment that
+  // wants one environment's mail unable to affect another's sends it from a
+  // different region: staged rollout (production access granted to test while
+  // production stays sandboxed) is only expressible that way. Defaults to the
+  // environment's own region, which is what a single-region deployment wants
+  // and what every kelabo.json written before this knob existed means.
+  const ses = {
+    ...block.ses,
+    // `||`, not `??`: this file is hand-edited JSON, and an empty string left
+    // behind from a template is "unset", not "region named the empty string".
+    region: block.ses?.region || block.region,
+  };
+
   // Cloudflare Realtime's API host. Derived here (not written in a consumer) so
   // the "no hard-coded env values" rule holds; the app id and both secrets stay
   // in Secrets Manager and never appear in config.
@@ -122,6 +138,7 @@ export function loadConfig(env,   configPath = join(here, "kelabo.json")) {
     app: raw.app,
     rtcApiBase,
     rtc,
+    ses,
     contacts,
     auth,
     joinCode,

@@ -68,7 +68,7 @@ pairing.
 | `kelabo opencode [-- …]` | Start opencode: free port, background subagents on |
 | `kelabo claude [-- …]` | Start Claude Code with the Kelabo channel enabled |
 | `kelabo setup` | Wire a runtime (or `--all`), then pair |
-| `kelabo login` | Pair (or re-pair) this machine |
+| `kelabo login` | Pair (or re-pair) this machine; asks for the endpoint, Enter keeps the current one |
 | `kelabo status` | What is paired, wired and running, per runtime |
 | `kelabo uninstall` | Remove the wiring; `--purge` also drops the credential |
 | `kelabo reset` | `uninstall --purge`, then `setup` |

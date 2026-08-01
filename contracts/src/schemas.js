@@ -18,6 +18,9 @@ export const utteranceSchema = z.object({
   // same statement. Carried through persistence and the archive so the record
   // (and its download) can tell a typed line from a transcribed one.
   source: z.enum(["speech", "typed"]).optional(),
+  // Wall-clock ms. Absent on rows persisted before 2026-08; the record view
+  // falls back to meeting-relative offsets for those.
+  at: z.number().optional(),
 });
 
 export const captionPostSchema = z.object({

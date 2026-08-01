@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { Markdown } from './Markdown'
 import { Icon } from './ui/Icon'
+import { fmtFullAt } from '../time'
 
 /**
  * One assistant contribution, collapsed to its headline until opened.
@@ -94,7 +95,7 @@ export function ContributionCard({ con }) {
           <span className="con-mark" aria-hidden="true"><Icon name="minus-circle" size={14} /></span>
           <span className="con-title">{con.title || 'No contribution'}</span>
         </div>
-        <div className="con-sub"><span>{fmtAt(con.at)}</span></div>
+        <div className="con-sub"><span title={fmtFullAt(con.at)}>{fmtAt(con.at)}</span></div>
         {con.reason && <div className="con-reason">{con.reason}</div>}
       </div>
     )
@@ -124,7 +125,7 @@ export function ContributionCard({ con }) {
       </div>
 
       <div className="con-sub">
-        <span>{fmtAt(con.at)}</span>
+        <span title={fmtFullAt(con.at)}>{fmtAt(con.at)}</span>
         {targeted && <span className="con-to" title={`Aimed at ${targeted}`}>→ {targeted}</span>}
         {sources.length > 0 && (
           <span title={`${sources.length} source${sources.length === 1 ? '' : 's'}`}>

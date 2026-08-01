@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { Fragment, useEffect, useState } from 'react'
 import { useParams } from 'react-router-dom'
 import { api } from '../api'
 import { Tabs } from '../components/ui/Tabs'
@@ -9,6 +9,7 @@ import { Icon } from '../components/ui/Icon'
 import { Crumbs } from '../components/ui/Crumbs'
 import { ContributionCard } from '../components/ContributionCard'
 import { SpeakerTag } from '../components/SpeakerTag'
+import { annotateDays, fmtFullAt, fmtTime } from '../time'
 
 /** A heading over a plain string list (open questions). */
 function MinutesList({ title, items }) {
@@ -230,19 +231,27 @@ export default function RecordDetail() {
               {transcript.length === 0 && (
                 <div className="empty">No transcript was captured for this kelabo.</div>
               )}
-              {transcript.map((u, i) => (
-                <div className="line" key={i}>
-                  <SpeakerTag name={u.speaker} />
-                  <span className="text">
-                    <span className="tstamp">{fmtClock(u.tStart)}</span>
-                    {/* Same marker as the live panel: a typed line is something
-                        somebody wrote, not Deepgram's hearing of them. */}
-                    {u.source === 'typed' && (
-                      <Icon name="pencil" size={11} className="chat-typed line-typed" label="Typed" />
-                    )}
-                    {u.text}
-                  </span>
-                </div>
+              {/* A record can span days, so lines show wall-clock time under
+                  day dividers where the archive carries it; pre-2026-08
+                  archives have only meeting-relative offsets and keep them. */}
+              {annotateDays(transcript, u => u.at).map(({ item: u, divider }, i) => (
+                <Fragment key={i}>
+                  {divider && <div className="day-divider" role="separator">{divider}</div>}
+                  <div className="line">
+                    <SpeakerTag name={u.speaker} />
+                    <span className="text">
+                      <span className="tstamp" title={fmtFullAt(u.at)}>
+                        {u.at ? fmtTime(u.at) : fmtClock(u.tStart)}
+                      </span>
+                      {/* Same marker as the live panel: a typed line is something
+                          somebody wrote, not Deepgram's hearing of them. */}
+                      {u.source === 'typed' && (
+                        <Icon name="pencil" size={11} className="chat-typed line-typed" label="Typed" />
+                      )}
+                      {u.text}
+                    </span>
+                  </div>
+                </Fragment>
               ))}
               <div className="action-row action-row-start">
                 <Button size="sm" onClick={download}>

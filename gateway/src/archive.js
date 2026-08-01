@@ -43,6 +43,9 @@ export async function endKelabo(c, kelaboId) {
     isFinal: true,
     tenantId: i.tenantId,
     ...(i.source ? { source: i.source } : {}),
+    // Wall clock, so the record can show which DAY a line was said — a kelabo
+    // can span days, and meeting-relative offsets stop meaning anything then.
+    ...(typeof i.at === "number" ? { at: i.at } : {}),
   }));
   const board = sessionArchive?.board ?? (await queryContrib(c, kelaboId)).map((i) => ({
     id: i.id ?? `${kelaboId}:${i.SK}`,

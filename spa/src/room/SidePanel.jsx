@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import { ContributionCard } from '../components/ContributionCard'
 import { Button } from '../components/ui/Button'
 import { Icon } from '../components/ui/Icon'
@@ -7,6 +7,7 @@ import { usePrompt } from '../components/PromptDialog'
 import { useToast } from '../components/Toaster'
 import { renameSpeaker as apiRenameSpeaker } from '../api'
 import { messageParts } from '../transcript/transcriptStore'
+import { annotateDays, fmtFullAt, fmtTime } from '../time'
 import { conKey } from './useBoard'
 
 /**
@@ -23,15 +24,6 @@ import { conKey } from './useBoard'
 // How close to the bottom still counts as "following along". Scrolling back to
 // re-read must not be yanked away by the next thing anyone says.
 const FOLLOW_THRESHOLD_PX = 140
-
-function fmtTime(at) {
-  if (!at) return ''
-  try {
-    return new Date(at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-  } catch {
-    return ''
-  }
-}
 
 function MessageBody({ message }) {
   const { settled, live } = messageParts(message)
@@ -74,20 +66,27 @@ function useFollowingScroll(dep, enabled) {
 }
 
 function MessageList({ items, scroll, empty }) {
+  // Day dividers appear only when the list actually spans days (annotateDays) —
+  // a room that has run for a week reads like a chat history, a one-hour
+  // kelabo stays exactly as clean as before.
+  const dated = useMemo(() => annotateDays(items), [items])
   return (
     <>
       <div className="side-scroll" ref={scroll.ref} onScroll={scroll.onScroll}>
         {items.length === 0 && <div className="empty">{empty}</div>}
-        {items.map(m => (
-          <div key={m.messageId} className={'chat-msg' + (m.mine ? ' mine' : '')}>
-            <div className="chat-meta">
-              <SpeakerTag name={m.speakerLabel} />
-              <span className="chat-time">{fmtTime(m.at)}</span>
+        {dated.map(({ item: m, divider }) => (
+          <Fragment key={m.messageId}>
+            {divider && <div className="day-divider" role="separator">{divider}</div>}
+            <div className={'chat-msg' + (m.mine ? ' mine' : '')}>
+              <div className="chat-meta">
+                <SpeakerTag name={m.speakerLabel} />
+                <span className="chat-time" title={fmtFullAt(m.at)}>{fmtTime(m.at)}</span>
+              </div>
+              <div className={'chat-bubble' + (m.state === 'open' ? ' open' : '')}>
+                <MessageBody message={m} />
+              </div>
             </div>
-            <div className={'chat-bubble' + (m.state === 'open' ? ' open' : '')}>
-              <MessageBody message={m} />
-            </div>
-          </div>
+          </Fragment>
         ))}
       </div>
 

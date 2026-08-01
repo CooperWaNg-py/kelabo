@@ -566,7 +566,10 @@ export function useCapture({ kelaboId, enabled, finalOnly, startedAt, language =
         const mine =
           (!!utt.by && utt.by === myIdentityRef.current) ||
           (!utt.by && !!utt.speaker && utt.speaker === displayNameRef.current)
-        next = apply(next, event, { mine, at: utt.at })
+        // `?? 0`, never "now": a row persisted before wall clocks were stored
+        // must render as undated ("Earlier"), not borrow today's date from the
+        // moment it happened to be re-fetched.
+        next = apply(next, event, { mine, at: utt.at ?? 0 })
       }
       return next
     })

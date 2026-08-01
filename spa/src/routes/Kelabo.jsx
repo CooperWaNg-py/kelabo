@@ -23,6 +23,7 @@ import { TabTaken } from '../room/TabTaken'
 import { RoomShell } from '../room/RoomShell'
 import { JoinCodeDialog } from '../room/JoinCodeDialog'
 import { DebugPanel } from '../board/DebugPanel'
+import { CallLogPanel } from '../board/CallLogPanel'
 import { pushSettings } from '../settings'
 import { joinPrefs } from '../joinPrefs'
 import { useLeaveGuard } from '../useLeaveGuard'
@@ -411,7 +412,6 @@ function KelaboRoom() {
           onMuteHidden: onMuteHiddenChange,
           held: hiddenMuteHeld,
         }}
-        debugOn={debugEnabled}
         onToggleDebug={toggleDebug}
         onCopyInvite={copyInvite}
         onJoinCode={() => setJoinCodeOpen(true)}
@@ -466,12 +466,15 @@ function KelaboRoom() {
             behind a closed drawer meant rebuilding forty rows every time anyone
             said a word, for a panel nobody was looking at. */}
         {debugEnabled && (
-          <DebugPanel
-            entries={debugEntries}
-            onClear={() => setDebugEntries([])}
-            gateStats={gateStats}
-            messages={capture.messages}
-          />
+          <>
+            <DebugPanel
+              entries={debugEntries}
+              onClear={() => setDebugEntries([])}
+              gateStats={gateStats}
+              messages={capture.messages}
+            />
+            <CallLogPanel />
+          </>
         )}
       </Drawer>
     </>

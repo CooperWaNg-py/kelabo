@@ -1,6 +1,37 @@
 import { rtc as rtcApi } from '../api'
 import { withRetry } from './retry.js'
 import { MAX_PEER_REBUILDS, shouldRebuildCall, shouldRebuildPeer } from './recovery.js'
+import { callLog } from './callLog.js'
+
+const LOG = 'mesh'
+
+/**
+ * Which candidate pair ICE selected — relay vs direct is the first thing to
+ * know about a call that connects but carries no media. Logged once, when the
+ * connection comes up.
+ */
+async function logSelectedPair(pc, participantId) {
+  try {
+    const stats = await pc.getStats()
+    let pair = null
+    for (const r of stats.values()) {
+      if (r.type === 'transport' && r.selectedCandidatePairId) pair = stats.get(r.selectedCandidatePairId)
+    }
+    if (!pair) {
+      for (const r of stats.values()) {
+        if (r.type === 'candidate-pair' && r.state === 'succeeded' && r.nominated) { pair = r; break }
+      }
+    }
+    if (!pair) return
+    const local = stats.get(pair.localCandidateId)
+    const remote = stats.get(pair.remoteCandidateId)
+    callLog.info(LOG, `selected pair ${participantId}`, {
+      local: local?.candidateType,
+      remote: remote?.candidateType,
+      protocol: local?.protocol,
+    })
+  } catch {}
+}
 
 // Full-mesh peer-to-peer transport — the "secure kelabo" mode.
 //
@@ -49,6 +80,7 @@ export function createMeshTransport({ kelaboId, selfId, iceServers, onRemoteTrac
   function reportFatal(err) {
     if (fatalReported || closed) return
     fatalReported = true
+    callLog.error(LOG, 'fatal — whole call reported dead', err)
     onFatal?.(err)
   }
 
@@ -75,10 +107,14 @@ export function createMeshTransport({ kelaboId, selfId, iceServers, onRemoteTrac
       // Set when a negotiation could not be delivered, so it can be tried again
       // the moment the connection is back in a state that allows one.
       renegotiateWanted: false,
+      // Local offers and incoming signals both run through here, one at a
+      // time — see enqueue.
+      ops: Promise.resolve(),
       rebuilds: 0,
       rebuildTimer: 0,
     }
     peers.set(participantId, entry)
+    callLog.info(LOG, `peer connection created: ${participantId}`, { polite: entry.polite })
 
     // Adding these fires `negotiationneeded`, which is what actually dials the
     // peer. A participant with no microphone adds nothing and waits to be dialled.
@@ -103,10 +139,12 @@ export function createMeshTransport({ kelaboId, selfId, iceServers, onRemoteTrac
         track: ev.track,
         streams: ev.streams,
       })
+      callLog.info(LOG, `remote track: ${participantId}`, { kind: labelled ?? ev.track.kind, mid: String(mid ?? '') })
     })
 
     pc.addEventListener('icecandidate', ev => {
       if (!ev.candidate) return
+      callLog.debug(LOG, `ice candidate → ${participantId}`, { type: ev.candidate.type, protocol: ev.candidate.protocol })
       // A lost candidate is survivable — the others usually still produce a
       // working pair — so this one stays best-effort rather than retrying and
       // delivering candidates out of order.
@@ -123,6 +161,7 @@ export function createMeshTransport({ kelaboId, selfId, iceServers, onRemoteTrac
     pc.addEventListener('negotiationneeded', () => { negotiate(participantId) })
 
     pc.addEventListener('signalingstatechange', () => {
+      callLog.debug(LOG, `signalling ${participantId}: ${pc.signalingState}`)
       // A negotiation we could not deliver earlier gets its chance as soon as
       // the connection is willing to take one.
       if (pc.signalingState === 'stable' && entry.renegotiateWanted) {
@@ -132,12 +171,16 @@ export function createMeshTransport({ kelaboId, selfId, iceServers, onRemoteTrac
     })
 
     pc.addEventListener('connectionstatechange', () => {
+      callLog.info(LOG, `connection ${participantId}: ${pc.connectionState}`)
       onStateChange?.(participantId, pc.connectionState)
       // A connection that came up is a rebuild that worked: the budget bounds
       // a losing streak, not the kelabo. Without this reset the fourth blip of
       // an hour-long call spent the allowance forever and the peer stayed dark
       // until a page reload.
-      if (pc.connectionState === 'connected') entry.rebuilds = 0
+      if (pc.connectionState === 'connected') {
+        entry.rebuilds = 0
+        logSelectedPair(pc, participantId)
+      }
       if (pc.connectionState === 'failed') {
         // Several peers failing at once is our own network, not N unlucky
         // peers — escalate straight to the whole-call rebuild. A single peer
@@ -152,9 +195,11 @@ export function createMeshTransport({ kelaboId, selfId, iceServers, onRemoteTrac
       }
     })
     pc.addEventListener('iceconnectionstatechange', () => {
+      callLog.info(LOG, `ice connection ${participantId}: ${pc.iceConnectionState}`)
       if (pc.iceConnectionState !== 'failed') return
       onStateChange?.(participantId, 'failed')
       // Cheaper than rebuilding and usually enough: gather again and re-offer.
+      callLog.warn(LOG, `ICE restart: ${participantId}`)
       try { pc.restartIce?.() } catch {}
     })
 
@@ -179,35 +224,64 @@ export function createMeshTransport({ kelaboId, selfId, iceServers, onRemoteTrac
   }
 
   /**
+   * One asynchronous operation per peer at a time.
+   *
+   * Offers we generate and signals the peer sends mutate the SAME
+   * RTCPeerConnection, and two overlapping mutations corrupt each other: a
+   * second `negotiationneeded` firing while the first offer is still being
+   * assembled produces two offers ~20ms apart ("m-lines … doesn't match"),
+   * and a local offer applied while a remote offer is mid-answer fails with
+   * "wrong state". The queue makes every mutation — local or remote in
+   * origin — run against the state the previous one actually left behind.
+   */
+  const enqueue = (entry, fn) => {
+    const next = entry.ops.then(fn, fn)
+    entry.ops = next.catch(() => {})
+    return next
+  }
+
+  /**
    * Offer to one peer. Isolated from the event handler so a failed attempt can
    * be repeated, and so a negotiation that arrives while the connection is
    * mid-exchange is deferred instead of throwing.
    */
-  async function negotiate(participantId) {
+  function negotiate(participantId) {
     const entry = peers.get(participantId)
     if (closed || !entry) return
-    const { pc } = entry
-    if (pc.signalingState !== 'stable') {
+    // Re-entry guard: two negotiationneeded events can both find the state
+    // `stable` while the first offer is still being assembled (makingOffer is
+    // set before the first await). Without this both send an offer.
+    if (entry.makingOffer) {
       entry.renegotiateWanted = true
       return
     }
-    try {
-      entry.makingOffer = true
-      await pc.setLocalDescription(await pc.createOffer())
-      await signal(participantId, { type: 'offer', sdp: pc.localDescription.sdp, kinds: localKinds(entry) })
-    } catch (err) {
-      // The offer is applied locally but the peer never heard about it, so the
-      // connection would sit in `have-local-offer` until the kelabo ended.
-      // Roll back to `stable` and leave a flag: whatever wanted this
-      // negotiation still wants it.
-      if (pc.signalingState === 'have-local-offer') {
-        try { await pc.setLocalDescription({ type: 'rollback' }) } catch {}
+    enqueue(entry, async () => {
+      if (closed || peers.get(participantId) !== entry) return
+      const { pc } = entry
+      if (pc.signalingState !== 'stable') {
+        entry.renegotiateWanted = true
+        return
       }
-      entry.renegotiateWanted = true
-      onError?.(err)
-    } finally {
-      entry.makingOffer = false
-    }
+      try {
+        entry.makingOffer = true
+        await pc.setLocalDescription(await pc.createOffer())
+        await signal(participantId, { type: 'offer', sdp: pc.localDescription.sdp, kinds: localKinds(entry) })
+        callLog.debug(LOG, `offer sent → ${participantId}`, { sdpBytes: pc.localDescription.sdp.length })
+      } catch (err) {
+        // The offer is applied locally but the peer never heard about it, so the
+        // connection would sit in `have-local-offer` until the kelabo ended.
+        // Roll back to `stable` and leave a flag: whatever wanted this
+        // negotiation still wants it.
+        callLog.error(LOG, `offer to ${participantId} failed`, err)
+        if (pc.signalingState === 'have-local-offer') {
+          try { await pc.setLocalDescription({ type: 'rollback' }) } catch {}
+        }
+        entry.renegotiateWanted = true
+        onError?.(err)
+      } finally {
+        entry.makingOffer = false
+      }
+    })
   }
 
   /**
@@ -220,6 +294,7 @@ export function createMeshTransport({ kelaboId, selfId, iceServers, onRemoteTrac
     if (!shouldRebuildPeer({ connectionState: entry.pc.connectionState, rebuilds: entry.rebuilds })) {
       // Budget spent. If everyone is in the same state the call itself is the
       // patient — escalate instead of leaving this peer dark forever.
+      callLog.error(LOG, `rebuild budget spent: ${participantId}`, { rebuilds: entry.rebuilds })
       if (
         entry.rebuilds >= MAX_PEER_REBUILDS &&
         shouldRebuildCall([...peers.values()].map(e => e.pc.connectionState))
@@ -229,6 +304,7 @@ export function createMeshTransport({ kelaboId, selfId, iceServers, onRemoteTrac
       return
     }
     entry.rebuilds += 1
+    callLog.warn(LOG, `rebuilding peer connection: ${participantId}`, { attempt: entry.rebuilds })
     entry.rebuildTimer = setTimeout(() => {
       const current = peers.get(participantId)
       if (closed || !current || current.pc.connectionState !== 'failed') {
@@ -341,8 +417,24 @@ export function createMeshTransport({ kelaboId, selfId, iceServers, onRemoteTrac
     }
   }
 
-  async function handleSignal(from, signal_) {
+  /**
+   * Incoming signals are applied to one peer strictly one at a time.
+   *
+   * `handleSignal` is async, and without this queue an answer and an offer
+   * arriving in the same SSE flush ran concurrently: the offer's collision
+   * check read `have-local-offer` because the answer's `setRemoteDescription`
+   * had not finished, glare was declared where there was none, and the polite
+   * rollback then executed AFTER the answer had landed — Chrome throws
+   * `setLocalDescription: wrong signalingState: stable` for a rollback in
+   * `stable`, the whole offer handling aborted, and the peer's re-offer
+   * (the one carrying their just-granted microphone) was never applied or
+   * answered. The sender sat in `have-local-offer` for the rest of the
+   * kelabo and nobody heard them. Serialized, each signal sees the state the
+   * previous one actually left behind, so the collision check is truthful.
+   */
+  function handleSignal(from, signal_) {
     if (closed) return
+    callLog.debug(LOG, `signal ← ${from}`, { type: signal_.type })
     if (signal_.type === 'bye') {
       dropPeer(from)
       return
@@ -356,6 +448,13 @@ export function createMeshTransport({ kelaboId, selfId, iceServers, onRemoteTrac
       dropPeer(from)
     }
     const entry = peerFor(from)
+    enqueue(entry, () => processSignal(from, entry, signal_))
+  }
+
+  async function processSignal(from, entry, signal_) {
+    // Dropped (or rebuilt) while this sat in the queue: applying it to the old
+    // connection is worse than ignoring it.
+    if (closed || peers.get(from) !== entry) return
     const { pc } = entry
     try {
       if (signal_.type === 'offer' || signal_.type === 'answer') {
@@ -363,11 +462,15 @@ export function createMeshTransport({ kelaboId, selfId, iceServers, onRemoteTrac
         const collision =
           description.type === 'offer' && (entry.makingOffer || pc.signalingState !== 'stable')
         entry.ignoreOffer = !entry.polite && collision
-        if (entry.ignoreOffer) return
+        if (entry.ignoreOffer) {
+          callLog.warn(LOG, `glare with ${from}: ignoring their offer (impolite side)`)
+          return
+        }
         if (collision) {
           // Polite side: abandon our own in-flight offer and take theirs. What
           // we wanted to renegotiate still needs saying, so ask again once this
           // exchange settles.
+          callLog.warn(LOG, `glare with ${from}: rolling back our offer (polite side)`)
           await pc.setLocalDescription({ type: 'rollback' })
           entry.renegotiateWanted = true
         }
@@ -381,6 +484,7 @@ export function createMeshTransport({ kelaboId, selfId, iceServers, onRemoteTrac
         if (description.type === 'offer') {
           await pc.setLocalDescription(await pc.createAnswer())
           await signal(from, { type: 'answer', sdp: pc.localDescription.sdp, kinds: localKinds(entry) })
+          callLog.debug(LOG, `answer sent → ${from}`, { sdpBytes: pc.localDescription.sdp.length })
         }
         return
       }
@@ -395,6 +499,7 @@ export function createMeshTransport({ kelaboId, selfId, iceServers, onRemoteTrac
         else await pc.addIceCandidate(candidate).catch(() => {})
       }
     } catch (err) {
+      callLog.error(LOG, `handling ${signal_.type} from ${from} failed`, err)
       if (!entry.ignoreOffer) onError?.(err)
     }
   }
@@ -402,6 +507,7 @@ export function createMeshTransport({ kelaboId, selfId, iceServers, onRemoteTrac
   function dropPeer(participantId) {
     const entry = peers.get(participantId)
     if (!entry) return
+    callLog.debug(LOG, `peer dropped: ${participantId}`)
     peers.delete(participantId)
     clearTimeout(entry.rebuildTimer)
     try { entry.pc.close() } catch {}

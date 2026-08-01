@@ -1609,7 +1609,10 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
 }
 .modal-body { font-size: var(--text-md); color: var(--text-2); line-height: var(--leading-normal); margin: 0 0 var(--space-5); text-wrap: pretty; }
 .modal-actions { display: flex; justify-content: flex-end; gap: var(--space-2); }
-.modal-actions .btn { min-width: 6.5rem; }
+/* flex: 1 is what makes the promise above true: every button in the row gets
+   the same share of it, so a two-button dialog is two symmetric halves with
+   no dead corner — not a wide primary adrift from a ghost at the far edge. */
+.modal-actions .btn { flex: 1; min-width: 6.5rem; }
 /* The one input a dialog ever holds, spaced like `.modal-body` so a prompt and
    a confirm have the same rhythm between heading, content and actions. */
 .modal-input { width: 100%; margin: 0 0 var(--space-5); }
@@ -2019,6 +2022,12 @@ h5.md-h, h6.md-h { font-size: var(--text-sm); color: var(--text-2); }
 .dbg-msg > .text-meta { margin-bottom: 2px; }
 /* an exchange card */
 .dbg-card { margin-bottom: var(--space-2); }
+/* the call log toolbar's buttons: one group, so a narrow drawer wraps the
+   whole group under the title instead of scattering them between the words */
+.dbg-actions { display: flex; gap: var(--space-2); flex-wrap: nowrap; }
+/* the call log: one event per line, timestamps aligned, taller than a request
+   body because the story is in the sequence, not in any single line */
+.dbg-calllog { max-height: 45vh; white-space: pre; word-break: normal; }
 /* a whole orchestration turn, edged in the accent so turns are scannable */
 .dbg-turn { border-left: 3px solid var(--accent); margin-bottom: var(--space-3); }
 .dbg-turn .panel-toolbar { margin-bottom: var(--space-3); }

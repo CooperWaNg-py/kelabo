@@ -4,7 +4,10 @@ import { config } from '../config'
 import { createSfuTransport } from './sfuTransport'
 import { createMeshTransport } from './meshTransport'
 import { withRetry } from './retry.js'
-import { iceRefreshDelayMs, joinRetryDelayMs } from './recovery.js'
+import { iceRefreshDelayMs, joinRetryDelayMs, hasTurnServers } from './recovery.js'
+import { callLog } from './callLog.js'
+
+const LOG = 'call'
 
 // How long the call outlives a dropped SSE stream before tearing down. Must
 // stay BELOW the Gateway's rtc.disconnectGraceSeconds (default 20s): a client
@@ -129,11 +132,13 @@ export function useRtc({ kelaboId, enabled, stream, videoStream = null, screenSt
   const onFatal = useCallback(err => {
     if (rebuildTimerRef.current) return
     if (rebuildsRef.current >= 3) {
+      callLog.error(LOG, 'rebuild budget spent — call is down', err)
       setError(err)
       setState('error')
       return
     }
     const attempt = rebuildsRef.current++
+    callLog.warn(LOG, `fatal from transport — rebuilding call`, { attempt: attempt + 1, err: String(err?.message ?? err) })
     rebuildTimerRef.current = setTimeout(() => {
       rebuildTimerRef.current = null
       // Set when the timer FIRES, not when it was scheduled: a participant who
@@ -151,6 +156,7 @@ export function useRtc({ kelaboId, enabled, stream, videoStream = null, screenSt
   // /rtc/leave for a seat that is already gone would only race the rejoin.
   const rejoinAfterEviction = useCallback(() => {
     if (rebuildTimerRef.current || retryTimerRef.current) return
+    callLog.warn(LOG, 'seat gone (evicted) — rejoining')
     rebuildingRef.current = true
     setGeneration(g => g + 1)
   }, [])
@@ -215,6 +221,7 @@ export function useRtc({ kelaboId, enabled, stream, videoStream = null, screenSt
    * same media kind (a republish) rather than accumulating dead ones.
    */
   const attachRemote = useCallback(({ participantId, kind, track }) => {
+    callLog.info(LOG, `remote ${kind} attached: ${participantId}`, { trackId: track.id })
     const screen = kind === 'screen'
     const store = screen ? screensRef.current : streamsRef.current
     const publish = screen ? setRemoteScreens : setRemoteStreams
@@ -258,6 +265,7 @@ export function useRtc({ kelaboId, enabled, stream, videoStream = null, screenSt
     setState('joining')
     joiningRef.current = true
     pendingEventsRef.current = []
+    callLog.info(LOG, `joining call (generation ${generation})`)
 
     ;(async () => {
       let info
@@ -268,6 +276,7 @@ export function useRtc({ kelaboId, enabled, stream, videoStream = null, screenSt
         info = await withRetry(() => rtcApi.join(kelaboId))
       } catch (err) {
         joiningRef.current = false
+        callLog.error(LOG, 'join failed', { code: err?.code, status: err?.status, message: err?.message })
         if (cancelled) return
         if (err?.code === 'mesh_room_full') {
           setMeshMax(err.meshMax ?? 0)
@@ -296,6 +305,14 @@ export function useRtc({ kelaboId, enabled, stream, videoStream = null, screenSt
       joinAttemptsRef.current = 0
       selfIdRef.current = info.self.participantId
       iceTtlRef.current = Number(info.ttlSeconds) || 0
+      callLog.info(LOG, `joined — mode ${info.mode}`, {
+        self: info.self.participantId,
+        peers: info.peers.length,
+        iceServers: info.iceServers?.length ?? 0,
+        turn: hasTurnServers(info.iceServers),
+        iceTtlSeconds: iceTtlRef.current,
+        video: info.video !== false,
+      })
       setMode(info.mode)
       setMeshMax(info.meshMax ?? 0)
       setVideoAllowed(info.video !== false)
@@ -369,7 +386,10 @@ export function useRtc({ kelaboId, enabled, stream, videoStream = null, screenSt
       setAwayPeers(new Set())
       setState('idle')
       if (rebuildingRef.current) rebuildingRef.current = false
-      else rtcApi.leave(kelaboId).catch(() => {})
+      else {
+        callLog.info(LOG, 'left call')
+        rtcApi.leave(kelaboId).catch(() => {})
+      }
     }
   }, [enabled, kelaboId, callGate, generation, attachRemote, syncPeers, onFatal])
 
@@ -425,9 +445,12 @@ export function useRtc({ kelaboId, enabled, stream, videoStream = null, screenSt
         let out = null
         try {
           out = await rtcApi.ice(kelaboId)
-        } catch {}
+        } catch (err) {
+          callLog.warn(LOG, 'ICE re-mint failed', { message: err?.message })
+        }
         if (stopped) return
         if (Array.isArray(out?.iceServers) && out.iceServers.length) {
+          callLog.debug(LOG, 'ICE credentials re-minted', { ttlSeconds: out.ttlSeconds })
           transportRef.current?.setIceServers?.(out.iceServers)
           schedule(Number(out.ttlSeconds) || 0)
         } else {
@@ -471,6 +494,7 @@ export function useRtc({ kelaboId, enabled, stream, videoStream = null, screenSt
   useEffect(() => {
     const transport = transportRef.current
     if (state !== 'live' || !transport) return
+    callLog.debug(LOG, `local audio: ${stream?.getAudioTracks()[0] ? 'on' : 'off'}`)
     transport.setLocalTrack('audio', stream?.getAudioTracks()[0] ?? null)
   }, [state, stream])
 
@@ -483,6 +507,7 @@ export function useRtc({ kelaboId, enabled, stream, videoStream = null, screenSt
     const transport = transportRef.current
     if (state !== 'live' || !transport) return
     const track = videoAllowed ? (videoStream?.getVideoTracks()[0] ?? null) : null
+    callLog.debug(LOG, `local video: ${track ? 'on' : 'off'}`)
     transport.setLocalTrack('video', track)
   }, [state, videoStream, videoAllowed])
 
@@ -515,6 +540,7 @@ export function useRtc({ kelaboId, enabled, stream, videoStream = null, screenSt
           await withRetry(() => rtcApi.media(kelaboId, { screen: true }))
         } catch (err) {
           if (cancelled) return
+          callLog.warn(LOG, 'screen share refused', { code: err?.code })
           if (err?.code === 'peer_not_found') rejoinAfterEviction()
           setScreenDenied(err?.code === 'mesh_room_full' ? 'full' : 'error')
           return
@@ -578,11 +604,15 @@ export function useRtc({ kelaboId, enabled, stream, videoStream = null, screenSt
       }
       for (const id of [...peersRef.current.keys()]) {
         if (id !== self && !seen.has(id)) {
+          callLog.warn(LOG, `roster sync: ${id} gone — synthesising peer_left`)
           onServerEventRef.current?.({ kind: 'peer_left', participantId: id, reason: 'roster_sync' })
         }
       }
       // Our own seat is gone — evicted while we could not hear it. Rejoin.
-      if (!selfPresent) rejoinAfterEviction()
+      if (!selfPresent) {
+        callLog.warn(LOG, 'roster sync: our own seat is missing')
+        rejoinAfterEviction()
+      }
     }
     const tick = () => {
       transportRef.current?.reconcile?.([...peersRef.current.values()])
@@ -655,6 +685,7 @@ export function useRtc({ kelaboId, enabled, stream, videoStream = null, screenSt
     payload => {
       const transport = transportRef.current
       if (!payload) return
+      callLog.debug(LOG, `rtc event: ${payload.kind}`, payload.kind === 'signal' ? { type: payload.signal?.type, from: payload.from } : { participantId: payload.participantId ?? payload.peer?.participantId })
       if (!transport) {
         // Mid-join there is no transport yet, but the room is still talking.
         // Hold what it says and replay it once the transport exists — dropping
@@ -778,7 +809,10 @@ export function useRtc({ kelaboId, enabled, stream, videoStream = null, screenSt
           .catch(() => {})
       }
       if (el.srcObject !== ms) el.srcObject = ms
-      el.play().catch(() => setNeedsUnblock(true))
+      el.play().catch(() => {
+        callLog.warn(LOG, `autoplay blocked for ${participantId} — waiting for user gesture`)
+        setNeedsUnblock(true)
+      })
     }
     for (const [participantId, el] of els) {
       if (remoteStreams.has(participantId)) continue

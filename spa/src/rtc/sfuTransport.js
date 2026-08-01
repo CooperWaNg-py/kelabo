@@ -2,6 +2,32 @@ import { rtc as rtcApi } from '../api'
 import { withRetry, isFatal } from './retry.js'
 import { missingPulls, PULL_GRACE_MS } from './reconcile.js'
 import { hasTurnServers } from './recovery.js'
+import { callLog } from './callLog.js'
+
+const LOG = 'sfu'
+
+/**
+ * Which candidate pair ICE selected — on a network that needs the relay, a
+ * "connected" pair that is host/srflx-to-srflx tells a different story than a
+ * relayed one. Logged once, when the connection comes up.
+ */
+async function logSelectedPair(pc) {
+  try {
+    const stats = await pc.getStats()
+    let pair = null
+    for (const r of stats.values()) {
+      if (r.type === 'transport' && r.selectedCandidatePairId) pair = stats.get(r.selectedCandidatePairId)
+    }
+    if (!pair) {
+      for (const r of stats.values()) {
+        if (r.type === 'candidate-pair' && r.state === 'succeeded' && r.nominated) { pair = r; break }
+      }
+    }
+    if (!pair) return
+    const local = stats.get(pair.localCandidateId)
+    callLog.info(LOG, 'selected pair', { local: local?.candidateType, protocol: local?.protocol })
+  } catch {}
+}
 
 // Cloudflare Realtime SFU transport.
 //
@@ -73,6 +99,7 @@ function waitForIceGathering(pc, wantRelay = false) {
     const onCandidate = ev => {
       const c = ev.candidate
       if (!c) return
+      callLog.debug(LOG, 'ice candidate', { type: c.type, protocol: c.protocol })
       if (c.type === 'relay' || / typ relay(\s|$)/.test(c.candidate ?? '')) {
         relaySeen = true
         if (softDeadlinePassed) finish()
@@ -137,6 +164,30 @@ function fatal(err) {
   return err
 }
 
+/**
+ * The m-sections of an SDP, without the SDP. Raw SDP stays out of the log —
+ * it carries ICE credentials and local addresses — but a mid/kind/direction/
+ * codec/fmtp listing is exactly what "the SFU's answer does not fit our
+ * offer" needs for a diagnosis: a payload-type collision or an fmtp mismatch
+ * is visible here and nowhere else.
+ */
+function summarizeSdp(sdp) {
+  const sections = []
+  let cur = null
+  for (const line of String(sdp ?? '').split('\r\n')) {
+    if (line.startsWith('m=')) {
+      cur = { mid: '', kind: line.split(' ')[0].slice(2), dir: '', codecs: [], fmtp: [] }
+      sections.push(cur)
+    } else if (cur) {
+      if (line.startsWith('a=mid:')) cur.mid = line.slice(6)
+      else if (line === 'a=sendonly' || line === 'a=recvonly' || line === 'a=sendrecv' || line === 'a=inactive') cur.dir = line.slice(2)
+      else if (line.startsWith('a=rtpmap:')) cur.codecs.push(line.slice(9))
+      else if (line.startsWith('a=fmtp:')) cur.fmtp.push(line.slice(7))
+    }
+  }
+  return sections
+}
+
 export function createSfuTransport({ kelaboId, iceServers, onRemoteTrack, onStateChange, onError, onFatal }) {
   const pc = new RTCPeerConnection({ iceServers, bundlePolicy: 'max-bundle' })
   // trackKey ("<participantId>/<kind>") -> { mid, live, lastAt }.
@@ -193,20 +244,31 @@ export function createSfuTransport({ kelaboId, iceServers, onRemoteTrack, onStat
   function report(err) {
     if (isFatal(err) && !died && !closed) {
       died = true
+      callLog.error(LOG, 'fatal — session reported dead', err)
       onFatal?.(err)
       return
     }
+    callLog.warn(LOG, 'operation failed', err)
     onError?.(err)
   }
 
   // One PeerConnection carries every peer's media here, so its state applies to
   // all of them — unlike mesh, where each peer has its own.
   pc.addEventListener('connectionstatechange', () => {
+    callLog.info(LOG, `connection: ${pc.connectionState}`)
+    if (pc.connectionState === 'connected') logSelectedPair(pc)
     onStateChange?.(null, pc.connectionState)
     if (pc.connectionState === 'failed') recoverConnection('connection_failed')
   })
   pc.addEventListener('iceconnectionstatechange', () => {
+    callLog.info(LOG, `ice connection: ${pc.iceConnectionState}`)
     if (pc.iceConnectionState === 'failed') recoverConnection('ice_failed')
+  })
+  pc.addEventListener('icegatheringstatechange', () => {
+    callLog.debug(LOG, `ice gathering: ${pc.iceGatheringState}`)
+  })
+  pc.addEventListener('signalingstatechange', () => {
+    callLog.debug(LOG, `signalling: ${pc.signalingState}`)
   })
 
   /**
@@ -225,6 +287,7 @@ export function createSfuTransport({ kelaboId, iceServers, onRemoteTrack, onStat
   function recoverConnection(reason) {
     if (closed || died || recovering || !sessionReady) return
     recovering = true
+    callLog.warn(LOG, `recovering connection (${reason}) — ICE restart`)
     onError?.(new Error(reason))
     run(async () => {
       try {
@@ -248,6 +311,7 @@ export function createSfuTransport({ kelaboId, iceServers, onRemoteTrack, onStat
         if (!(await waitForConnected(pc, ICE_RESTART_TIMEOUT_MS))) {
           throw fatal(new Error('sfu_recover_failed'))
         }
+        callLog.info(LOG, 'connection recovered')
       } catch (err) {
         // Whatever went wrong — the SFU refusing the restart offer included —
         // the session is not coming back this way. Escalate to the rebuild.
@@ -282,6 +346,7 @@ export function createSfuTransport({ kelaboId, iceServers, onRemoteTrack, onStat
       // every tile in the kelabo sat on "connecting" while the SFU did
       // everything right. Holding the track costs one map entry and makes the
       // guarantee unnecessary.
+      callLog.debug(LOG, 'track arrived before its pull recorded a mid — held', { mid: String(mid), kind: ev.track.kind })
       orphaned.set(String(mid), ev)
       return
     }
@@ -290,7 +355,12 @@ export function createSfuTransport({ kelaboId, iceServers, onRemoteTrack, onStat
 
   /** Attach an arrived track to the subscription that asked for it. */
   function adopt([key, value], ev) {
+    // The same track can surface twice — once held as an orphan when it beat
+    // its pull's mid into the map, once from the `track` event the pull's own
+    // answer then fires. Adopting it twice double-reports upstream.
+    if (value.live && value.track === ev.track) return
     const [participantId, kind] = key.split('/')
+    callLog.info(LOG, `remote track live: ${participantId}/${kind}`, { mid: String(ev.transceiver?.mid ?? '') })
     value.live = true
     value.track = ev.track
     // A track that ends has to stop counting as live or the reconciler will
@@ -335,6 +405,7 @@ export function createSfuTransport({ kelaboId, iceServers, onRemoteTrack, onStat
   async function applySignal(res) {
     const desc = res?.sessionDescription
     if (!desc?.type) return
+    callLog.debug(LOG, `apply ${desc.type}`, { sdpBytes: desc.sdp?.length ?? 0, signalling: pc.signalingState })
     try {
       if (desc.type === 'answer') {
         // Only while we are the one waiting for it. The SFU repeats the current
@@ -351,6 +422,7 @@ export function createSfuTransport({ kelaboId, iceServers, onRemoteTrack, onStat
         rtcApi.sfuRenegotiate(kelaboId, { type: 'answer', sdp: pc.localDescription.sdp }),
       )
     } catch (err) {
+      callLog.error(LOG, `could not apply ${desc.type}`, { err: err?.message, m: summarizeSdp(desc.sdp) })
       throw fatal(err)
     }
   }
@@ -386,6 +458,7 @@ export function createSfuTransport({ kelaboId, iceServers, onRemoteTrack, onStat
    */
   async function ensureSession() {
     if (sessionReady) return
+    callLog.info(LOG, 'creating SFU session')
     // Once ever, even across failed attempts: each invocation past this guard
     // used to add another recvonly m-line, so a session POST that failed on a
     // bad network bloated every future offer.
@@ -404,7 +477,9 @@ export function createSfuTransport({ kelaboId, iceServers, onRemoteTrack, onStat
     // first. If it never connects, that is a fatal condition for the whole
     // transport, not something to paper over here.
     sessionReady = true
+    callLog.info(LOG, 'SFU session created — waiting for connect')
     if (!(await waitForConnected(pc))) throw fatal(new Error('sfu_connect_failed'))
+    callLog.info(LOG, 'SFU session connected')
   }
 
   /**
@@ -436,6 +511,7 @@ export function createSfuTransport({ kelaboId, iceServers, onRemoteTrack, onStat
     if (!track || publishing.has(kind)) return
     publishing.add(kind)
     publishedAt.set(kind, Date.now())
+    callLog.info(LOG, `publishing ${kind}`)
     return run(async () => {
       let transceiver
       try {
@@ -445,6 +521,7 @@ export function createSfuTransport({ kelaboId, iceServers, onRemoteTrack, onStat
         published.set(kind, transceiver.sender)
         await pc.setLocalDescription(await pc.createOffer())
         await waitForIceGathering(pc, wantRelay())
+        callLog.debug(LOG, `offer: publish ${kind}`, { m: summarizeSdp(pc.localDescription.sdp) })
         const res = await withRetry(() =>
           rtcApi.sfuTracks(kelaboId, {
             sessionDescription: { type: 'offer', sdp: pc.localDescription.sdp },
@@ -454,6 +531,7 @@ export function createSfuTransport({ kelaboId, iceServers, onRemoteTrack, onStat
         await applySignal(res)
         const err = trackError(res)
         if (err) throw err
+        callLog.info(LOG, `published ${kind}`, { mid: String(transceiver.mid ?? '') })
         // What was ASKED FOR may have moved while this publish was in flight —
         // a fast camera-off, or a device switch, lands in `desired` and then
         // hit the `publishing.has(kind)` early return above. The publish
@@ -478,6 +556,7 @@ export function createSfuTransport({ kelaboId, iceServers, onRemoteTrack, onStat
         // a silent no-op on a track the SFU never accepted, and leaving the
         // transceiver would put a dead m-line in every future offer. `desired`
         // still holds the track, so the reconciler will try again.
+        callLog.error(LOG, `publish ${kind} failed`, err)
         published.delete(kind)
         if (transceiver) {
           try { transceiver.stop?.() } catch {}
@@ -503,6 +582,7 @@ export function createSfuTransport({ kelaboId, iceServers, onRemoteTrack, onStat
     // Reserve the slot before awaiting so a duplicate roster event cannot start
     // a second pull for the same track.
     pulled.set(key, { mid: null, live: false, lastAt: Date.now() })
+    callLog.info(LOG, `pulling ${key}`)
     return run(async () => {
       if (closed) return
       try {
@@ -534,6 +614,7 @@ export function createSfuTransport({ kelaboId, iceServers, onRemoteTrack, onStat
         const entry = pulled.get(key)
         if (entry && mid) {
           entry.mid = mid
+          callLog.info(LOG, `pull accepted: ${key}`, { mid: String(mid) })
           const early = orphaned.get(String(mid))
           if (early) {
             orphaned.delete(String(mid))
@@ -555,6 +636,7 @@ export function createSfuTransport({ kelaboId, iceServers, onRemoteTrack, onStat
         // Drop the reservation so `reconcile` picks it up again rather than
         // seeing a slot that looks taken. One bad round trip should cost a few
         // seconds of that person's audio, not the whole kelabo's.
+        callLog.error(LOG, `pull ${key} failed`, err)
         pulled.delete(key)
         report(err)
       }
@@ -595,6 +677,7 @@ export function createSfuTransport({ kelaboId, iceServers, onRemoteTrack, onStat
     }
 
     const missing = missingPulls({ peers, pulled, now: Date.now(), graceMs: PULL_GRACE_MS })
+    if (missing.length) callLog.info(LOG, `reconcile: ${missing.length} pull(s) to retry`, { missing: missing.map(m => `${m.participantId}/${m.kind}`) })
     for (const m of missing) {
       pulled.delete(`${m.participantId}/${m.kind}`)
       if (m.staleMid != null) {
@@ -641,6 +724,7 @@ export function createSfuTransport({ kelaboId, iceServers, onRemoteTrack, onStat
 
   function close() {
     closed = true
+    callLog.info(LOG, 'transport closed')
     pulled.clear()
     published.clear()
     orphaned.clear()

@@ -104,7 +104,13 @@ export function JoinCodeField({
         <div className="pair-error"><Banner kind="danger">{error}</Banner></div>
       )}
 
-      <Button variant="primary" block onClick={() => submit(code)} disabled={!complete || state === 'checking'}>
+      <Button
+        variant="primary"
+        block
+        style={{ marginTop: 'var(--space-4)' }}
+        onClick={() => submit(code)}
+        disabled={!complete || state === 'checking'}
+      >
         {state === 'checking' ? 'Checking…' : submitLabel}
       </Button>
 

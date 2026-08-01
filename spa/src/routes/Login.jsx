@@ -165,13 +165,13 @@ export default function Login() {
         {step === 'email' && (
           <section className="card card-pad anim-in">
             <h1 className="page-title">Sign in</h1>
-            {/* Work email leads: on a self-hosted deployment the business
+            {/* Corp email leads: on a self-hosted deployment the business
                 address IS the identity — the tenant, the directory, presence.
                 Social sign-in still works, but as the fallback, below.
                 The domain itself is named once only, in the note under the
                 button, beside the field where it is actually typed — saying it
-                here as well would make the card repeat itself. */}
-            <p className="page-sub">Use your work email — we'll send you a sign-in code.</p>
+                here as well made the card repeat itself. */}
+            <p className="page-sub">Use your {config.orgName || 'corp'} email to receive a sign-in code.</p>
 
             {error && <Banner kind="danger">{error}</Banner>}
 

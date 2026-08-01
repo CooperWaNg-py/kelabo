@@ -124,6 +124,11 @@ guests.
   decided by `spa/src/emailDomain.js` — pure, so `spa/test/emailDomain.mjs` pins
   that trap and the wrong-domain refusal under plain node. Empty config = open
   registration, and every string falls back to the generic wording.
+- **The deployment names itself.** `config.organizationName` → `VITE_ORG_NAME` →
+  "Use your **Acme Corp** email to receive a sign-in code", and `document.title`
+  becomes `Acme Corp · kelabo` (set once in `main.jsx`, not per route — it is a
+  build-time constant). Cosmetic only: it is never consulted about who may sign
+  in. Unset leaves "Use your corp email…" and the plain `kelabo` tab title.
 - **No password field anywhere.**
 
 **Silent refresh (no re-login every open):** on app load, if `/me` returns 401 the

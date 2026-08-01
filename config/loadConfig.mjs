@@ -164,9 +164,19 @@ export function loadConfig(env,   configPath = join(here, "kelabo.json")) {
     ...(block.joinCode ?? {}),
   };
 
+  // What this deployment calls itself, shown to people and used for nothing
+  // else: the sign-in sentence and the browser tab. Strictly cosmetic —
+  // tenancy is the verified email domain (`allowedEmailDomain`), and this must
+  // never become a second source of truth for it. A deployment may well call
+  // itself "Acme" while admitting acme-corp.com. Normalised here so no
+  // consumer has to decide what a missing or padded value means; empty is
+  // fine and falls back to generic wording.
+  const organizationName = String(block.organizationName ?? "").trim();
+
   return {
     ...block,
     env,
+    organizationName,
     app: raw.app,
     rtcApiBase,
     rtc,

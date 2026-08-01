@@ -15,6 +15,7 @@
         "gateway": "gw.dev"
       },
       "allowedEmailDomain": "example.com",
+      "organizationName": "Example Corp",
       "secrets": {
         "deepgram": "kelabo/dev/deepgram",
         "llm": "kelabo/dev/llm",
@@ -97,6 +98,7 @@
         "gateway": "staging-gw"
       },
       "allowedEmailDomain": "example.com",
+      "organizationName": "Example Corp",
       "secrets": {
         "deepgram": "kelabo/staging/deepgram",
         "llm": "kelabo/staging/llm",
@@ -174,6 +176,7 @@
         "gateway": "gw"
       },
       "allowedEmailDomain": "example.com",
+      "organizationName": "Example Corp",
       "secrets": {
         "deepgram": "kelabo/prod/deepgram",
         "llm": "kelabo/prod/llm",

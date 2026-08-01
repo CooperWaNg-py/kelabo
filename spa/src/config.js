@@ -11,4 +11,8 @@ export const config = {
   // the browser knows it only so the sign-in page can name it and stop asking
   // people to type what is already fixed. Empty = open registration.
   allowedEmailDomain: import.meta.env.VITE_ALLOWED_EMAIL_DOMAIN || '',
+  // What this deployment calls itself, for the sign-in sentence and the tab
+  // title. Cosmetic only: it never decides who may sign in — allowedEmailDomain
+  // does, and the server is the authority on that. Empty = generic wording.
+  orgName: (import.meta.env.VITE_ORG_NAME || '').trim(),
 }

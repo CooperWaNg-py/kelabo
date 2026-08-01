@@ -8,7 +8,7 @@ import * as targets from "aws-cdk-lib/aws-route53-targets";
 export class PortalCloudFrontStack extends Stack {
   constructor(scope, id, props) {
     super(scope, id, props);
-    const { cfg, zone, portalCert, httpApi } = props;
+    const { cfg, zone, portalCert, httpApi, webAclArn } = props;
 
     this.bucket = new s3.Bucket(this, "PortalBucket", {
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
@@ -59,6 +59,11 @@ export class PortalCloudFrontStack extends Stack {
       additionalBehaviors: {
         "/api*": apiBehavior,
       },
+      // Undefined unless `allowIps` is set, in which case it is a CLOUDFRONT
+      // WebACL from us-east-1 (waf-stack.js) that blocks by default. Passing
+      // undefined is what an open deployment does, and CloudFront treats that
+      // as no ACL at all.
+      ...(webAclArn ? { webAclId: webAclArn } : {}),
     });
 
     // The portal's own name plus every alias (e.g. the bare apex beside www) —

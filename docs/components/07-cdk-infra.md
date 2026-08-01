@@ -81,7 +81,39 @@ home region + `us-east-1` (CloudFront ACM), via `crossRegionReferences: true`.
 | **LambdaStack** | REST API Lambda (Node20); IAM (DynamoDB RW incl. refresh, SES send, Secrets read incl. social OIDC); **no `transcribe:*`** | control plane only |
 | **ApiGatewayStack** | HTTP API `/{proxy+}` → Lambda | no JWT authorizer |
 | **GatewayEcsStack** | ALB + Fargate service (`desiredCount:1`, sized from `config.gateway` — **0.5 vCPU / 1 GB** by default, configurable), `/health`, ALB idle 240s, DockerImageAsset from `gateway/`; **the server-agent worker runs in this task** | the one ECS |
-| **PortalCloudFrontStack** | S3 (OAC) + CloudFront; a single **`/api*` behavior** to the HTTP API with a CloudFront function stripping the `/api` prefix; SPA-fallback function rewrites non-dotted URIs to `/index.html`; deploy `spa/dist`; A-record portal subdomain | |
+| **PortalCloudFrontStack** | S3 (OAC) + CloudFront; a single **`/api*` behavior** to the HTTP API with a CloudFront function stripping the `/api` prefix; SPA-fallback function rewrites non-dotted URIs to `/index.html`; deploy `spa/dist`; A-record portal subdomain | `webAclId` when `allowIps` is set |
+| **WafStack (us-east-1)** | CLOUDFRONT-scope WebACL, default **block**, one allow rule over an IPv4 and an IPv6 `IPSet` | only when `allowIps` is non-empty |
+
+### `allowIps` — closing a deployment to a list of sources
+
+Empty (the default) is open, and nothing below is synthesized. Non-empty closes
+the **whole** deployment, which takes two different mechanisms because the
+browser reaches CloudFront and the Gateway ALB by separate names:
+
+- **CloudFront** — a WAF WebACL, because a distribution has no security group.
+  CLOUDFRONT scope exists only in us-east-1, so it is its own stack and the ARN
+  crosses regions on the same `crossRegionReferences` path as the portal cert.
+- **Gateway ALB** — a security group. `openListener: false` suppresses the
+  pattern's own `0.0.0.0/0` rules, which matters: a security group is a union,
+  so an open rule beside an allowlist is just an open rule. Port 80 is listed
+  as well as 443 only because `redirectHTTP` opens it.
+
+Both families are carried. CloudFront answers on IPv6 by default, so a list
+holding only someone's IPv4 address blocks them the moment their browser
+prefers IPv6 — and that reads as an outage, not as a rule.
+
+`make allow-ip` / `allow-list` / `allow-rm` (`scripts/allowlist.sh`) write
+`config/kelabo.json` *and* edit the IPSets and the security group live, so a new
+address works in seconds and the next deploy re-asserts the same thing. The two
+exceptions are the first lock and the last unlock: those add or remove a stack
+and the ALB's open rule, which only a deploy can do, and the script says so
+instead of appearing to succeed.
+
+**Still open, deliberately noted:** the API Gateway's own
+`https://<id>.execute-api.<region>.amazonaws.com` URL bypasses CloudFront and
+therefore the WebACL. AWS WAF does not support HTTP APIs (only REST and
+WebSocket), so closing it needs a CloudFront origin secret the Lambda verifies —
+tracked separately.
 
 The Gateway ECS uses the **default VPC, public subnets, no NAT** (cost),
 `CircuitBreaker({rollback:true})`.

@@ -52,6 +52,23 @@ export function loadConfig(env,   configPath = join(here, "kelabo.json")) {
     contacts: `kelabo-${block.endpoint}-contacts`,
   };
 
+  // Close the whole deployment to everything but a list of source addresses —
+  // a corporate egress range while a pilot runs, the team's addresses while an
+  // environment is under test. Empty (the default) is open, which is what every
+  // kelabo.json written before this knob existed means.
+  //
+  // It has to cover the WHOLE deployment or it covers nothing: the browser
+  // reaches CloudFront and the Gateway ALB by separate paths on separate names,
+  // so restricting one only moves the door. Both families are kept because
+  // CloudFront answers on IPv6 by default — an allowlist holding only someone's
+  // IPv4 address blocks them the moment their browser prefers IPv6, and that
+  // failure looks like an outage, not like a rule.
+  const allowIps = (Array.isArray(block.allowIps) ? block.allowIps : [])
+    .map((s) => String(s).trim())
+    .filter(Boolean);
+  const allowIpsV4 = allowIps.filter((c) => !c.includes(":"));
+  const allowIpsV6 = allowIps.filter((c) => c.includes(":"));
+
   // SES sandbox status, sending quota, reputation and the bounce/complaint
   // suppression list are all account+**region** scoped, and nothing inside an
   // identity separates two domains that share one — configuration sets give
@@ -139,6 +156,9 @@ export function loadConfig(env,   configPath = join(here, "kelabo.json")) {
     rtcApiBase,
     rtc,
     ses,
+    allowIps,
+    allowIpsV4,
+    allowIpsV6,
     contacts,
     auth,
     joinCode,

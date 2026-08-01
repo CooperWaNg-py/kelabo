@@ -49,6 +49,7 @@
         "diarizeModel": "latest",
         "tokenTtlSeconds": 60
       },
+      "allowIps": [],
       "ses": {
         "fromAddress": "otp@example.com",
         "hostedZone": {

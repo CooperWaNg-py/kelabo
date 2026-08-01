@@ -9,6 +9,7 @@ import { LambdaStack } from "../lib/lambda-stack.js";
 import { ApiGatewayStack } from "../lib/apigateway-stack.js";
 import { GatewayEcsStack } from "../lib/gateway-ecs-stack.js";
 import { PortalCloudFrontStack } from "../lib/portal-cloudfront-stack.js";
+import { WafStack } from "../lib/waf-stack.js";
 
 const app = new App();
 const envName = app.node.tryGetContext("env") ?? "dev";
@@ -97,6 +98,15 @@ const gateway = new GatewayEcsStack(app, `${prefix}-gateway`, {
 gateway.addDependency(ddb);
 gateway.addDependency(cert);
 
+// `allowIps` closes the deployment to a list of source addresses. Only the
+// CloudFront half needs a stack of its own, and only in us-east-1, because that
+// is the one region a CLOUDFRONT-scope WebACL exists in. Empty list, no stack,
+// no charge — an open deployment synthesizes exactly what it did before.
+let waf;
+if (cfg.allowIps.length) {
+  waf = new WafStack(app, `${prefix}-waf`, { ...synthProps, env: usEast1Env, cfg });
+}
+
 const portal = new PortalCloudFrontStack(app, `${prefix}-portal`, {
   ...synthProps,
   env: homeEnv,
@@ -105,6 +115,8 @@ const portal = new PortalCloudFrontStack(app, `${prefix}-portal`, {
   zone: dns.zone,
   portalCert: certUse1.portalCert,
   httpApi: api.httpApi,
+  webAclArn: waf?.webAclArn,
 });
+if (waf) portal.addDependency(waf);
 portal.addDependency(api);
 portal.addDependency(certUse1);

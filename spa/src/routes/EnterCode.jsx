@@ -46,9 +46,11 @@ export default function EnterCode() {
                 {identity ? 'Back home' : 'Sign in instead'}
               </Button>
             </div>
-            <p className="form-note">
-              <Icon name="clock" size={14} /> Codes expire two minutes after they are
-              made. If yours has, ask for another.
+            {/* The only form-note with an icon in it, and `.icon` is
+                display:block, which would drop the clock onto its own line —
+                so the note itself carries the icon-with-text layout. */}
+            <p className="form-note" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 'var(--space-2)' }}>
+              <Icon name="clock" size={14} /> Expires in two minutes. Ask for another.
             </p>
           </JoinCodeField>
         </section>

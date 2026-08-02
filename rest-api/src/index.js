@@ -41,7 +41,7 @@ import { createHuddle } from "./huddle.js";
 import { createJoin } from "./join.js";
 import { createJoinCodes } from "./joinCode.js";
 import { createRecords } from "./records.js";
-import { createDeepgramToken } from "./deepgramToken.js";
+import { createSttToken } from "./stt/index.js";
 import { createInternal } from "./internal.js";
 import { createAgent } from "./agent.js";
 import { parseCookies, readCookie, mintCookie, serializeCookie } from "./cookies.js";
@@ -96,7 +96,7 @@ function htmlErrorPage(status, code) {
 }
 
 export function createApp(deps) {
-  const { config, sessions, auth, kelabos, join, joinCodes, records, deepgramToken, db, secrets, mcpOauth, scheduling, contacts, huddle, agent } = deps;
+  const { config, sessions, auth, kelabos, join, joinCodes, records, sttToken, db, secrets, mcpOauth, scheduling, contacts, huddle, agent } = deps;
 
   /** `Authorization: Bearer <token>` — the agent bridge's only credential. */
   function bearerToken(req) {
@@ -818,7 +818,7 @@ export function createApp(deps) {
           language: typeof req.body?.language === "string" ? req.body.language : undefined,
           diarize: req.body?.diarize === true,
         };
-        return { status: 200, body: await deepgramToken.mint({ kelaboId: req.params.id, participant, opts }) };
+        return { status: 200, body: await sttToken.mint({ kelaboId: req.params.id, participant, opts }) };
       },
     },
   ].map((r) => ({ ...r, ...compile(r.pattern) }));
@@ -972,9 +972,9 @@ export async function handler(event, context) {
     const join = createJoin({ config, db, secrets });
     const joinCodes = createJoinCodes({ config, db });
     const records = createRecords({ config, db });
-    const deepgramToken = createDeepgramToken({ config, db, secrets });
+    const sttToken = createSttToken({ config, db, secrets });
     const agent = createAgent({ config, db, secrets });
-    defaultApp = createApp({ config, db, secrets, ses, sessions, auth, kelabos, join, joinCodes, records, deepgramToken, internal, mcpOauth, scheduling, contacts, huddle, agent });
+    defaultApp = createApp({ config, db, secrets, ses, sessions, auth, kelabos, join, joinCodes, records, sttToken, internal, mcpOauth, scheduling, contacts, huddle, agent });
   }
   return defaultApp(event, context);
 }

@@ -43,9 +43,9 @@ export const captionPostSchema = z.object({
   // flags at the far end is how one message ended up rendered twice.
   // `turnComplete`/`ephemeral` below are the pre-`kind` spelling, kept so an
   // older client keeps working.
-  //   tail   – Deepgram's current guess at the words being spoken. Replaces the
+  //   tail   – the provider's current guess at the words being spoken. Replaces the
   //            previous guess; relayed for liveness only.
-  //   delta  – words Deepgram confirmed. Appended; relayed for liveness only.
+  //   delta  – words the provider confirmed. Appended; relayed for liveness only.
   //   sealed – the whole, immutable message. Persisted and handed to the agent.
   kind: z.enum(["tail", "delta", "sealed"]).optional(),
   // Position of a delta within its message, so redelivery is detectable.
@@ -68,7 +68,7 @@ export const captionPostSchema = z.object({
   // messages. The sealed post that follows does the persisting and dispatching.
   ephemeral: z.boolean().optional(),
   human: z.boolean().optional(),
-  // How the words came to exist. "speech" is Deepgram's transcription of a
+  // How the words came to exist. "speech" is the STT provider's transcription of a
   // microphone; "typed" is a participant who wrote the message in the room's
   // transcript panel. Both are things a person said to the kelabo and are
   // handled identically downstream — persisted, fanned out to the room, handed
@@ -615,4 +615,23 @@ export const modelConfigSchema = z.object({
   provider: z.string(),
   model: z.string(),
   smallModel: z.string(),
+});
+
+// --- speech-to-text session (the STT provider boundary) ---------------------
+
+// What POST /kelabos/:id/stt-token returns. Validated on the way OUT, not in:
+// the risk here is not a malicious client but a provider module that returns
+// the wrong shape, and the symptom of that is a browser opening a socket to
+// nowhere — no error at any level, no transcript, nothing to look at. Failing
+// in the Lambda instead makes a broken provider a 502 with a stack trace.
+//
+// `params` is unvalidated by design: what is in it belongs entirely to the
+// provider, and enumerating the keys here would put every provider's wire
+// format back into shared code.
+export const sttSessionSchema = z.object({
+  provider: z.string().min(1).max(64),
+  url: z.string().url().startsWith("wss://"),
+  token: z.string().min(1),
+  expiresInSeconds: z.number().int().positive(),
+  params: z.record(z.unknown()),
 });

@@ -122,8 +122,9 @@ export class GatewayEcsStack extends Stack {
           KELABO_LLM_MODEL: cfg.llm.model,
           KELABO_LLM_SMALL_MODEL: cfg.llm.smallModel,
           ...(cfg.llm.baseUrl ? { KELABO_OPENAI_BASE_URL: cfg.llm.baseUrl } : {}),
-          KELABO_DEEPGRAM_MODEL: cfg.deepgram.model,
-          KELABO_DEEPGRAM_DIARIZE_MODEL: cfg.deepgram.diarizeModel,
+          // (No STT settings here. The gateway never speaks to a transcription
+          // provider — it only ever sees text captions — and the two vars that
+          // used to be set were read by nothing.)
           KELABO_RETENTION_DAYS: String(cfg.retentionDays),
           KELABO_AGENT_MAX_CONCURRENT_RUNS: String(cfg.gateway.agent.maxConcurrentRuns),
           KELABO_AGENT_MAX_DISPATCH_PER_TURN: String(cfg.gateway.agent.maxDispatchPerTurn ?? 3),

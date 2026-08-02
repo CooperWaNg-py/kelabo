@@ -5,7 +5,7 @@
 //
 // Credentials live in one Secrets Manager entry and never leave the Gateway —
 // the browser only ever sees short-lived ICE credentials and SDP. `fetchImpl` is
-// injected so tests run offline, the same seam rest-api/src/deepgramToken.js uses.
+// injected so tests run offline, the same seam rest-api/src/stt/index.js uses.
 
 const REQUEST_TIMEOUT_MS = 10_000;
 

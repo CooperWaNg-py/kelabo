@@ -133,12 +133,17 @@ export function createKelabos({ config, db, internal, secrets }) {
       // runtime failures of an `on` capability are the client's `degraded`
       // path and are not represented here.
       const [stt, assistant, rtc] = await Promise.all([
-        providerOn(config.secrets.deepgram),
+        providerOn(config.secrets.stt),
         providerOn(config.secrets.llm),
         providerOn(config.secrets.cloudflareRealtime),
       ]);
       body.capabilities = {
-        stt: { on: stt },
+        // `provider` so the client can pick its defaults before it has minted
+        // anything — silence skipping is a saving on a provider that bills the
+        // audio it receives and a liability on one that bills the stream. No
+        // new disclosure: the same name is on every session and on the
+        // connection light.
+        stt: { on: stt, ...(stt ? { provider: config.stt.provider } : {}) },
         assistant: { on: assistant },
         video: { on: !!config.rtc.video },
         rtc: { on: rtc, mode: body.rtcMode },

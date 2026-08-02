@@ -48,7 +48,7 @@ export class LambdaStack extends Stack {
         KELABO_TABLE_CONTACTS: names.contacts,
         KELABO_ARCHIVE_BUCKET: cfg.archiveBucket,
         KELABO_ARCHIVE_KEY_PREFIX: cfg.archiveKeyPrefix,
-        KELABO_SECRET_DEEPGRAM: cfg.secrets.deepgram,
+        KELABO_SECRET_STT: cfg.secrets.stt,
         // Existence-probed only (capability map, docs 19 §3) — the API never
         // reads these values; see the DescribeSecret-only policy below.
         KELABO_SECRET_LLM: cfg.secrets.llm,
@@ -85,10 +85,12 @@ export class LambdaStack extends Stack {
         KELABO_JOIN_CODE_MINT_PER_KELABO_PER_HOUR: String(cfg.joinCode.mintPerKelaboPerHour),
         KELABO_JOIN_CODE_REDEEM_PER_IP_WINDOW_SECONDS: String(cfg.joinCode.redeemPerIpWindowSeconds),
         KELABO_JOIN_CODE_REDEEM_PER_IP_MAX_REQUESTS: String(cfg.joinCode.redeemPerIpMaxRequests),
-        KELABO_DEEPGRAM_MODEL: cfg.deepgram.model,
-        KELABO_DEEPGRAM_LANGUAGE: cfg.deepgram.language,
-        KELABO_DEEPGRAM_DIARIZE_MODEL: cfg.deepgram.diarizeModel,
-        KELABO_DEEPGRAM_TOKEN_TTL_SECONDS: String(cfg.deepgram.tokenTtlSeconds),
+        KELABO_STT_PROVIDER: cfg.stt.provider,
+        KELABO_STT_LANGUAGE: cfg.stt.language,
+        // One var, not one per provider per setting: the keys inside belong to
+        // the providers, so naming them here would mean adding a provider edits
+        // this stack and rolls every deployed task definition.
+        KELABO_STT_PROVIDERS: JSON.stringify(cfg.stt.providers || {}),
         // The control plane only stamps a new kelabo's transport and reports it
         // back; it holds no Cloudflare credentials and does no signalling.
         KELABO_RTC_DEFAULT_MODE: cfg.rtc.defaultMode,
@@ -145,7 +147,7 @@ export class LambdaStack extends Stack {
     );
 
     for (const [id, secretName] of Object.entries({
-      Deepgram: cfg.secrets.deepgram,
+      Stt: cfg.secrets.stt,
       CookieKey: cfg.secrets.cookieSigningKey,
       OidcGoogle: cfg.secrets.oidcGoogle,
       OidcApple: cfg.secrets.oidcApple,

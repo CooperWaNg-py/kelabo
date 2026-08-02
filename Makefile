@@ -85,18 +85,54 @@ origin-secret: ## create the CloudFront->API shared secret (generated, idempoten
 	  || (aws secretsmanager create-secret --name kelabo/$(env)/api-origin --secret-string "$$(openssl rand -hex 32)" --region $(REGION) --tags Key=app,Value=kelabo Key=endpoint,Value=$(env) >/dev/null \
 	      && echo "created kelabo/$(env)/api-origin")
 
-secrets: origin-secret ## create/update secrets (needs DEEPGRAM_API_KEY=.. LLM_API_KEY=..)
-	@test -n "$(DEEPGRAM_API_KEY)" || (echo "DEEPGRAM_API_KEY required"; exit 1)
+secrets: origin-secret ## create/update secrets (needs STT_PROVIDER=.. STT_API_KEY=.. LLM_API_KEY=..)
+	@test -n "$(STT_PROVIDER)" || (echo "STT_PROVIDER required (the id in config stt.provider, e.g. deepgram)"; exit 1)
+	@test -n "$(STT_API_KEY)" || (echo "STT_API_KEY required"; exit 1)
 	@test -n "$(LLM_API_KEY)" || (echo "LLM_API_KEY required"; exit 1)
 	aws secretsmanager describe-secret --secret-id kelabo/$(env)/cookie-key --region $(REGION) >/dev/null 2>&1 \
 	  || aws secretsmanager create-secret --name kelabo/$(env)/cookie-key --secret-string "$$(openssl rand -hex 48)" --region $(REGION) --tags Key=app,Value=kelabo Key=endpoint,Value=$(env)
-	aws secretsmanager describe-secret --secret-id kelabo/$(env)/deepgram --region $(REGION) >/dev/null 2>&1 \
-	  && aws secretsmanager put-secret-value --secret-id kelabo/$(env)/deepgram --secret-string '{"apiKey":"$(DEEPGRAM_API_KEY)"}' --region $(REGION) \
-	  || aws secretsmanager create-secret --name kelabo/$(env)/deepgram --secret-string '{"apiKey":"$(DEEPGRAM_API_KEY)"}' --region $(REGION) --tags Key=app,Value=kelabo Key=endpoint,Value=$(env)
+	$(MAKE) stt-key env=$(env) provider=$(STT_PROVIDER) key=$(STT_API_KEY)
 	aws secretsmanager describe-secret --secret-id kelabo/$(env)/llm --region $(REGION) >/dev/null 2>&1 \
 	  && aws secretsmanager put-secret-value --secret-id kelabo/$(env)/llm --secret-string '{"apiKey":"$(LLM_API_KEY)","provider":"deepseek"}' --region $(REGION) \
 	  || aws secretsmanager create-secret --name kelabo/$(env)/llm --secret-string '{"apiKey":"$(LLM_API_KEY)","provider":"deepseek"}' --region $(REGION) --tags Key=app,Value=kelabo Key=endpoint,Value=$(env)
 	@echo "secrets ready for env=$(env)"
+
+# One key for one transcription provider, MERGED into kelabo/<env>/stt rather
+# than replacing it. The secret holds a key per provider so that switching
+# provider — or rolling back after a switch — is a config change and a redeploy,
+# never a scramble to re-enter a credential:
+#
+#   { "deepgram": "…", "soniox": "…" }
+#
+# The Lambda reads whichever one `stt.provider` names (rest-api/src/secrets.js).
+stt-key: ## add/replace one provider's STT key (provider=deepgram key=..)
+	@test -n "$(provider)" || (echo "provider required, e.g. provider=deepgram"; exit 1)
+	@test -n "$(key)" || (echo "key required"; exit 1)
+	@command -v python3 >/dev/null || (echo "python3 required to merge the secret"; exit 1)
+	@existing=$$(aws secretsmanager get-secret-value --secret-id kelabo/$(env)/stt --region $(REGION) \
+	    --query SecretString --output text 2>/dev/null || echo '{}'); \
+	  merged=$$(python3 -c 'import json,sys; raw=(sys.argv[1] or "").strip() or "{}"; d=json.loads(raw); d=d if isinstance(d,dict) else {}; d[sys.argv[2]]=sys.argv[3]; print(json.dumps(d))' "$$existing" "$(provider)" "$(key)"); \
+	  aws secretsmanager describe-secret --secret-id kelabo/$(env)/stt --region $(REGION) >/dev/null 2>&1 \
+	    && aws secretsmanager put-secret-value --secret-id kelabo/$(env)/stt --secret-string "$$merged" --region $(REGION) >/dev/null \
+	    || aws secretsmanager create-secret --name kelabo/$(env)/stt --secret-string "$$merged" --region $(REGION) --tags Key=app,Value=kelabo Key=endpoint,Value=$(env) >/dev/null
+	@echo "stt key set for provider=$(provider) env=$(env)"
+
+# Migration for a deployment that predates the STT provider boundary, where the
+# key lived in a secret named after the provider (kelabo/<env>/deepgram). Copies
+# it into kelabo/<env>/stt under that provider's id, so the same credential keeps
+# working and nothing has to be re-entered from a vendor console.
+#
+# Run this BEFORE `make backend`: config now points the Lambda at the new secret,
+# and until it exists /stt-token answers stt_unavailable. Idempotent, and it
+# leaves the old secret alone — delete that by hand once the deploy is verified.
+stt-adopt: ## migrate kelabo/<env>/<provider> into kelabo/<env>/stt (provider=deepgram)
+	@test -n "$(provider)" || (echo "provider required, e.g. provider=deepgram"; exit 1)
+	@old=$$(aws secretsmanager get-secret-value --secret-id kelabo/$(env)/$(provider) --region $(REGION) \
+	    --query SecretString --output text 2>/dev/null) || (echo "kelabo/$(env)/$(provider) not found — nothing to adopt"; exit 1); \
+	  key=$$(python3 -c 'import json,sys; d=json.loads(sys.argv[1]); print(d.get("apiKey") or d.get("key") or d.get("value") or "")' "$$old"); \
+	  test -n "$$key" || (echo "no apiKey/key/value in kelabo/$(env)/$(provider)"; exit 1); \
+	  $(MAKE) --no-print-directory stt-key env=$(env) provider=$(provider) key="$$key"
+	@echo "adopted $(provider) into kelabo/$(env)/stt (old secret left in place)"
 
 # Kept out of `secrets` on purpose: conference audio is optional. Without this
 # secret the Gateway answers /rtc/* with rtc_unavailable and kelabos still run

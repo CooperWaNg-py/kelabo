@@ -60,6 +60,19 @@ function num(v, d) {
   return Number.isFinite(n) && v !== undefined && v !== "" ? n : d;
 }
 
+// A structured env var. Falls back rather than throwing: an unparseable value
+// should degrade one capability, not stop the Lambda from starting and take the
+// whole control plane with it.
+function parseJson(v, d) {
+  if (!v) return d;
+  try {
+    const parsed = JSON.parse(v);
+    return parsed && typeof parsed === "object" ? parsed : d;
+  } catch {
+    return d;
+  }
+}
+
 function fromEnv() {
   if (!process.env.KELABO_TABLE_KELABOS && !process.env.KELABO_ALLOWED_EMAIL_DOMAIN) return null;
   const env = process.env;
@@ -85,7 +98,7 @@ function fromEnv() {
     archiveBucket: env.KELABO_ARCHIVE_BUCKET,
     archiveKeyPrefix: env.KELABO_ARCHIVE_KEY_PREFIX || "archives",
     secrets: {
-      deepgram: env.KELABO_SECRET_DEEPGRAM,
+      stt: env.KELABO_SECRET_STT,
       cookieSigningKey: env.KELABO_SECRET_COOKIE_KEY,
       oidcGoogle: env.KELABO_SECRET_OIDC_GOOGLE,
       oidcApple: env.KELABO_SECRET_OIDC_APPLE,
@@ -106,11 +119,16 @@ function fromEnv() {
       agentTokenTtlDays: num(env.KELABO_AGENT_TOKEN_TTL_DAYS, DEFAULTS.agentTokenTtlDays),
       socialProviders: (env.KELABO_SOCIAL_PROVIDERS || "").split(",").map((s) => s.trim()).filter(Boolean),
     },
-    deepgram: {
-      model: env.KELABO_DEEPGRAM_MODEL || "nova-3",
-      language: env.KELABO_DEEPGRAM_LANGUAGE || "en",
-      diarizeModel: env.KELABO_DEEPGRAM_DIARIZE_MODEL || "latest",
-      tokenTtlSeconds: num(env.KELABO_DEEPGRAM_TOKEN_TTL_SECONDS, 60),
+    // Speech-to-text. `providers` arrives as one JSON blob rather than a var per
+    // provider per setting, because its keys belong to the providers and env
+    // vars cannot be enumerated without knowing them: `KELABO_STT_<ID>_MODEL`
+    // would mean adding a provider edits this file, `lambda-stack.js` and every
+    // deployed task definition. It is opaque here and stays opaque until a
+    // provider is handed its own block.
+    stt: {
+      provider: env.KELABO_STT_PROVIDER || "deepgram",
+      language: env.KELABO_STT_LANGUAGE || "en",
+      providers: parseJson(env.KELABO_STT_PROVIDERS, {}),
     },
     // `region` falls back to the Lambda's own region: an environment that never
     // moved its mail has no KELABO_SES_REGION, and the identity is where the
@@ -161,7 +179,7 @@ function fromLoadConfig(c) {
     archiveBucket: c.archiveBucket,
     archiveKeyPrefix: c.archiveKeyPrefix,
     secrets: {
-      deepgram: c.secrets.deepgram,
+      stt: c.secrets.stt,
       cookieSigningKey: c.secrets.cookieSigningKey,
       oidcGoogle: c.secrets.oidcGoogle,
       oidcApple: c.secrets.oidcApple,
@@ -178,11 +196,14 @@ function fromLoadConfig(c) {
       agentTokenTtlDays: c.auth?.agentTokenTtlDays ?? DEFAULTS.agentTokenTtlDays,
       socialProviders: c.auth?.socialProviders ?? [],
     },
-    deepgram: {
-      model: c.deepgram?.model ?? "nova-3",
-      language: c.deepgram?.language ?? "multi",
-      diarizeModel: c.deepgram?.diarizeModel ?? "latest",
-      tokenTtlSeconds: c.deepgram?.tokenTtlSeconds ?? 60,
+    // Keep in step with `fromEnv` above — including the defaults. These two
+    // loaders drifted before (`language` defaulted to "en" in one and "multi"
+    // in the other), so a kelabo transcribed differently on ECS and on a laptop
+    // for no reason anybody could see in the config.
+    stt: {
+      provider: c.stt?.provider ?? "deepgram",
+      language: c.stt?.language ?? "en",
+      providers: c.stt?.providers ?? {},
     },
     ses: {
       fromAddress: c.ses?.fromAddress,

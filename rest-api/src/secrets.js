@@ -85,9 +85,17 @@ export function createSecrets({ region } = {}) {
     // the gate costs one Secrets Manager call per cold container, not one per
     // request.
     getApiOriginSecret: (config) => getSecretRaw(config.secrets.apiOrigin),
-    getDeepgramKey: async (config) => {
-      const s = await getSecretJson(config.secrets.deepgram);
-      return s.apiKey || s.key || s.value;
+    // One secret holds a key per provider, so switching provider — or rolling
+    // back after a switch — is a config change and a redeploy, never a trip to
+    // Secrets Manager. `apiKey`/`key`/`value` remain accepted so a secret
+    // written for a single-provider deployment keeps working.
+    //
+    //   { "soniox": "…", "deepgram": "…" }   or   { "apiKey": "…" }
+    getSttKey: async (config) => {
+      const s = await getSecretJson(config.secrets.stt);
+      const key = s[config.stt?.provider] || s.apiKey || s.key || s.value;
+      if (!key) throw new Error(`no key for stt provider ${config.stt?.provider} in secret`);
+      return key;
     },
     getOidcSecret: (config, provider) =>
       getSecretJson(provider === "google" ? config.secrets.oidcGoogle : config.secrets.oidcApple),

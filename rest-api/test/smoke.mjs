@@ -14,7 +14,7 @@ import { createJoin } from "../src/join.js";
 import { createJoinCodes, generateJoinCode, normalizeJoinCode } from "../src/joinCode.js";
 import { createRecords } from "../src/records.js";
 import { cutoffFromAge } from "@kelabo/contracts/retention";
-import { createDeepgramToken } from "../src/deepgramToken.js";
+import { createSttToken } from "../src/stt/index.js";
 import { createAgent } from "../src/agent.js";
 
 const config = {
@@ -30,9 +30,13 @@ const config = {
   contacts: { external: false },
   archiveBucket: "bucket",
   archiveKeyPrefix: "archives",
-  secrets: { deepgram: "dg", cookieSigningKey: "cookie", oidcGoogle: "g", oidcApple: "a", mcpPrefix: "t/mcp/" },
+  secrets: { stt: "stt-secret", cookieSigningKey: "cookie", oidcGoogle: "g", oidcApple: "a", mcpPrefix: "t/mcp/" },
   auth: { sessionTtlSeconds: 3600, refreshTtlDays: 60, participantTtlSeconds: 43200, agentTokenTtlDays: 90, socialProviders: ["google", "apple"] },
-  deepgram: { model: "nova-3", diarizeModel: "latest", tokenTtlSeconds: 60 },
+  stt: {
+    provider: "deepgram",
+    language: "en",
+    providers: { deepgram: { model: "nova-3", diarizeModel: "latest", tokenTtlSeconds: 60 } },
+  },
   rtc: { defaultMode: "sfu", meshMaxParticipants: 6, video: false },
   ses: { fromAddress: "otp@test.example.com" },
   otp: {
@@ -56,6 +60,7 @@ const config = {
 const mcpSecretCalls = [];
 const secrets = {
   getCookieKey: async () => "test-signing-key",
+  getSttKey: async () => "stt-api-key",
   putMcpSecret: async (config, identity, name, token) => mcpSecretCalls.push({ op: "put", identity, name, token }),
   deleteMcpSecret: async (config, identity, name) => mcpSecretCalls.push({ op: "delete", identity, name }),
 };
@@ -193,13 +198,13 @@ const records = createRecords({
     },
   },
 });
-const deepgramToken = createDeepgramToken({ config, db, secrets, fetchImpl: async () => ({ ok: false, status: 500 }) });
+const sttToken = createSttToken({ config, db, secrets, fetchImpl: async () => ({ ok: false, status: 500 }) });
 
 const mcpOauth = createMcpOauth({ config, db, secrets, fetchImpl: mcpFetch });
 
 const agent = createAgent({ config, db, secrets });
 
-const app = createApp({ config, db, secrets, ses, sessions, auth, kelabos, join, joinCodes, records, deepgramToken, internal, mcpOauth, scheduling, contacts, huddle, agent, version: "test" });
+const app = createApp({ config, db, secrets, ses, sessions, auth, kelabos, join, joinCodes, records, sttToken, internal, mcpOauth, scheduling, contacts, huddle, agent, version: "test" });
 
 function cookieValue(res, name) {
   const c = (res.cookies || []).find((s) => s.startsWith(`${name}=`));
@@ -1651,7 +1656,7 @@ function gatedApp({ secretValue = ORIGIN_VALUE, throws = false } = {}) {
         return secretValue;
       },
     },
-    ses, sessions, auth, kelabos, join, joinCodes, records, deepgramToken,
+    ses, sessions, auth, kelabos, join, joinCodes, records, sttToken,
     internal, mcpOauth, scheduling, contacts, huddle, agent, version: "test",
   });
 }
@@ -1741,6 +1746,262 @@ await test("originSecretMatches: only an exact match, and never on absence", asy
   assert.equal(originSecretMatches(undefined, "abc"), false);
   assert.equal(originSecretMatches(null, "abc"), false);
   assert.equal(originSecretMatches(["abc"], "abc"), false, "a non-string must not pass");
+});
+
+// A purpose-built kelabo store: these tests are about the provider boundary,
+// not about persistence, and every one of them needs exactly one live kelabo.
+const sttDb = {
+  getKelaboMeta: async (id) =>
+    id.startsWith("stt-")
+      ? { kelaboId: id, status: "active", hostIdentity: "host@example.com", participants: [] }
+      : null,
+};
+
+// --- the STT provider boundary ----------------------------------------------
+//
+// The mint is the ONE thing standing between a kelabo's audio and somebody
+// else's bill: the browser streams straight to the provider, so a credential
+// handed out here is used without Kelabo seeing another byte of it. Until now
+// `fetchImpl` was stubbed to fail on every call, so the happy path — the
+// `params` a browser is told to forward verbatim to a third party — had no
+// coverage at all.
+
+await test("stt: a session carries the provider, the socket url and server-chosen params", async () => {
+  const calls = [];
+  const mint = createSttToken({
+    config,
+    db: sttDb,
+    secrets,
+    fetchImpl: async (url, init) => {
+      calls.push({ url, init });
+      return { ok: true, status: 200, json: async () => ({ access_token: "tok-123", expires_in: 60 }) };
+    },
+  });
+
+  const session = await mint.mint({
+    kelaboId: "stt-1",
+    participant: { identity: "host@example.com" },
+    opts: { language: "ja", diarize: true },
+  });
+
+  assert.equal(session.provider, "deepgram", "the client resolves its adapter with this");
+  assert.ok(session.url.startsWith("wss://"), "a browser has to be able to open it");
+  assert.equal(session.token, "tok-123");
+  assert.equal(session.expiresInSeconds, 60);
+
+  // Server-chosen, and the reason the client is not trusted to build them: a
+  // browser that picked its own model or feature flags would be picking the
+  // bill. `sample_rate` is deliberately absent — it is the one value the device
+  // knows and the server does not.
+  assert.equal(session.params.model, "nova-2", "ja is not a nova-3 language");
+  assert.equal(session.params.language, "ja");
+  assert.equal(session.params.diarize_model, "latest", "diarize:true was asked for");
+  assert.equal(session.params.sample_rate, undefined);
+
+  assert.equal(calls.length, 1);
+  assert.match(calls[0].init.headers.Authorization, /^Token /);
+});
+
+await test("stt: the deployment language is used when the client asks for none", async () => {
+  const mint = createSttToken({
+    config, db: sttDb, secrets,
+    fetchImpl: async () => ({ ok: true, status: 200, json: async () => ({ access_token: "t" }) }),
+  });
+  const session = await mint.mint({ kelaboId: "stt-2", participant: { identity: "host@example.com" } });
+  assert.equal(session.params.language, config.stt.language);
+  assert.equal(session.params.diarize_model, undefined, "diarization is opt-in, not the default");
+  // Falls back to the configured ttl when the provider does not state one.
+  assert.equal(session.expiresInSeconds, config.stt.providers.deepgram.tokenTtlSeconds);
+});
+
+await test("stt: a provider this build does not carry degrades, it does not 500", async () => {
+  const mint = createSttToken({
+    config: { ...config, stt: { ...config.stt, provider: "not-a-provider" } },
+    db: sttDb, secrets,
+    fetchImpl: async () => { throw new Error("must not be called"); },
+  });
+  // Reached before the secret is read and before the network: an operator's
+  // config mistake must not spend a Secrets Manager call, let alone a provider one.
+  await assert.rejects(
+    () => mint.mint({ kelaboId: "stt-3", participant: { identity: "host@example.com" } }),
+    (e) => e.status === 502 && e.code === "stt_unavailable",
+  );
+});
+
+await test("stt: authorization happens before the key is ever read", async () => {
+  let keyReads = 0;
+  const mint = createSttToken({
+    config, db: sttDb,
+    secrets: { ...secrets, getSttKey: async () => { keyReads++; return "k"; } },
+    fetchImpl: async () => { throw new Error("must not be called"); },
+  });
+  await assert.rejects(
+    () => mint.mint({ kelaboId: "stt-4", participant: { identity: "stranger@example.com" } }),
+    (e) => e.status === 403,
+  );
+  await assert.rejects(
+    () => mint.mint({ kelaboId: "nope", participant: { identity: "host@example.com" } }),
+    (e) => e.status === 404,
+  );
+  assert.equal(keyReads, 0, "a stranger asking must never reach the secret");
+});
+
+await test("stt: a provider returning an unusable session fails here, not in the browser", async () => {
+  // The failure this guards against has no symptom on the client: a socket
+  // opens against `undefined`, audio streams, nothing is transcribed, and
+  // nothing anywhere raises an error.
+  const mint = createSttToken({
+    config, db: sttDb, secrets,
+    fetchImpl: async () => ({ ok: true, status: 200, json: async () => ({}) }),
+  });
+  await assert.rejects(
+    () => mint.mint({ kelaboId: "stt-5", participant: { identity: "host@example.com" } }),
+    (e) => e.status === 502 && e.code === "stt_unavailable",
+  );
+});
+
+await test("stt: soniox mints a restricted temporary key, not the long-lived one", async () => {
+  const calls = [];
+  const sonioxConfig = {
+    ...config,
+    stt: {
+      ...config.stt,
+      provider: "soniox",
+      providers: { soniox: { model: "stt-rt-v5", maxSessionSeconds: 14400 } },
+    },
+  };
+  const mint = createSttToken({
+    config: sonioxConfig,
+    db: sttDb,
+    secrets: { ...secrets, getSttKey: async () => "long-lived-secret" },
+    fetchImpl: async (url, init) => {
+      calls.push({ url, body: JSON.parse(init.body), headers: init.headers });
+      return {
+        ok: true, status: 201,
+        json: async () => ({ api_key: "temp:ABC", expires_at: new Date(Date.now() + 60_000).toISOString() }),
+      };
+    },
+  });
+
+  const session = await mint.mint({
+    kelaboId: "stt-6",
+    participant: { identity: "host@example.com" },
+    opts: { language: "ja", diarize: false },
+  });
+
+  // The credential a browser gets is short-lived, one-shot and duration-capped.
+  // Each of these is the difference between a leaked key costing nothing and a
+  // leaked key costing whatever someone cares to spend.
+  const body = calls[0].body;
+  assert.equal(body.usage_type, "transcribe_websocket");
+  // MUST be false. The client opens a separate Soniox stream per utterance —
+  // which is what keeps a silent participant free — and one connection carries
+  // exactly one stream, so a single-use key would authenticate the first thing
+  // somebody says and 401 everything after it.
+  assert.equal(body.single_use, false, "one key opens many streams, by design");
+  assert.ok(body.expires_in_seconds > 0 && body.expires_in_seconds <= 3600);
+  assert.equal(body.max_session_duration_seconds, 14400);
+  assert.equal(body.client_reference_id, "stt-6", "usage logs attribute cost per kelabo");
+  assert.match(calls[0].headers.Authorization, /^Bearer /);
+  assert.notEqual(session.token, "long-lived-secret", "the long-lived key must never leave the server");
+  assert.equal(session.token, "temp:ABC");
+
+  // Soniox has one model for every language, so a hint — not a model table.
+  assert.equal(session.params.model, "stt-rt-v5");
+  assert.deepEqual(session.params.language_hints, ["ja"]);
+  assert.equal(session.params.audio_format, "pcm_s16le");
+  assert.equal(session.params.num_channels, 1);
+  // Always on: it costs nothing extra and one microphone is several people.
+  assert.equal(session.params.enable_speaker_diarization, true, "diarization is not opt-in here");
+  assert.equal(session.params.api_key, undefined, "the key rides its own field, not the params");
+  assert.equal(session.params.sample_rate, undefined, "only the device knows that");
+
+  // Endpoint tuning, measured against stt-rt-v5 and inside the ranges Soniox
+  // accepts — an out-of-range value is a 400 that takes transcription down.
+  assert.ok(session.params.max_endpoint_delay_ms >= 500 && session.params.max_endpoint_delay_ms <= 3000);
+  assert.ok(session.params.endpoint_latency_adjustment_level >= 0 && session.params.endpoint_latency_adjustment_level <= 3);
+  assert.ok(session.params.endpoint_sensitivity >= -1 && session.params.endpoint_sensitivity <= 1);
+});
+
+await test("stt: soniox key ttl is long enough to refresh off the critical path", async () => {
+  // Minting costs ~470ms. A 60s key would have to be re-minted constantly, and
+  // sooner or later that lands on the onset of an utterance — which is the
+  // whole latency budget the pooled design exists to protect.
+  const mint = createSttToken({
+    config: { ...config, stt: { ...config.stt, provider: "soniox", providers: {} } },
+    db: sttDb, secrets,
+    fetchImpl: async (url, init) => {
+      const body = JSON.parse(init.body);
+      assert.ok(body.expires_in_seconds >= 300, `ttl ${body.expires_in_seconds}s is too short to refresh between utterances`);
+      return { ok: true, status: 201, json: async () => ({ api_key: "t" }) };
+    },
+  });
+  await mint.mint({ kelaboId: "stt-10", participant: { identity: "host@example.com" } });
+});
+
+await test("stt: turning endpoint detection off removes its tuning too", async () => {
+  // Soniox rejects the tuning parameters when the feature is off, and a 400
+  // here means no transcription at all.
+  const mint = createSttToken({
+    config: {
+      ...config,
+      stt: { ...config.stt, provider: "soniox", providers: { soniox: { endpointDetection: false } } },
+    },
+    db: sttDb, secrets,
+    fetchImpl: async () => ({ ok: true, status: 201, json: async () => ({ api_key: "t" }) }),
+  });
+  const session = await mint.mint({ kelaboId: "stt-11", participant: { identity: "host@example.com" } });
+  assert.equal(session.params.enable_endpoint_detection, false);
+  assert.equal(session.params.max_endpoint_delay_ms, undefined);
+  assert.equal(session.params.endpoint_latency_adjustment_level, undefined);
+  assert.equal(session.params.endpoint_sensitivity, undefined);
+});
+
+await test("stt: 'multi' means no language hint, which is soniox's native mode", async () => {
+  const mint = createSttToken({
+    config: { ...config, stt: { ...config.stt, provider: "soniox", language: "multi", providers: {} } },
+    db: sttDb, secrets,
+    fetchImpl: async () => ({ ok: true, status: 201, json: async () => ({ api_key: "t" }) }),
+  });
+  const session = await mint.mint({ kelaboId: "stt-7", participant: { identity: "host@example.com" } });
+  assert.equal(session.params.language_hints, undefined, "hinting every language is not a hint");
+  assert.equal(session.params.enable_endpoint_detection, true, "on unless a room turns it off");
+});
+
+await test("stt: endpoint detection is a knob, because it trades against diarization", async () => {
+  const mint = createSttToken({
+    config: {
+      ...config,
+      stt: { ...config.stt, provider: "soniox", providers: { soniox: { endpointDetection: false } } },
+    },
+    db: sttDb, secrets,
+    fetchImpl: async () => ({ ok: true, status: 201, json: async () => ({ api_key: "t" }) }),
+  });
+  const session = await mint.mint({ kelaboId: "stt-8", participant: { identity: "host@example.com" } });
+  assert.equal(session.params.enable_endpoint_detection, false);
+});
+
+await test("stt: both providers answer the same interface", async () => {
+  // The point of the registry: the core dispatches without knowing either of
+  // them, and what comes back is the same shape whoever produced it.
+  for (const [provider, response] of [
+    ["deepgram", { access_token: "d" }],
+    ["soniox", { api_key: "s" }],
+  ]) {
+    const mint = createSttToken({
+      config: { ...config, stt: { ...config.stt, provider } },
+      db: sttDb, secrets,
+      fetchImpl: async () => ({ ok: true, status: 200, json: async () => response }),
+    });
+    const session = await mint.mint({
+      kelaboId: "stt-9", participant: { identity: "host@example.com" },
+    });
+    assert.equal(session.provider, provider);
+    assert.ok(session.url.startsWith("wss://"));
+    assert.ok(session.token);
+    assert.ok(session.expiresInSeconds > 0);
+    assert.equal(typeof session.params, "object");
+  }
 });
 
 console.log(`\n${passed} tests passed${process.exitCode ? " (with failures)" : ""}`);

@@ -125,7 +125,22 @@
 /** @typedef {{displayName:string, mode:"audio-board"|"board-only"}} JoinBody */
 /** @typedef {{kelaboId:string, gatewayBaseUrl:string,
  *             participant:{identity:string, displayName:string, isGuest:boolean}}} JoinResult */
-/** @typedef {{token:string, expiresInSeconds:number, params:Object}} SttToken */
+/**
+ * What POST /kelabos/:id/stt-token returns: everything a browser needs to open
+ * a transcription stream *directly* to the provider, and nothing it could have
+ * worked out for itself.
+ *
+ * `provider` is the id the SPA resolves an `SttClient` with, and it comes from
+ * the server rather than the build because which provider a deployment uses is
+ * a config decision (`config.stt.provider`), not a property of the frontend.
+ * `params` is deliberately opaque and is forwarded to the provider unread —
+ * query parameters for one, a configuration frame for another. Only the server
+ * decides what is in it, which is what keeps model and feature selection off
+ * the client.
+ *
+ * @typedef {{provider:string, url:string, token:string,
+ *            expiresInSeconds:number, params:Object}} SttSession
+ */
 /** @typedef {{archiveId:string, title:string, startedAt:number, endedAt:number,
  *             participantCount:number, hasMinutes:boolean}} RecordSummary */
 

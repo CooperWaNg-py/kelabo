@@ -17,7 +17,7 @@
       "allowedEmailDomain": "example.com",
       "organizationName": "Example Corp",
       "secrets": {
-        "deepgram": "kelabo/dev/deepgram",
+        "stt": "kelabo/dev/stt",
         "llm": "kelabo/dev/llm",
         "cookieSigningKey": "kelabo/dev/cookie-key",
         "oidcGoogle": "kelabo/dev/oidc-google",
@@ -45,10 +45,21 @@
         "smallModel": "deepseek-v4-flash",
         "baseUrl": "https://api.deepseek.com/v1"
       },
-      "deepgram": {
-        "model": "nova-3",
-        "diarizeModel": "latest",
-        "tokenTtlSeconds": 60
+      "stt": {
+        "provider": "deepgram",
+        "language": "en",
+        "providers": {
+          "deepgram": { "model": "nova-3", "diarizeModel": "latest", "tokenTtlSeconds": 60 },
+          "soniox": {
+            "model": "stt-rt-v5",
+            "tokenTtlSeconds": 600,
+            "maxSessionSeconds": 14400,
+            "endpointDetection": true,
+            "maxEndpointDelayMs": 1500,
+            "endpointLatencyLevel": 2,
+            "endpointSensitivity": 0.3
+          }
+        }
       },
       "allowIps": [],
       "ses": {
@@ -100,7 +111,7 @@
       "allowedEmailDomain": "example.com",
       "organizationName": "Example Corp",
       "secrets": {
-        "deepgram": "kelabo/staging/deepgram",
+        "stt": "kelabo/staging/stt",
         "llm": "kelabo/staging/llm",
         "cookieSigningKey": "kelabo/staging/cookie-key",
         "oidcGoogle": "kelabo/staging/oidc-google",
@@ -128,10 +139,21 @@
         "smallModel": "deepseek-v4-flash",
         "baseUrl": "https://api.deepseek.com/v1"
       },
-      "deepgram": {
-        "model": "nova-3",
-        "diarizeModel": "latest",
-        "tokenTtlSeconds": 60
+      "stt": {
+        "provider": "deepgram",
+        "language": "en",
+        "providers": {
+          "deepgram": { "model": "nova-3", "diarizeModel": "latest", "tokenTtlSeconds": 60 },
+          "soniox": {
+            "model": "stt-rt-v5",
+            "tokenTtlSeconds": 600,
+            "maxSessionSeconds": 14400,
+            "endpointDetection": true,
+            "maxEndpointDelayMs": 1500,
+            "endpointLatencyLevel": 2,
+            "endpointSensitivity": 0.3
+          }
+        }
       },
       "ses": {
         "fromAddress": "otp@example.com"
@@ -178,7 +200,7 @@
       "allowedEmailDomain": "example.com",
       "organizationName": "Example Corp",
       "secrets": {
-        "deepgram": "kelabo/prod/deepgram",
+        "stt": "kelabo/prod/stt",
         "llm": "kelabo/prod/llm",
         "cookieSigningKey": "kelabo/prod/cookie-key",
         "oidcGoogle": "kelabo/prod/oidc-google",
@@ -206,10 +228,21 @@
         "smallModel": "deepseek-v4-flash",
         "baseUrl": "https://api.deepseek.com/v1"
       },
-      "deepgram": {
-        "model": "nova-3",
-        "diarizeModel": "latest",
-        "tokenTtlSeconds": 60
+      "stt": {
+        "provider": "deepgram",
+        "language": "en",
+        "providers": {
+          "deepgram": { "model": "nova-3", "diarizeModel": "latest", "tokenTtlSeconds": 60 },
+          "soniox": {
+            "model": "stt-rt-v5",
+            "tokenTtlSeconds": 600,
+            "maxSessionSeconds": 14400,
+            "endpointDetection": true,
+            "maxEndpointDelayMs": 1500,
+            "endpointLatencyLevel": 2,
+            "endpointSensitivity": 0.3
+          }
+        }
       },
       "ses": {
         "fromAddress": "otp@example.com"

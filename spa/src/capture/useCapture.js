@@ -1,19 +1,27 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '../api'
 import { useToast } from '../components/Toaster'
-import { createSpeechGate } from './vad'
-import { createComposer } from '../transcript/composer'
-import { readResult } from '../transcript/deepgram'
+import { createSpeechGate, VAD_DEFAULTS } from './vad'
+import { createGateTuner } from './gateTuner'
+import { createComposer, LOCAL_SPEAKER } from '../transcript/composer'
+import { createSpeakerLabels } from '../transcript/speakerLabels'
+import { sttClient } from '../stt/interface'
 import { createPublisher } from '../transcript/publisher'
 import { fromWire, messageSealed, newMessageId } from '../transcript/events'
 import { apply, emptyTranscript, messages, renameSpeaker as renameInTranscript } from '../transcript/transcriptStore'
 
 // The Capture stage (docs 13), plus the React binding for the stages after it.
 //
-// This hook owns the microphone pipeline and the Deepgram socket, and turns
-// their output into *fragments*. It owns no message logic: composing fragments
-// into messages is `transcript/composer.js`, and projecting messages for display
-// is `transcript/transcriptStore.js`.
+// This hook owns the microphone pipeline and the STT socket, and turns their
+// output into *fragments*. It owns no message logic: composing fragments into
+// messages is `transcript/composer.js`, and projecting messages for display is
+// `transcript/transcriptStore.js`.
+//
+// It also names no speech-to-text provider. Which one is running is the
+// server's decision, arriving as `session.provider`; everything after that goes
+// through `SttClient` (spa/src/stt/interface.js) — open a socket, gate audio on
+// it, three control frames, and results read into the normalised `SttRead`.
+// Nothing below branches on who the provider is.
 //
 // The binding below is the whole point of that split:
 //
@@ -26,28 +34,18 @@ import { apply, emptyTranscript, messages, renameSpeaker as renameInTranscript }
 // two — a line per fragment here, a line per message for remote speech — and
 // they disagreed.
 
-const MAX_RECONNECTS = 3
 // ScriptProcessor buffer size: ~85ms of audio at 48kHz.
 const FRAME_SAMPLES = 4096
-// Deepgram closes an idle socket after 10s of neither audio nor KeepAlive, and
-// documents a 3-5s KeepAlive cadence. This is also the "is the stream idle?"
-// threshold: while audio flows, KeepAlive is unnecessary.
-const KEEPALIVE_MS = 4000
-// The seal trigger: this much time with nothing at all from Deepgram closes the
-// open message. It is the ONLY silence trigger — the VAD gate decides which
-// audio is worth transcribing and nothing else (docs 13).
+// A gap this long means the next frame begins a new burst, for the purpose of
+// mapping the provider's audio clock back onto the wall clock.
+const BURST_GAP_MS = 250
+// The seal trigger: this much time with nothing at all from the provider closes
+// a speaker's open message. It is the ONLY silence trigger — the VAD gate
+// decides which audio is worth transcribing and nothing else (docs 13).
 const SILENCE_TIMEOUT_MS = 1000
 // How often that is evaluated. Well under the timeout, so the seal still lands
 // within a beat of the speaker actually stopping.
 const IDLE_POLL_MS = 200
-// Deepgram returns per-token words for CJK languages; joining them with spaces
-// corrupts the text by inserting spurious spaces between tokens.
-const CJK_LANGS = new Set(['zh', 'ja', 'ko'])
-
-function speakerLetter(n) {
-  const num = Number.isInteger(n) ? n : 0
-  return String.fromCharCode(65 + Math.min(Math.max(num, 0), 25))
-}
 
 function floatTo16BitPCM(input) {
   const out = new Int16Array(input.length)
@@ -59,17 +57,21 @@ function floatTo16BitPCM(input) {
 }
 
 // `stream` is the shared microphone owned by useMicStream — this hook never
-// calls getUserMedia itself, so the conference transport and Deepgram capture
-// share exactly one device capture. `micError` carries that hook's failure
+// calls getUserMedia itself, so the conference transport and STT capture share
+// exactly one device capture. `micError` carries that hook's failure
 // ('mic_denied' | 'insecure_context') so the Capture pane still reports it.
 export function useCapture({ kelaboId, enabled, finalOnly, startedAt, language = 'en', diarize = false, displayName = '', myIdentity = '', stream = null, micError = null, vad = true, startMuted = false }) {
   const toast = useToast()
   const clientId = useMemo(() => (crypto.randomUUID ? crypto.randomUUID() : String(Math.random())), [])
   const [state, setState] = useState('idle')
+  // Which provider the server minted this kelabo's session under, once one has
+  // been minted. Display only — the connection light needs something to call
+  // itself. Nothing in the pipeline branches on it.
+  const [provider, setProvider] = useState(null)
   // Somebody who chose to join muted is muted from the first frame, not a
   // second later: `start(skipSocket)` builds the analysis graph without opening
-  // the Deepgram socket, so nothing is streamed or billed until they unmute.
-  // Muting after the fact would have transcribed the moment they walked in.
+  // the STT socket, so nothing is streamed or billed until they unmute. Muting
+  // after the fact would have transcribed the moment they walked in.
   const [muted, setMuted] = useState(startMuted)
   // The projected transcript — every message, mine and everyone else's, built by
   // one reducer. A message carries its own live tail, so there is no separate
@@ -99,32 +101,50 @@ export function useCapture({ kelaboId, enabled, finalOnly, startedAt, language =
   const startedAtRef = useRef(startedAt)
   startedAtRef.current = startedAt
 
-  // Label for a diarization speaker index. When diarization is off, everything
-  // is attributed to me (displayName); when on, use the A/B voice labels.
-  const labelFor = sp => (diarizeRef.current ? speakerLetter(sp) : (displayNameRef.current || 'You'))
+  // A provider speaker id -> the message it belongs to, and what to call it.
+  //
+  // The empty id means "this stream's own speaker": diarization off, or a
+  // provider that does not separate voices. That is me, so it is filed under one
+  // key and carries my display name. Every other id is a distinct voice in my
+  // microphone and gets an A/B/C label from the shared labeller — which assigns
+  // in order of first appearance, so the arithmetic that used to live here (and
+  // would have to be repeated per provider) is gone.
+  const labelsRef = useRef(null)
+  if (!labelsRef.current) labelsRef.current = createSpeakerLabels()
+  const keyFor = sp => (sp ? `spk:${sp}` : LOCAL_SPEAKER)
+  const labelFor = sp => (sp ? labelsRef.current.labelFor(sp) : (displayNameRef.current || 'You'))
 
   const streamRef = useRef(null)
   const ctxRef = useRef(null)
-  const wsRef = useRef(null)
-  const keepAliveRef = useRef(null)
-  const reconnectsRef = useRef(0)
+  const transportRef = useRef(null)
   const stoppedRef = useRef(false)
   const captureStartRef = useRef(0)
-  // End of the audio span already finalized, per Deepgram's response-span model:
-  // every response covers [start, start+duration] and is_final makes it
-  // authoritative for that span. A later final whose span is already covered is
-  // a re-emission (CJK models do this) and is ignored wholesale.
-  const finalCursorRef = useRef(0)
-
-  // VAD gate plus the bookkeeping that converts Deepgram's audio clock back to
-  // wall clock. Deepgram timestamps count only the audio it received, so every
+  // VAD gate plus the bookkeeping that converts the provider's audio clock back
+  // to wall clock. Those timestamps count only the audio it received, so every
   // second of skipped silence shifts word times earlier; `bursts` records, for
   // each contiguous run of streamed audio, where its start sat on both clocks.
   const gateRef = useRef(null)
+  // The hangover the gate should be using, learned from this room rather than
+  // taken from the defaults. It outlives individual gates: a new stream, or a
+  // re-acquired microphone, rebuilds the gate but must not throw away what has
+  // already been measured about the room.
+  const tunerRef = useRef(null)
+  // The last few corrections, for the Debug drawer. A ring rather than a log:
+  // this runs for the length of a kelabo and nobody reads the middle of it.
+  const tuneLogRef = useRef([])
+  // A pinned threshold survives the gate being rebuilt (a new stream, a
+  // re-acquired microphone) and the page being reloaded: it is a property of
+  // this person's microphone and room, and having to find it again every time
+  // would make it useless.
+  const thresholdRef = useRef(
+    (() => {
+      const v = Number(localStorage.getItem('kelabo-vad-threshold'))
+      return Number.isFinite(v) && v < 0 ? v : null
+    })(),
+  )
   const sentSamplesRef = useRef(0)
   const burstsRef = useRef([])
   const lastAudioAtRef = useRef(0)
-  const lastPingAtRef = useRef(0)
   const speakingRef = useRef(false)
 
   const setSpeakingOnce = on => {
@@ -133,20 +153,21 @@ export function useCapture({ kelaboId, enabled, finalOnly, startedAt, language =
     setSpeaking(on)
   }
 
-  const wallAt = sec => {
+  // Both clocks are in milliseconds. Providers disagree about the unit on the
+  // wire — Deepgram sends seconds, Soniox milliseconds — and each reader
+  // converts, so nothing downstream of `SttRead` has to know which.
+  const wallAt = ms => {
     const list = burstsRef.current
     let burst = list[0]
     for (let i = list.length - 1; i >= 0; i--) {
-      if (list[i].audio <= sec + 1e-3) { burst = list[i]; break }
+      if (list[i].audio <= ms + 1) { burst = list[i]; break }
     }
-    if (!burst) return captureStartRef.current + sec * 1000
-    return burst.wall + (sec - burst.audio) * 1000
+    if (!burst) return captureStartRef.current + ms
+    return burst.wall + (ms - burst.audio)
   }
-  // Deepgram audio-clock seconds -> ms since the kelabo started, which is what
-  // the transcript orders messages by.
-  const stampFor = sec => Math.round(wallAt(sec) - (startedAt || captureStartRef.current))
-
-  const joiner = () => (CJK_LANGS.has(languageRef.current) ? '' : ' ')
+  // Provider audio-clock ms -> ms since the kelabo started, which is what the
+  // transcript orders messages by.
+  const stampFor = ms => Math.round(wallAt(ms) - (startedAt || captureStartRef.current))
 
   // Verbose STT logging, enabled together with the Debug drawer.
   const dbg = (...args) => {
@@ -191,11 +212,41 @@ export function useCapture({ kelaboId, enabled, finalOnly, startedAt, language =
   composerRef.current.speakerId = myIdentity
 
 
+  // The gate feedback loop. Samples the gate's own counters on a slow cadence
+  // and corrects `hangoverMs` towards what this room actually needs — see
+  // capture/gateTuner.js for why that cannot be a constant.
+  //
+  // Slow on purpose. The tuner refuses to decide on less than 20s of audio, so
+  // polling faster only burns cycles; and a control loop that reacts inside one
+  // sentence would chase the speaker rather than the room.
+  useEffect(() => {
+    const t = setInterval(() => {
+      const gate = gateRef.current
+      const tuner = tunerRef.current
+      if (!gate || !tuner) return
+      const change = tuner.sample(gate.stats())
+      if (!change) return
+      if (change.kind === 'attackFrames') gate.setAttackFrames(change.value)
+      else gate.setHangoverMs(change.value)
+      // Surfaced in the Debug drawer, not just the console: this is the loop
+      // silently changing how speech is cut into messages, and on a per-second
+      // provider it also moves the bill. It should never have to be inferred.
+      const unit = change.kind === 'attackFrames' ? ' frames' : 'ms'
+      dbg(
+        `vad ${change.kind} ${change.from}${unit} -> ${change.value}${unit} (${change.reason})`,
+        change.window,
+      )
+      tuneLogRef.current = [...tuneLogRef.current.slice(-9), { ...change, at: Date.now() }]
+    }, 5000)
+    return () => clearInterval(t)
+  }, [])
+
   // The seal clock is polled, not armed. As a one-shot timer it had to be
-  // re-armed from every place a Deepgram result was handled, and the one place
+  // re-armed from every place a provider result was handled, and the one place
   // that forgot (interim results in `finalOnly` mode) sealed messages while the
   // speaker was still talking. Polling asks the composer a question it can
-  // always answer correctly instead of relying on every call site.
+  // always answer correctly instead of relying on every call site — and it now
+  // has to walk every open speaker, which is worse still to re-arm by hand.
   useEffect(() => {
     const t = setInterval(() => {
       composerRef.current.sealIfIdle()
@@ -203,184 +254,163 @@ export function useCapture({ kelaboId, enabled, finalOnly, startedAt, language =
     return () => clearInterval(t)
   }, [])
 
-  // Reading the wire is `transcript/deepgram.js` (pure, tested); this maps what
-  // it read onto the composer and converts Deepgram's audio clock to wall time.
-  const handleMessage = useCallback(ev => {
-    let msg
-    try { msg = JSON.parse(ev.data) } catch { return }
+  // One normalised result from the provider, mapped onto the composer and
+  // converted from the provider's audio clock to wall time. Reading the wire
+  // happened in the provider's own reader (pure, tested, one file per
+  // provider); nothing here knows which one produced this.
+  //
+  // Both lists are walked unconditionally: one message can carry several
+  // speakers at once, and a provider that never does simply returns one.
+  const applyRead = useCallback(r => {
+    if (!r) return
+    // Reported for the log; recovery is the provider's business, since what is
+    // recoverable differs entirely between them.
+    if (r.error) dbg('provider error', r.error.code, r.error.type, r.error.message)
 
-    const r = readResult(msg, {
-      cursor: finalCursorRef.current,
-      diarize: diarizeRef.current,
-      joiner: joiner(),
-    })
-    // Only results carrying TEXT count as activity. Deepgram emits empty results
-    // continuously while it receives audio containing no speech, and treating
-    // those as activity kept the seal clock alive forever — a message then never
-    // closed at all.
-    composerRef.current.noteActivity(r.hasText)
-    if (r.cursor != null) finalCursorRef.current = r.cursor
+    // Only text counts as activity, and only for the speakers who produced it.
+    // Providers emit empty results continuously while receiving audio with no
+    // speech in it, and treating those as activity kept the seal clock alive
+    // forever — a message then never closed at all. Keying it by speaker matters
+    // just as much: one person talking must not hold everyone else's message
+    // open, or a room mic produces one unbounded message per voice.
+    composerRef.current.noteActivity(r.active.map(keyFor))
 
-    if (r.kind === 'interim') {
-      // Never persisted, never given to the LLM: liveness only.
-      if (finalOnlyRef.current) return
-      composerRef.current.setTail({
-        text: r.text,
-        speakerLabel: labelFor(r.speaker),
-        key: diarizeRef.current ? speakerLetter(r.speaker) : '__me',
-        tStart: stampFor(r.tStart),
-        tEnd: stampFor(r.tEnd),
-      })
-      return
-    }
-
-    if (r.kind === 'covered') {
-      if (r.text) dbg('final DROPPED (span already covered)', r.text)
-      return
-    }
-    if (r.kind !== 'final') return
-
-    dbg('final', r.text)
-    // Straight to the composer, with nothing buffered in between. Consecutive
-    // finals from one speaker join inside the open message and a diarized
-    // speaker change seals it — both already the composer's rules.
-    for (const seg of r.segments) {
+    // Confirmed words first: `addFragment` clears the speaker's tail, and the
+    // tails below are the guess that replaces it.
+    for (const seg of r.finals) {
+      dbg('final', seg.speaker || '-', seg.text)
       composerRef.current.addFragment({
         text: seg.text,
-        speakerLabel: labelFor(seg.sp),
-        key: diarizeRef.current ? speakerLetter(seg.sp) : '__me',
+        speakerLabel: labelFor(seg.speaker),
+        key: keyFor(seg.speaker),
+        tStart: stampFor(seg.start || 0),
+        tEnd: stampFor(seg.end || 0),
+      })
+    }
+
+    // Never persisted, never given to the LLM: liveness only.
+    if (finalOnlyRef.current) return
+    for (const seg of r.tails) {
+      composerRef.current.setTail({
+        text: seg.text,
+        speakerLabel: labelFor(seg.speaker),
+        key: keyFor(seg.speaker),
         tStart: stampFor(seg.start || 0),
         tEnd: stampFor(seg.end || 0),
       })
     }
   }, [startedAt]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  const clearKeepAlive = () => {
-    if (keepAliveRef.current) {
-      clearInterval(keepAliveRef.current)
-      keepAliveRef.current = null
-    }
-  }
-
-  const closeSocket = useCallback((graceful = true) => {
-    clearKeepAlive()
-    const ws = wsRef.current
-    wsRef.current = null
-    if (ws) {
-      // Per-socket flag (not a shared ref): the old socket's onclose fires
-      // asynchronously, possibly after a new socket already opened, and must
-      // not trigger a spurious reconnect.
-      ws._intentionalClose = true
-      try {
-        if (graceful && ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ type: 'CloseStream' }))
-        }
-        ws.close()
-      } catch {}
+  // Tearing down transcription. The provider decides what that means on the
+  // wire — one socket closed, or a pool of them — so this is one call.
+  const closeTransport = useCallback(() => {
+    const t = transportRef.current
+    transportRef.current = null
+    if (t) {
+      try { t.close() } catch {}
     }
   }, [])
 
-  // Stream frames and advance the audio clock. `opened` marks the first send of
-  // a burst: the frames handed over end at "now", so the burst starts that many
-  // frame-durations earlier on the wall clock.
+  // Hand frames to the provider and advance the audio clock. `opened` marks the
+  // first frame of a burst: the frames handed over end at "now", so the burst
+  // started that many frame-durations earlier on the wall clock.
   const sendFrames = (buffers, opened) => {
-    const ws = wsRef.current
-    if (!ws || ws.readyState !== WebSocket.OPEN) return
+    const t = transportRef.current
+    if (!t) return
     const rate = ctxRef.current?.sampleRate || 48000
     if (opened) {
       const bursts = burstsRef.current
       bursts.push({
-        audio: sentSamplesRef.current / rate,
+        audio: (sentSamplesRef.current / rate) * 1000,
         wall: Date.now() - (buffers.length * FRAME_SAMPLES * 1000) / rate,
       })
       if (bursts.length > 400) bursts.splice(0, 200)
     }
-    for (const buf of buffers) {
-      try { ws.send(buf) } catch { return }
-    }
+    for (const buf of buffers) t.sendAudio(buf)
     sentSamplesRef.current += buffers.length * FRAME_SAMPLES
-    lastAudioAtRef.current = Date.now()
   }
 
-  // KeepAlive holds the socket open through gated silence without streaming
-  // (and without billing) audio. Driven from the audio callback as well as a
-  // timer, because background tabs throttle timers well past Deepgram's 10s
-  // idle close while the audio graph keeps running.
-  const pingIfIdle = () => {
-    const ws = wsRef.current
-    if (!ws || ws.readyState !== WebSocket.OPEN) return
-    const now = Date.now()
-    if (now - lastAudioAtRef.current < KEEPALIVE_MS || now - lastPingAtRef.current < KEEPALIVE_MS) return
-    lastPingAtRef.current = now
-    try { ws.send(JSON.stringify({ type: 'KeepAlive' })) } catch {}
-  }
+  // The provider reports state; the room hears about the two that matter. A
+  // transcription that quietly stops is indistinguishable from a room that has
+  // gone quiet, which is why these were ever spoken aloud.
+  const lastStateRef = useRef('idle')
+  const reportState = useCallback(next => {
+    if (lastStateRef.current !== next) {
+      if (next === 'reconnecting') toast('Transcription reconnecting…')
+      if (next === 'stt_unavailable') toast('Transcription unavailable — board still works')
+      lastStateRef.current = next
+    }
+    setState(next)
+  }, [toast])
 
   const connectSocket = useCallback(async () => {
     if (stoppedRef.current) return
-    // Never hold two live connections: a previous socket must be closed
-    // intentionally (and its messages ignored) before opening the next one,
-    // otherwise both transcribe the same audio and duplicate every turn.
-    closeSocket(true)
-    setState(reconnectsRef.current > 0 ? 'reconnecting' : 'connecting')
-    let tokenData
+    // Never two live transports: the previous one must be torn down before the
+    // next is built, or both transcribe the same audio and duplicate every turn.
+    closeTransport()
+    setState('connecting')
+
+    const mintSession = () =>
+      api.sttToken(kelaboId, { language: languageRef.current, diarize: diarizeRef.current })
+
+    let session
     try {
-      tokenData = await api.sttToken(kelaboId, { language: languageRef.current, diarize: diarizeRef.current })
+      session = await mintSession()
     } catch {
-      if (reconnectsRef.current < MAX_RECONNECTS) {
-        reconnectsRef.current += 1
-        setState('reconnecting')
-        setTimeout(() => connectSocket(), 1000 * reconnectsRef.current)
-      } else {
-        setState('stt_unavailable')
-      }
+      reportState('stt_unavailable')
       return
     }
     if (stoppedRef.current) return
 
-    const params = { ...(tokenData.params || {}), sample_rate: String(ctxRef.current?.sampleRate || 16000) }
-    const url = 'wss://api.deepgram.com/v1/listen?' + new URLSearchParams(params).toString()
-    const ws = new WebSocket(url, ['bearer', tokenData.token])
-    ws.binaryType = 'arraybuffer'
-    ws._intentionalClose = false
-    wsRef.current = ws
+    // The server says which provider this session is for; an id with no client
+    // registered throws rather than guessing, because every wrong guess here
+    // fails silently — a socket that opens, streams audio and transcribes
+    // nothing.
+    let client
+    try {
+      client = sttClient(session.provider)
+    } catch (e) {
+      dbg('unusable session', e?.message)
+      reportState('stt_unavailable')
+      return
+    }
+    setProvider({ id: client.id, label: client.label })
 
-    ws.onopen = () => {
-      reconnectsRef.current = 0
-      captureStartRef.current = Date.now()
-      // A fresh stream restarts Deepgram's audio clock at zero, so the
-      // finalized-span cursor and the audio-clock mapping must restart with it
-      // or every final on the new socket looks already covered.
-      finalCursorRef.current = 0
-      sentSamplesRef.current = 0
-      burstsRef.current = [{ audio: 0, wall: captureStartRef.current }]
-      lastAudioAtRef.current = captureStartRef.current
-      lastPingAtRef.current = captureStartRef.current
-      gateRef.current?.reset()
-      composerRef.current.reset()
-      setSpeakingOnce(false)
-      setState('live')
-      clearKeepAlive()
-      keepAliveRef.current = setInterval(pingIfIdle, 2000)
+    try {
+      transportRef.current = client.connect({
+        session,
+        sampleRate: ctxRef.current?.sampleRate || 16000,
+        diarize: diarizeRef.current,
+        language: languageRef.current,
+        // Whether the provider is being handed only speech. A provider that
+        // bills per stream starts and stops one on this edge; without it there
+        // is nothing to trigger on and it must hold a stream open instead.
+        gated: vadRef.current,
+        renew: mintSession,
+        onRead: applyRead,
+        onStreamStart: () => {
+          // A new provider stream restarts its audio clock at zero and its
+          // speaker numbering with it, so the clock mapping and the labeller
+          // restart too — a new voice must not inherit the label, and the
+          // host's rename, of whoever held it on the last stream.
+          //
+          // The composer is deliberately NOT reset: on a provider that opens a
+          // stream per utterance this fires constantly, and resetting would
+          // drop the open message every time instead of letting it seal.
+          captureStartRef.current = Date.now()
+          sentSamplesRef.current = 0
+          burstsRef.current = [{ audio: 0, wall: captureStartRef.current }]
+          labelsRef.current.reset()
+          gateRef.current?.reset()
+        },
+        onState: reportState,
+        log: dbg,
+      })
+    } catch (e) {
+      dbg('connect failed', e?.message)
+      reportState('stt_unavailable')
     }
-    // Ignore messages from any socket that has been superseded — otherwise a
-    // stale connection injects the same finals a second time.
-    ws.onmessage = ev => { if (wsRef.current === ws) handleMessage(ev) }
-    ws.onclose = () => {
-      clearKeepAlive()
-      if (ws._intentionalClose || stoppedRef.current) return
-      if (wsRef.current && wsRef.current !== ws) return // superseded
-      if (reconnectsRef.current < MAX_RECONNECTS) {
-        reconnectsRef.current += 1
-        setState('reconnecting')
-        toast('Transcription reconnecting…')
-        setTimeout(() => connectSocket(), 1000 * reconnectsRef.current)
-      } else {
-        setState('stt_unavailable')
-        toast('Transcription unavailable — board still works')
-      }
-    }
-    ws.onerror = () => {}
-  }, [kelaboId, handleMessage, toast, closeSocket])
+  }, [kelaboId, applyRead, closeTransport, reportState])
 
   // Read by the start effect, which must see the current value without taking a
   // dependency on it.
@@ -402,43 +432,94 @@ export function useCapture({ kelaboId, enabled, finalOnly, startedAt, language =
       const AC = window.AudioContext || window.webkitAudioContext
       const ctx = new AC()
       ctxRef.current = ctx
+      // A browser creates an AudioContext SUSPENDED unless it was constructed
+      // inside a user gesture, and a suspended context never fires
+      // `onaudioprocess`. Nothing is captured, nothing is transcribed, the
+      // socket sits open receiving no audio, and NOTHING reports an error at
+      // any level — the room simply goes quiet. Reloading the page into a
+      // kelabo, which rejoins without anybody clicking anything, is precisely
+      // that case.
+      if (ctx.state === 'suspended') {
+        try { await ctx.resume() } catch {}
+      }
       const source = ctx.createMediaStreamSource(micStream)
       const processor = ctx.createScriptProcessor(FRAME_SAMPLES, 1, 1)
       audioStatsRef.current.pipelines += 1
       processor.onaudioprocess = e => {
-        const ws = wsRef.current
-        if (!ws || ws.readyState !== WebSocket.OPEN) return
+        // NOT gated on there being a transport. The gate has to run whenever
+        // the microphone does, because it feeds the live meter and the tuner —
+        // and the moment somebody most needs to see the gate is when nothing is
+        // being transcribed and they are trying to find out why. Only SENDING
+        // requires a transport.
+        const transport = transportRef.current
         const stats = audioStatsRef.current
         stats.frames += 1
         const samples = e.inputBuffer.getChannelData(0)
         const pcm = floatTo16BitPCM(samples)
-        if (!vadRef.current) {
-          gateRef.current = null
-          setSpeakingOnce(true)
-          // A gap (VAD just turned off, or the gate was shut) is a new burst.
-          sendFrames([pcm], Date.now() - lastAudioAtRef.current > 250)
-          return
-        }
+        const now = Date.now()
+        // The gate ALWAYS runs. It is the analyser — level, noise floor,
+        // threshold — and only its *decisions* are optional. Tearing it down
+        // when silence skipping is switched off took the meter with it, so the
+        // one reading that would explain "why is my quiet speech being cut"
+        // vanished exactly when somebody turned the feature off to investigate.
+        // It also means the skipped ratio still answers "what would this save
+        // if I turned it on".
         if (!gateRef.current) {
-          gateRef.current = createSpeechGate({ sampleRate: ctx.sampleRate, frameSamples: FRAME_SAMPLES })
+          if (!tunerRef.current) {
+            tunerRef.current = createGateTuner({
+              hangoverMs: VAD_DEFAULTS.hangoverMs,
+              attackFrames: VAD_DEFAULTS.attackFrames,
+              frameMs: (FRAME_SAMPLES / ctx.sampleRate) * 1000,
+            })
+          }
+          gateRef.current = createSpeechGate({
+            sampleRate: ctx.sampleRate,
+            frameSamples: FRAME_SAMPLES,
+            // Start from what this room has already taught us, not the default.
+            hangoverMs: tunerRef.current.hangoverMs,
+            attackFrames: tunerRef.current.attackFrames,
+            thresholdDb: thresholdRef.current,
+          })
+          tunerRef.current.reset()
         }
         const r = gateRef.current.push(samples, pcm)
+        // From here on the gate has already measured this frame, so the meter
+        // is live even with nothing to send it to.
+        if (!transport) return
+
+        if (!vadRef.current) {
+          setSpeakingOnce(true)
+          // Not gating: every frame goes over, and the provider is told once
+          // that speech is permanently "on" so it does not sit waiting for an
+          // onset that will never come.
+          transport.setSpeaking(true)
+          // A gap (silence skipping just turned off, or the gate was shut) is a
+          // new burst.
+          sendFrames([pcm], now - lastAudioAtRef.current > BURST_GAP_MS)
+          lastAudioAtRef.current = now
+          return
+        }
+
         if (r.send.length) {
           setSpeakingOnce(true)
+          // BEFORE the audio, always. On a provider that opens a billable
+          // stream at the onset, this is what opens it — and the frames handed
+          // over below include the pre-roll from just before the gate tripped,
+          // which is the start of the word that opened it.
+          transport.setSpeaking(true)
           sendFrames(r.send, r.opened)
+          lastAudioAtRef.current = now
           return
         }
         if (r.closed) {
           setSpeakingOnce(false)
-          // Flush whatever Deepgram is still holding: with the trailing silence
-          // cut, waiting for its endpointer could strand the last words.
-          // Forces Deepgram to emit what it is holding. Not a seal: the answer
-          // resets the seal clock like any other message, and the message closes
-          // 1s later if nothing more arrives.
-          try { ws.send(JSON.stringify({ type: 'Finalize' })) } catch {}
+          // The gate shut. What that means is the provider's business: flush
+          // what it is holding, begin counting towards ending a billed stream,
+          // or nothing at all. Not a seal either way — the composer closes the
+          // message on its own silence clock.
+          transport.setSpeaking(false)
           dbg('gate closed', gateRef.current.stats())
         }
-        pingIfIdle()
       }
       source.connect(processor)
       processor.connect(ctx.destination)
@@ -451,19 +532,20 @@ export function useCapture({ kelaboId, enabled, finalOnly, startedAt, language =
   }, [connectSocket])
 
   // Nothing is buffered ahead of the composer any more, so closing a message is
-  // just the seal. (This used to flush a pending queue first — the queue is what
-  // could strand a final that Deepgram had already confirmed.)
+  // just the seal — every open speaker's, since the stream is going away.
+  // (This used to flush a pending queue first — the queue is what could strand a
+  // final the provider had already confirmed.)
   const sealAndFlush = useCallback(reason => {
     composerRef.current.seal(reason)
   }, [])
 
   const mute = useCallback(() => {
     sealAndFlush('mute')
-    closeSocket(true)
+    closeTransport()
     setMuted(true)
     setState('muted')
     setSpeakingOnce(false)
-  }, [closeSocket, sealAndFlush])
+  }, [closeTransport, sealAndFlush])
 
   const unmute = useCallback(() => {
     // Unmuting is a CALL action: `muted` is what gates the outgoing conference
@@ -471,17 +553,16 @@ export function useCapture({ kelaboId, enabled, finalOnly, startedAt, language =
     // room hears the speaker the moment they ask. Transcription is a tap on the
     // same stream, restarted *afterwards* and only where this kelabo transcribes
     // at all; its failure demotes captions ("Transcription unavailable"), never
-    // the audio. Flipping `muted` only inside the Deepgram socket's onopen —
-    // the old behaviour — made "unmute" mean "successfully connect to
-    // Deepgram", which froze the mic on every deployment where Deepgram was
-    // absent, unconfigured or broken.
+    // the audio. Flipping `muted` only inside the STT socket's onopen — the old
+    // behaviour — made "unmute" mean "successfully connect to the transcription
+    // provider", which froze the mic on every deployment where it was absent,
+    // unconfigured or broken.
     setMuted(false)
     if (!enabled || stoppedRef.current) {
       setState(s => (s === 'muted' ? 'idle' : s))
       return
     }
     setState('connecting')
-    reconnectsRef.current = 0
     // Analysis pipeline may have been torn down (e.g. the shared stream was
     // re-acquired while muted).
     if (!streamRef.current || !ctxRef.current) start()
@@ -491,7 +572,7 @@ export function useCapture({ kelaboId, enabled, finalOnly, startedAt, language =
   const stop = useCallback(() => {
     stoppedRef.current = true
     sealAndFlush('stop')
-    closeSocket(true)
+    closeTransport()
     // The MediaStream is not ours to stop — useMicStream owns the device and
     // the conference transport is still publishing from it.
     streamRef.current = null
@@ -500,7 +581,7 @@ export function useCapture({ kelaboId, enabled, finalOnly, startedAt, language =
     gateRef.current = null
     setSpeakingOnce(false)
     setState('ended')
-  }, [closeSocket, sealAndFlush])
+  }, [closeTransport, sealAndFlush])
 
   // Retroactively relabel a speaker (driven by the server `rename` SSE event so
   // every client stays consistent). Label only — never the text or boundaries.
@@ -530,8 +611,8 @@ export function useCapture({ kelaboId, enabled, finalOnly, startedAt, language =
       messageId: newMessageId(),
       speakerId: myIdentityRef.current,
       // Never a diarization letter: the typist is known, and attributing typed
-      // words to whichever voice Deepgram happens to be labelling "B" would put
-      // them in someone else's mouth.
+      // words to whichever voice is currently being labelled "B" would put them
+      // in someone else's mouth.
       speakerLabel: displayNameRef.current || 'You',
       text: body,
       tStart: stamp,
@@ -605,7 +686,7 @@ export function useCapture({ kelaboId, enabled, finalOnly, startedAt, language =
     return () => {
       stoppedRef.current = true
       finalizeRef.current?.()
-      closeSocket(true)
+      closeTransport()
       // Only the analysis graph is ours; the device belongs to useMicStream.
       streamRef.current = null
       ctxRef.current?.close().catch(() => {})
@@ -614,32 +695,119 @@ export function useCapture({ kelaboId, enabled, finalOnly, startedAt, language =
     }
   }, [enabled, stream]) // eslint-disable-line react-hooks/exhaustive-deps
 
+  // A context that could not be resumed at build time — no gesture had happened
+  // yet — is resumed on the first one that does. Without this the only recovery
+  // is another reload, which lands in the same state.
+  useEffect(() => {
+    if (!enabled) return undefined
+    const tryResume = () => {
+      const ctx = ctxRef.current
+      if (ctx && ctx.state === 'suspended') ctx.resume().catch(() => {})
+    }
+    const opts = { capture: true }
+    window.addEventListener('pointerdown', tryResume, opts)
+    window.addEventListener('keydown', tryResume, opts)
+    document.addEventListener('visibilitychange', tryResume)
+    return () => {
+      window.removeEventListener('pointerdown', tryResume, opts)
+      window.removeEventListener('keydown', tryResume, opts)
+      document.removeEventListener('visibilitychange', tryResume)
+    }
+  }, [enabled])
+
+  // Why there is (or is not) any audio to measure. Every one of these can be
+  // wrong silently, which is what made "nothing is being captured" a dead end
+  // rather than an answer.
+  const captureDiag = useCallback(
+    () => ({
+      state,
+      muted,
+      hasStream: !!streamRef.current,
+      audioContext: ctxRef.current?.state ?? 'none',
+      frames: audioStatsRef.current.frames,
+      pipelines: audioStatsRef.current.pipelines,
+      hasTransport: !!transportRef.current,
+      gating: vadRef.current,
+    }),
+    [state, muted],
+  )
+
   // Surface the shared mic hook's failure through the same `state` the Capture
   // pane already renders banners for.
   useEffect(() => {
     if (micError) setState(micError)
   }, [micError])
 
-  // Switching language or diarization mid-kelabo reconnects the Deepgram
-  // socket with a fresh token carrying the new params (only while live).
+  // Switching language or diarization mid-kelabo reconnects with a fresh
+  // session carrying the new params (only while live).
+  //
+  // Silence skipping is in here too, and not only as a parameter: `gated` is
+  // what tells a provider whether there will be a speech edge to start and stop
+  // a billable stream on. Toggling it mid-kelabo changes the provider's whole
+  // connection strategy, so the transport has to be rebuilt rather than
+  // informed.
   const firstParamRun = useRef(true)
   useEffect(() => {
     if (firstParamRun.current) { firstParamRun.current = false; return }
     if (!enabled || stoppedRef.current || muted) return
     if (!ctxRef.current) return
-    reconnectsRef.current = 0
-    closeSocket(true)
+    closeTransport()
     connectSocket()
-  }, [language, diarize]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [language, diarize, vad]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // `gateStats()` is a getter, not state: the ratio changes every frame and
   // nothing needs to re-render for it (the Debug drawer samples it).
-  const gateStats = useCallback(() => gateRef.current?.stats() || null, [])
+  // Sampled by the meter in the Debug drawer at animation rate. Deliberately
+  // separate from `gateStats`, which is a heavier snapshot polled once a second:
+  // this one has to be cheap enough to read on every frame.
+  /**
+   * Pin the gate's threshold, or pass null to hand it back to the noise-floor
+   * tracker. Applied to the live gate immediately so the effect is visible on
+   * the meter while the mouse is still over it.
+   */
+  const setGateThreshold = useCallback(db => {
+    const v = db == null || !Number.isFinite(db) ? null : Math.round(db * 10) / 10
+    thresholdRef.current = v
+    gateRef.current?.setThresholdDb?.(v)
+    try {
+      if (v == null) localStorage.removeItem('kelabo-vad-threshold')
+      else localStorage.setItem('kelabo-vad-threshold', String(v))
+    } catch {}
+    dbg(v == null ? 'vad threshold -> auto' : `vad threshold pinned at ${v}dB`)
+  }, [])
+
+  const gateLevel = useCallback(() => {
+    const l = gateRef.current?.level?.()
+    if (!l) return null
+    // Whether the gate's verdict is actually being applied. The measurement is
+    // the same either way; what it means for the audio is not.
+    return { ...l, gating: vadRef.current }
+  }, [])
+
+  const gateStats = useCallback(() => {
+    const gate = gateRef.current?.stats() || null
+    const transport = transportRef.current?.stats?.() || null
+    if (!gate && !transport) return null
+    return {
+      ...(gate || {}),
+      // What the loop has settled on, and how it got there. Without this the
+      // gate's behaviour changes under the operator with no way to see that it
+      // did, let alone why.
+      hangoverMs: gateRef.current?.hangoverMs?.() ?? null,
+      attackFrames: gateRef.current?.attackFrames?.() ?? null,
+      tuning: tuneLogRef.current,
+      tuner: tunerRef.current?.status?.() ?? null,
+      ...(transport ? { transport } : {}),
+    }
+  }, [])
 
   const list = useMemo(() => messages(transcript), [transcript])
 
   return {
     state,
+    // null until a session has been minted — a watch-only participant, or a
+    // deployment with no STT configured, never has one.
+    provider,
     muted,
     speaking,
     messages: list,
@@ -651,5 +819,8 @@ export function useCapture({ kelaboId, enabled, finalOnly, startedAt, language =
     seedHistory,
     sendTyped,
     gateStats,
+    gateLevel,
+    captureDiag,
+    setGateThreshold,
   }
 }

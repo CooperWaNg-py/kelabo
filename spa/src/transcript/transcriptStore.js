@@ -31,9 +31,9 @@ const bare = s => String(s || '').toLowerCase().replace(NOISE, '')
 /**
  * The full text of a message: confirmed words plus the outstanding guess.
  *
- * Deepgram's interims often restate the *whole* utterance rather than only the
- * new tail — CJK models do it routinely — so a naive append shows every word
- * twice. When the guess already contains the confirmed text, it replaces it
+ * A provider's guess often restates the *whole* utterance rather than only the
+ * new tail — Deepgram's CJK models do it routinely — so a naive append shows
+ * every word twice. When the guess already contains the confirmed text, it replaces it
  * wholesale; otherwise it is appended.
  *
  * Used by both the view and the composer's seal, so what is displayed and what
@@ -57,7 +57,7 @@ export function messageText(message) {
  * The view needs this because a long message is mostly confirmed: only its last
  * few words are outstanding. Styling the whole box as provisional made a
  * minute of settled transcript flicker as if it were about to change, and hid
- * the one thing the live style is for — where Deepgram has actually got to.
+ * the one thing the live style is for — where the provider has actually got to.
  *
  * It cannot be done in the view, because a tail may *restate* the confirmed
  * words rather than follow them (see `mergeTail`), so the boundary is not
@@ -96,8 +96,8 @@ export function messageParts(message) {
   return { settled: tail.slice(0, i), live: tail.slice(i) }
 }
 
-/** A message is committed text plus a live `tail` of words Deepgram has heard
- *  but not confirmed. The view renders `text + tail` as one growing box; only
+/** A message is committed text plus a live `tail` of words the provider has
+ *  heard but not confirmed. The view renders `text + tail` as one growing box; only
  *  `text` is ever persisted or shown to the LLM.
  *  @typedef {{messageId:string, speakerId:string, speakerLabel:string, text:string,
  *             tail:string, tStart:number, tEnd:number, state:'open'|'sealed',

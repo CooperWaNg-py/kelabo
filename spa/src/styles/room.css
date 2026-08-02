@@ -1073,6 +1073,36 @@
 .conn-bad { color: var(--danger); animation: pulse-dot 1s ease-in-out infinite; }
 .conn-off { color: var(--text-3); opacity: .5; }
 
+/* "Sending right now" — media is actually leaving this machine for that
+   service, as distinct from the connection being healthy. The two come apart
+   constantly, and a green light says nothing about whether the room can hear
+   you or whether a per-second meter is running.
+
+   THE DOT IS THE SIGNAL; THE PULSE IS DECORATION. That order matters and is not
+   a style preference: an indicator that exists only as a keyframe vanishes on
+   any machine reporting `prefers-reduced-motion`, which on Windows is every
+   machine set to "Adjust for best performance". This room has already shipped
+   one live readout that was invisible on a whole platform while looking perfect
+   on the one it was built on (see the level-meter note above). So the dot is
+   drawn by presence of the class, and only its opacity animates — under reduced
+   motion it simply sits there, solid, still telling you the truth. */
+.conn-live { position: relative; }
+.conn-live::after {
+  content: '';
+  position: absolute;
+  top: .3rem;
+  right: .18rem;
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: currentColor;
+  /* Lifts the dot off the icon beneath it. `--surface-2` is the pill the whole
+     group sits on (.cbar-group), so the ring reads as a gap rather than as a
+     second colour, in both themes. */
+  box-shadow: 0 0 0 2px var(--surface-2);
+  animation: pulse-dot 1.6s ease-in-out infinite;
+}
+
 /* The room's menus are the app's menus (see kelabo.css) — the only thing that
    differs is the direction they open, because the control bar is 8px from the
    bottom of the screen. Everything this block used to redefine — item font,
@@ -1225,5 +1255,140 @@
   .atile-halo,
   .atile-scan,
   .atile-pulse i { animation: none !important; }
+  /* The connection dot stops moving but does NOT disappear: whether audio is
+     leaving your machine is information, not decoration, and it is the one
+     readout here somebody might be checking for privacy rather than curiosity.
+     Only the animation is dropped — `.conn-live::after` still draws it. */
+  .conn-live::after { animation: none !important; }
   .side, .caption, .astage-doc { animation-duration: .01ms; }
+}
+
+/* --- debug: is a transcription stream open right now? ---------------------- */
+/* Deliberately at the top of the panel and outside every <details>: on a
+   provider billed per second of stream, "is it open" is the one reading that
+   costs money to get wrong, and a fact folded behind a disclosure triangle is a
+   fact nobody checks. Colour carries it — red is not a fault here, it is the
+   meter running. */
+.dbg-stt {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  margin-bottom: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  font-size: var(--text-sm);
+}
+.dbg-stt-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--text-3);
+  flex-shrink: 0;
+}
+.dbg-stt[data-billing='1'] { border-color: var(--accent); }
+.dbg-stt[data-billing='1'] .dbg-stt-dot {
+  background: var(--accent);
+  animation: pulse-dot 1.2s ease-in-out infinite;
+}
+/* Same rule as the connection lights: the dot is the signal, the pulse is
+   decoration. Under reduced motion it stops moving and stays visible. */
+@media (prefers-reduced-motion: reduce) {
+  .dbg-stt[data-billing='1'] .dbg-stt-dot { animation: none !important; }
+}
+
+/* --- debug: the adaptive gate, live --------------------------------------- */
+/* dB-scaled, -80..0 dBFS across the bar. A linear meter sits near 4% in a quiet
+   room and pins at the faintest sound, which reads as a broken widget rather
+   than a measurement.
+
+   Everything here is positioned from CSS custom properties written onto the
+   node each frame — never a keyframe. A live readout built as an animation
+   stops dead under `prefers-reduced-motion` and this room has already shipped
+   that bug once. */
+.dbg-gate {
+  padding: var(--space-2) var(--space-3);
+  margin-bottom: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  font-size: var(--text-sm);
+}
+.dbg-gate-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
+}
+.dbg-gate-head { color: var(--text-3); }
+.dbg-gate-head.is-over { color: var(--success); }
+
+.dbg-gate-meter {
+  position: relative;
+  height: 12px;
+  border-radius: 999px;
+  background: var(--surface-3);
+  overflow: hidden;
+  margin-bottom: var(--space-2);
+}
+.dbg-gate-fill {
+  position: absolute;
+  left: 0; top: 0; bottom: 0;
+  width: calc(var(--level, 0) * 100%);
+  background: var(--text-3);
+  /* Just enough to smooth the ~12/s frame rate into something readable,
+     without lagging behind what is actually being decided. */
+  transition: width .06s linear, background-color .15s ease;
+}
+.dbg-gate-meter[data-open='1'] .dbg-gate-fill { background: var(--success); }
+.dbg-gate-mark { position: absolute; top: 0; bottom: 0; }
+/* The threshold is the decision; the floor is what it is derived from, so one
+   is drawn as a line and the other as a hint. */
+.dbg-gate-thr {
+  left: calc(var(--threshold, 0) * 100%);
+  width: 2px;
+  background: var(--accent);
+}
+.dbg-gate-floor {
+  left: calc(var(--floor, 0) * 100%);
+  width: 1px;
+  background: var(--text-3);
+  opacity: .55;
+}
+
+/* The two facts that disagree, side by side and readable at a glance: which one
+   is lit at any moment is the explanation for why the control-bar light and the
+   billing state are not always the same. */
+.dbg-stt-flag {
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--text-3);
+  font-size: var(--text-xs);
+}
+.dbg-stt-flag.is-on {
+  color: var(--success);
+  border-color: var(--success);
+}
+
+/* The meter is a control as well as a readout: click it to pin the threshold.
+   It has to look touchable without becoming a button — the measurement is still
+   the point. */
+.dbg-gate-meter { cursor: crosshair; }
+.dbg-gate-meter:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* A pinned threshold is drawn thicker and squarer than a tracked one: the two
+   fail in completely different ways and should never be mistaken for each
+   other at a glance. */
+.dbg-gate-meter.is-pinned .dbg-gate-thr { width: 3px; border-radius: 0; }
+.dbg-gate-meter.is-pinned .dbg-gate-floor { opacity: .3; }
+
+.dbg-linkish {
+  border: 0;
+  background: none;
+  padding: 0;
+  color: var(--accent);
+  cursor: pointer;
+  font: inherit;
+  text-decoration: underline;
 }

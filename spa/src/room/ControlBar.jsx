@@ -137,7 +137,7 @@ export function ControlBar({
           >
             <Icon name={capture.muted ? 'mic-off' : 'mic'} size={18} />
             {/* The meter shows whether the ROOM can hear you — muted or a real
-                mic problem, not the Deepgram socket's mood. Keying it on
+                mic problem, not the transcription socket's mood. Keying it on
                 `state === 'live'` made a live call read as dead whenever
                 transcription was absent. */}
             <span className={'meter' + (capture.muted || micDisabled ? ' muted' : '')} aria-hidden="true">
@@ -223,7 +223,7 @@ export function ControlBar({
                     icon={<Icon name="globe" />}
                     value={LANG_LABEL[stt.lang] || stt.lang}
                     disabled={ended}
-                    title="The language Deepgram transcribes this kelabo in."
+                    title="The language this kelabo is transcribed in."
                     onClick={() => open('lang')}
                   >
                     Language
@@ -256,14 +256,20 @@ export function ControlBar({
                     >
                       Speakers
                     </MenuToggle>
+                    {/* Named for what it does, not for the algorithm that does
+                        it. "VAD" is the acronym in the source, in the tooltip
+                        and nowhere in the head of anybody using the room — this
+                        control was reported missing by somebody looking at it,
+                        because every other mention of it in the product calls
+                        it silence skipping. */}
                     <MenuToggle
                       icon={<Icon name="waveform" />}
                       checked={stt.vad}
                       disabled={ended}
-                      title="Only stream audio while you are speaking — silence is skipped, which is most of a kelabo for any one person. Turn off if quiet speech is being cut."
+                      title="Only send audio while you are speaking — silence is skipped, which is most of a kelabo for any one person. It is also what starts and stops the transcription stream, so turning it off streams continuously for the whole kelabo. Turn it off if quiet speech is being cut."
                       onChange={stt.onVad}
                     >
-                      VAD
+                      Silence skipping
                     </MenuToggle>
                     <MenuToggle
                       icon={<Icon name="captions" />}

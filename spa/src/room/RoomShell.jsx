@@ -561,9 +561,18 @@ export function RoomShell({
         conn={{
           boardStatus: board.status,
           captureState: capture.state,
+          sttLabel: capture.provider?.label,
+          // `speaking` is the VAD gate: true exactly while frames are leaving
+          // for the provider (and always, when silence skipping is off). Guarded
+          // on `live` so a reconnecting socket cannot claim to be sending.
+          sttLive: capture.state === 'live' && capture.speaking,
           callState: call.state,
+          // Muting gates the outgoing conference track, so connected-and-unmuted
+          // IS publishing. Nothing about speech: WebRTC keeps sending through
+          // your pauses.
+          callLive: call.state === 'live' && !capture.muted,
           callMode: call.mode,
-          // No STT on this deployment → no Deepgram light at all, same as
+          // No STT on this deployment → no transcription light at all, same as
           // watch-only: it is simply not part of this kelabo.
           transcribing: !boardOnly && sttOn,
           callOn: rtcOn,

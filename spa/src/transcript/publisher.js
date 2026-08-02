@@ -15,7 +15,7 @@ import { DELTA, SEALED, TAIL } from './events.js'
  * @param {{ kelaboId: string, clientId: string, displayName?: () => string,
  *           diarized?: () => boolean, onError?: (payload, err) => void }} opts
  */
-// Deepgram revises its guess several times a second. Relaying every revision
+// A provider revises its guess several times a second. Relaying every revision
 // would be a POST per revision per speaker; the room cannot perceive the
 // difference, so tails are rate-limited. The newest tail always wins, and a
 // delta or seal flushes immediately, so nothing is lost — only intermediate

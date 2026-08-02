@@ -11,6 +11,7 @@ import { Modal } from '../components/ui/Modal'
 import { currentScheme, setScheme, themeIcon, toggleTheme } from '../theme'
 import { useCapture } from '../capture/useCapture'
 import { useHiddenMute } from '../capture/useHiddenMute'
+import { sttClient } from '../stt/interface'
 import { useMicStream } from '../rtc/useMicStream'
 import { useCameraStream } from '../rtc/useCameraStream'
 import { useScreenShare } from '../rtc/useScreenShare'
@@ -78,12 +79,17 @@ function KelaboRoom() {
   const [sttLang, setSttLang] = useState(localStorage.getItem('kelabo-stt-lang') || 'en')
   // Speaker diarization always starts off for each kelabo — opt in per kelabo.
   const [diarize, setDiarize] = useState(false)
-  // Silence skipping is on unless explicitly turned off: it is what keeps the
-  // Deepgram bill proportional to speech instead of kelabo length.
+  // Silence skipping. The participant's own choice always wins; with none
+  // stored, the provider decides (see the effect below), because the gate is
+  // worth opposite things on different ones.
   const [vad, setVad] = useState(localStorage.getItem('kelabo-vad') !== '0')
   // Auto-mute on tab switch is off unless asked for — see useHiddenMute for
   // why this is a preference and not simply the behavior.
   const [muteHidden, setMuteHidden] = useState(localStorage.getItem('kelabo-mute-hidden') === '1')
+  // Two different facts, and conflating them is what used to wipe the flag on
+  // reload. `debugEnabled` is "this person is diagnosing something" — it lives
+  // in localStorage and survives reloads until they say otherwise.
+  // `debugOpen` is merely whether the drawer is on screen right now.
   const [debugEnabled, setDebugEnabled] = useState(localStorage.getItem('kelabo-debug') === '1')
   const [debugOpen, setDebugOpen] = useState(debugEnabled)
   const [debugEntries, setDebugEntries] = useState([])
@@ -100,11 +106,29 @@ function KelaboRoom() {
   const boardOnly = mode === 'board-only'
   // Deployment capabilities from the kelabo META (docs 19 §3). Permissive
   // until the META arrives or when a server predates the map: `on !== false`.
-  // An `off` capability is never attempted — no Deepgram token minting, no
+  // An `off` capability is never attempted — no STT session minted, no
   // /rtc/join — which is what keeps "not configured" from ever being an error.
   const sttOn = kelabo?.capabilities?.stt?.on !== false
   const assistantOn = kelabo?.capabilities?.assistant?.on !== false
   const rtcOn = kelabo?.capabilities?.rtc?.on !== false
+  const sttProvider = kelabo?.capabilities?.stt?.provider
+
+  // Take the provider's preferred default for silence skipping, once, and only
+  // for somebody who has never expressed one. The gate saves real money on a
+  // provider that bills the audio it receives; on one that bills the open
+  // stream it saves nothing and removes the pauses its diarizer uses to tell
+  // speakers apart. The provider is the only thing that knows which it is.
+  const vadDefaulted = useRef(false)
+  useEffect(() => {
+    if (vadDefaulted.current || !sttProvider) return
+    vadDefaulted.current = true
+    if (localStorage.getItem('kelabo-vad') !== null) return
+    try {
+      setVad(sttClient(sttProvider).prefersVad)
+    } catch {
+      // A provider this build does not carry: leave the toggle where it is.
+    }
+  }, [sttProvider])
   // Same precedence as everywhere else: the user's chosen name beats the
   // server identity, which is only ever the email local-part.
   const me = localStorage.getItem('kelabo-name') || displayName(identity)
@@ -308,17 +332,29 @@ function KelaboRoom() {
     pushSettings()
   }
 
+  // Opening and closing the drawer. NOT the same thing as turning debugging on
+  // and off, though it used to be: closing the panel wrote `kelabo-debug: 0`,
+  // which stopped capture, removed the toolbar button that was the only way
+  // back in, and did not survive the reload the person was usually in the
+  // middle of diagnosing. Somebody who reloads to reproduce a bug lands on an
+  // open panel, closes it because it is in the way, and has silently switched
+  // off the instrument they came for.
   const toggleDebug = () => {
-    const on = !debugOpen
-    setDebugOpen(on)
-    setDebugEnabled(on)
-    debugEnabledRef.current = on
-    localStorage.setItem('kelabo-debug', on ? '1' : '0')
-    if (!on) {
-      setDebugEntries([])
-      // Don't leave the panel full-screen for the next time it opens.
-      setDebugFullscreen(false)
-    }
+    const open = !debugOpen
+    setDebugOpen(open)
+    // Don't leave the panel full-screen for the next time it opens.
+    if (!open) setDebugFullscreen(false)
+  }
+
+  // Turning the instrument off, deliberately. The flag is what survives a
+  // reload, so this is the only thing that may write it.
+  const disableDebug = () => {
+    setDebugOpen(false)
+    setDebugEnabled(false)
+    debugEnabledRef.current = false
+    setDebugFullscreen(false)
+    setDebugEntries([])
+    localStorage.setItem('kelabo-debug', '0')
   }
 
   const hostIdentity = kelabo?.hostIdentity
@@ -500,6 +536,12 @@ function KelaboRoom() {
         titleChip={<span className="chip chip-accent">{debugEntries.length}</span>}
         fullscreen={debugFullscreen}
         onToggleFullscreen={setDebugFullscreen}
+        // The one drawer worth resizing: it is read side by side with the room
+        // rather than instead of it, so fullscreen is the wrong tool half the
+        // time — you want it wide enough for a JSON payload while still
+        // watching who is talking.
+        resizable
+        widthKey="kelabo-debug-width"
       >
         {/* Mounted only while debug is on. `Drawer` renders its children
             whether or not it is open, and the Transcript ledger draws a row per
@@ -511,6 +553,15 @@ function KelaboRoom() {
             <DebugPanel
               entries={debugEntries}
               onClear={() => setDebugEntries([])}
+              onDisable={disableDebug}
+              gateStatsPoll={capture.gateStats}
+              gateLevel={capture.gateLevel}
+              captureDiag={capture.captureDiag}
+              onThreshold={capture.setGateThreshold}
+              // The drawer renders its children whether or not it is open, so
+              // the live meters need telling — a rAF loop behind a closed panel
+              // is a rAF loop nobody is looking at.
+              active={debugOpen}
               gateStats={gateStats}
               messages={capture.messages}
             />

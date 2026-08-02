@@ -1,7 +1,8 @@
 // Transcript concepts (docs 13). These five nouns are the whole vocabulary; every
 // stage of the pipeline speaks in them and nothing invents its own shape.
 //
-//   Fragment       one Deepgram is_final piece. Client-internal — it never crosses
+//   Fragment       one confirmed piece from the STT provider. Client-internal — it
+//                  never crosses
 //                  a boundary on its own, only folded into a delta.
 //   Message        what a speaker produces between two seals. The unit of display,
 //                  persistence and LLM submission.
@@ -14,10 +15,10 @@
 // adjacency or timing: doing that in two places is what let a speaker and a
 // listener disagree about where one message ended and the next began.
 
-// A message is committed text plus a live tail. The tail is the words Deepgram
-// has heard but not yet confirmed: shown and relayed immediately so the room
-// sees speech as it happens, replaced wholesale on each revision, and folded
-// into the committed text when Deepgram finalizes it.
+// A message is committed text plus a live tail. The tail is the words the
+// provider has heard but not yet confirmed: shown and relayed immediately so the
+// room sees speech as it happens, replaced wholesale on each revision, and
+// folded into the committed text when the provider confirms them.
 export const TAIL = 'tail'
 export const DELTA = 'delta'
 export const SEALED = 'sealed'

@@ -1,3 +1,4 @@
+import { useEffect, useRef, useState } from 'react'
 import { useConfirm } from '../components/ConfirmDialog'
 import { Button } from '../components/ui/Button'
 import { Icon } from '../components/ui/Icon'
@@ -444,6 +445,257 @@ function buildTimeline(entries) {
 // gate is landing on thought-groups (a few cycles a minute, mean open in the
 // seconds) or chopping inside sentences (many short cycles), which is the knob
 // behind `hangoverMs` in capture/vad.js.
+/**
+ * Is a transcription stream open RIGHT NOW?
+ *
+ * The single most useful line in this panel once transcription is billed per
+ * second of stream rather than per second of audio. "Connected" and "streaming"
+ * are different states and only one of them is spending money: a provider that
+ * opens a stream on speech and closes it on silence is idle most of a kelabo,
+ * and if it is NOT idle while nobody is talking, that is a bug costing money
+ * quietly. There is no other way to see it — the socket is between the browser
+ * and the provider, and never touches Kelabo.
+ *
+ * Polls on its own rather than taking a prop so widening the drawer or dragging
+ * it does not re-render the message ledger four times a second. The parent
+ * samples the same getter once a second for the detailed block below.
+ */
+function SttStatus({ poll, active }) {
+  const [s, setS] = useState(null)
+  useEffect(() => {
+    if (!active || typeof poll !== 'function') return undefined
+    const tick = () => setS(poll())
+    tick()
+    // Faster than the block below: a pooled stream lives for one utterance, and
+    // at one-second sampling most of them would never be seen at all.
+    const t = setInterval(tick, 300)
+    return () => clearInterval(t)
+  }, [poll, active])
+
+  const t = s?.transport
+  if (!t) return null
+
+  // THREE separate facts, because two of them disagree for seconds at a time
+  // and the difference is the whole point:
+  //
+  //   sending    frames are leaving the machine right now (the control-bar dot)
+  //   stream     a stream is open on the provider
+  //   billing    the meter is running — which of the other two that is depends
+  //              entirely on the provider's pricing model
+  //
+  // On Soniox the stream outlives the audio by the silence gate, so `sending`
+  // goes dark a second before billing stops. On Deepgram the socket is held all
+  // kelabo and costs nothing while quiet. Showing only one of these, under a
+  // label that implies the other, is what made this panel look like it
+  // contradicted the light in the control bar.
+  return (
+    <div className="dbg-stt" data-billing={t.billing ? '1' : '0'}>
+      <span className="dbg-stt-dot" aria-hidden="true"></span>
+      <b>{t.billing ? 'billing' : 'not billing'}</b>
+      <span className="text-meta" title={`This provider charges by ${t.billedBy || 'unknown'}.`}>
+        by {t.billedBy}
+      </span>
+      <span className="spacer"></span>
+      <span className={'dbg-stt-flag' + (t.sending ? ' is-on' : '')} title="Audio frames are leaving this machine right now. This is what the transcription light in the control bar shows.">
+        sending
+      </span>
+      <span className={'dbg-stt-flag' + (t.streaming ? ' is-on' : '')} title="A stream is open on the provider. On a provider billed by stream duration this outlives the audio by the silence gate, which is why it and 'sending' disagree after you stop talking.">
+        stream
+      </span>
+      <span className="text-meta">
+        {t.mode === 'pooled'
+          ? `${t.pool} warm spare${t.pool === 1 ? '' : 's'}${t.opening ? ` (+${t.opening})` : ''}`
+          : t.mode === 'continuous'
+            ? 'continuous'
+            : 'single socket'}
+      </span>
+    </div>
+  )
+}
+
+function GateMeter({ level, diag, onThreshold, active }) {
+  const ref = useRef(null)
+  // The reading lives in a ref, not in state: at animation rate `setState`
+  // would re-render this panel sixty times a second. A counter is bumped on a
+  // slow cadence purely to refresh the text — and it has to be a counter rather
+  // than the value itself, because setting state to the same `null` it already
+  // holds does not re-render, which would have frozen the diagnostics below on
+  // whatever they said the first time.
+  const readingRef = useRef(null)
+  const [, setTick] = useState(0)
+
+  useEffect(() => {
+    if (!active || typeof level !== 'function') return undefined
+    let raf = 0
+    let lastText = 0
+    // dBFS -> 0..1 across the bar.
+    const norm = db => Math.max(0, Math.min(1, (db + 80) / 80))
+    const tick = () => {
+      raf = requestAnimationFrame(tick)
+      const l = level()
+      readingRef.current = l
+      const el = ref.current
+      if (el && l) {
+        el.style.setProperty('--level', norm(l.db).toFixed(4))
+        el.style.setProperty('--floor', norm(l.floorDb).toFixed(4))
+        el.style.setProperty('--threshold', norm(l.threshold).toFixed(4))
+        el.dataset.open = l.open ? '1' : '0'
+      }
+      // The numbers move far slower than the bar, and text redrawn sixty times
+      // a second is unreadable as well as expensive. Slower still when there is
+      // nothing to measure — that view changes rarely and is only ever read
+      // once, carefully.
+      const now = performance.now()
+      const period = l ? 200 : 1000
+      if (now - lastText > period) {
+        lastText = now
+        setTick(t => t + 1)
+      }
+    }
+    raf = requestAnimationFrame(tick)
+    return () => cancelAnimationFrame(raf)
+  }, [active, level])
+
+  const r = readingRef.current
+  const db = n => (n <= -99 ? '\u2212\u221e' : `${n.toFixed(1)}dB`)
+
+  if (!r) {
+    // "Nothing is being captured" on its own is a dead end: it restates the
+    // symptom. Every one of these can be wrong silently, and the one that
+    // usually is — a suspended AudioContext — produces no error at any level,
+    // so it has to be readable here or it is not findable at all.
+    const d = typeof diag === 'function' ? diag() : null
+    return (
+      <div className="dbg-gate">
+        <div className="dbg-gate-row">
+          <b>no audio</b>
+          <span className="text-meta">
+            {!d
+              ? 'Nothing is being captured.'
+              : d.audioContext === 'suspended'
+                ? 'The browser suspended the audio context — it does this unless one was created during a click. Nothing is captured or transcribed until it resumes; click anywhere in the page.'
+                : !d.hasStream
+                  ? 'No microphone stream yet.'
+                  : d.frames === 0
+                    ? 'The capture graph is built but has not received a single frame.'
+                    : 'Waiting for the first frame.'}
+          </span>
+        </div>
+        {d && (
+          <div className="dbg-kv">
+            <span title="The capture hook's own state.">capture <b>{d.state}</b></span>
+            <span title="Whether the shared microphone stream has arrived.">mic <b>{d.hasStream ? 'yes' : 'no'}</b></span>
+            <span title="A suspended context never fires an audio callback, so nothing is captured at all.">
+              context <b>{d.audioContext}</b>
+            </span>
+            <span title="Audio callbacks since this pipeline was built. Zero with a running context means the microphone is delivering nothing.">
+              frames <b>{d.frames}</b>
+            </span>
+            <span title="How many capture graphs have been built this kelabo. More than one at a time would transcribe everything twice.">
+              pipelines <b>{d.pipelines}</b>
+            </span>
+            <span title="Whether a transcription transport is attached. Audio is measured either way.">
+              transport <b>{d.hasTransport ? 'yes' : 'no'}</b>
+            </span>
+          </div>
+        )}
+      </div>
+    )
+  }
+
+  return (
+    <div className="dbg-gate">
+      <div className="dbg-gate-row">
+        <b>{r.open ? 'gate open' : 'gate shut'}</b>
+        <span className="text-meta">
+          {r.open
+            ? `quiet ${r.quietFrames}/${r.hangoverFrames} frames to close`
+            : `${r.hot}/${r.attackFrames} frames over to open`}
+        </span>
+        {!r.gating && (
+          <span
+            className="dbg-stt-flag"
+            title="Silence skipping is off in the mic menu, so every frame is sent whatever the gate decides. The gate still measures — the skipped figure below is what turning it on would save."
+          >
+            not gating
+          </span>
+        )}
+        <span className="spacer"></span>
+        <span
+          className={'dbg-gate-head' + (r.headroomDb > 0 ? ' is-over' : '')}
+          title="How far this frame is over the threshold. Speech should clear it by a wide margin — a room where it hovers near zero is one where the gate is a coin toss frame to frame."
+        >
+          headroom <b>{r.headroomDb > 0 ? '+' : ''}{r.headroomDb.toFixed(1)}dB</b>
+        </span>
+      </div>
+      {/* CLICK ANYWHERE ON THE BAR to pin the threshold there. The adaptive
+          floor is right for most rooms and wrong for some in ways no amount of
+          tracking fixes — a constant hum a few dB under speech, a mic with its
+          own gain control. In those the answer is visible on this meter and
+          invisible to the algorithm, so the person watching it gets to say. */}
+      <div
+        className={'dbg-gate-meter' + (r.manualThresholdDb != null ? ' is-pinned' : '')}
+        ref={ref}
+        role="slider"
+        tabIndex={0}
+        aria-label="Speech gate threshold"
+        aria-valuemin={-80}
+        aria-valuemax={0}
+        aria-valuenow={Math.round(r.threshold)}
+        aria-valuetext={`${r.threshold.toFixed(1)} decibels${r.manualThresholdDb != null ? ', pinned' : ', tracking the noise floor'}`}
+        title="Click to pin the threshold here. Arrow keys nudge it, Escape hands it back to the noise-floor tracker."
+        onClick={e => {
+          const box = e.currentTarget.getBoundingClientRect()
+          if (!box.width) return
+          const frac = Math.min(Math.max((e.clientX - box.left) / box.width, 0), 1)
+          onThreshold?.(-80 + frac * 80)
+        }}
+        onKeyDown={e => {
+          const step = e.shiftKey ? 5 : 1
+          if (e.key === 'ArrowLeft') { e.preventDefault(); onThreshold?.(r.threshold - step) }
+          else if (e.key === 'ArrowRight') { e.preventDefault(); onThreshold?.(r.threshold + step) }
+          else if (e.key === 'Escape' || e.key === 'Backspace') { e.preventDefault(); onThreshold?.(null) }
+        }}
+      >
+        <span className="dbg-gate-fill"></span>
+        <span className="dbg-gate-mark dbg-gate-floor" title="Tracked noise floor"></span>
+        <span className="dbg-gate-mark dbg-gate-thr" title="Threshold the level must cross"></span>
+      </div>
+      <div className="dbg-kv">
+        <span title="This frame's RMS level.">level <b>{db(r.db)}</b></span>
+        <span title="The adaptive noise floor. Falls fast towards a quieter room and creeps up slowly, and only while the gate is shut — so speech cannot drag it up and close the gate mid-sentence.">
+          floor <b>{db(r.floorDb)}</b>
+        </span>
+        <span
+          title={
+            r.manualThresholdDb != null
+              ? 'Pinned by hand. The noise-floor tracker is not touching it.'
+              : 'floor + open margin, but never below the absolute minimum for speech.'
+          }
+        >
+          threshold <b>{db(r.threshold)}</b>{' '}
+          {r.manualThresholdDb != null ? (
+            <button type="button" className="dbg-linkish" onClick={() => onThreshold?.(null)}>
+              pinned · auto
+            </button>
+          ) : (
+            <span className="text-meta">auto</span>
+          )}
+        </span>
+        <span title="Consecutive frames required over the threshold before the gate opens. Raised automatically in a room where clicks and keystrokes keep tripping it.">
+          attack <b>{r.attackFrames}</b> ({Math.round(r.attackFrames * r.frameMs)}ms)
+        </span>
+        <span title="How long the gate stays open after the level drops. Tuned for this room while the kelabo runs.">
+          hangover <b>{r.hangoverMs}ms</b>
+        </span>
+        <span title="Margins either side of the floor: how far over to open, how far over to stay open. The gap between them is the hysteresis that stops a soft syllable chattering the gate.">
+          margins <b>+{r.openDb}/{r.closeDb}dB</b>
+        </span>
+      </div>
+    </div>
+  )
+}
+
 function GateStats({ stats }) {
   if (!stats || !stats.framesSeen) return null
   const pct = n => `${Math.round(n * 100)}%`
@@ -464,13 +716,72 @@ function GateStats({ stats }) {
         <span title="Mean silence between utterances, as measured on the mic.">
           mean shut <b>{stats.meanShutMs}ms</b>
         </span>
-        <span title="Share of captured audio never sent to Deepgram, and so never billed.">
+        <span title="Share of captured audio never handed to the provider. On a provider billed by the audio it receives this is a direct saving; on one billed by stream duration it saves bandwidth and nothing else.">
           silence skipped <b>{pct(stats.skipped)}</b>
         </span>
         <span title="Audio actually streamed vs wall clock.">
           streamed <b>{Math.round(stats.sentMs / 1000)}s</b> / {Math.round(stats.seenMs / 1000)}s
         </span>
+        <span title="Gate openings, and runs that cleared the threshold without lasting long enough to become one. Rejections are the attack doing its job — clicks, keystrokes, a knock on the desk. Many rejections and few openings means something other than speech keeps hitting this microphone.">
+          opened <b>{stats.attacks ?? 0}</b> · rejected <b>{stats.rejected ?? 0}</b>
+        </span>
+        {stats.hangoverMs != null && (
+          <span title="How long the gate stays open after the level drops. Measured for this room rather than configured — it decides where messages end, whether trailing words survive, and (on a provider billed by stream duration) how much of every utterance is paid for after the speaker stopped.">
+            hangover <b>{stats.hangoverMs}ms</b>
+          </span>
+        )}
+        {stats.transport && (
+          <>
+            <span title="How the provider is carrying this session. 'pooled' opens a billable stream per utterance and keeps spare connections warm and unbilled between them; 'continuous' holds one stream open for the whole session.">
+              transport <b>{stats.transport.mode}</b>
+              {stats.transport.streaming ? ' · streaming' : ' · idle'}
+            </span>
+            {stats.transport.mode === 'pooled' && (
+              <span title="Connections that are open but have sent nothing — they carry no stream, produce no usage record and cost nothing. They exist so the handshake is already paid for when somebody starts talking.">
+                warm spares <b>{stats.transport.pool}</b>
+                {stats.transport.opening ? ` (+${stats.transport.opening} opening)` : ''}
+              </span>
+            )}
+          </>
+        )}
       </div>
+      {/* THE LOOP'S HEARTBEAT. Its correct behaviour in a healthy room is to do
+          nothing, which is indistinguishable from not running — so it reports
+          what it has measured and what it concluded, not merely what it
+          changed. A window count that climbs is the loop proving it is awake. */}
+      {stats.tuner && (
+        <div className="dbg-kv">
+          <span title={`Completed observation windows. Nothing is decided on less than ${Math.round((stats.tuner.minWindowMs || 0) / 1000)}s of audio, because short windows produce wild ratios and retuning on those settles on nothing.`}>
+            tuner windows <b>{stats.tuner.windows}</b>
+          </span>
+          <span title="What the last completed window concluded. 'healthy' means it looked and found nothing worth changing — which is the expected answer in a room that is working.">
+            verdict <b>{stats.tuner.lastVerdict?.reason ?? 'waiting for first window'}</b>
+          </span>
+          {stats.tuner.lastWindow && (
+            <span title="The measurements the last verdict was based on.">
+              last window <b>{Math.round(stats.tuner.lastWindow.seenMs / 1000)}s</b>{' '}
+              {stats.tuner.lastWindow.cyclesPerMin}/min · open{' '}
+              {stats.tuner.lastWindow.meanOpenMs}ms · {pct(stats.tuner.lastWindow.skipped)} skipped
+            </span>
+          )}
+        </div>
+      )}
+      {stats.tuning?.length > 0 && (
+        <div className="dbg-kv">
+          {/* The feedback loop's own history. It changes how speech is cut into
+              messages while the kelabo runs, so a reading that disagrees with
+              the defaults should be explainable rather than mysterious. */}
+          {stats.tuning.map((t, i) => (
+            <span
+              key={i}
+              title={`over ${Math.round(t.window.seenMs / 1000)}s: ${t.window.cyclesPerMin}/min, mean open ${t.window.meanOpenMs}ms, ${pct(t.window.skipped)} skipped`}
+            >
+              {new Date(t.at).toISOString().slice(11, 19)} {t.kind === 'attackFrames' ? 'attack' : 'hangover'}{' '}
+              <b>{t.from}→{t.value}{t.kind === 'attackFrames' ? ' frames' : 'ms'}</b> ({t.reason})
+            </span>
+          ))}
+        </div>
+      )}
     </details>
   )
 }
@@ -516,7 +827,7 @@ function MessageLedger({ messages }) {
   )
 }
 
-export function DebugPanel({ entries, onClear, gateStats, messages }) {
+export function DebugPanel({ entries, onClear, onDisable, gateStats, gateStatsPoll, gateLevel, captureDiag, onThreshold, active = true, messages }) {
   const confirm = useConfirm()
   const items = buildTimeline(entries)
   const turnCount = items.filter(i => i.type === 'turn').length
@@ -552,7 +863,17 @@ export function DebugPanel({ entries, onClear, gateStats, messages }) {
         </span>
         <TokenChip usage={sessionUsage} label="kelabo" />
         {entries.length > 0 && <Button variant="danger-ghost" size="sm" onClick={clearLogs}>Clear</Button>}
+        {/* The only control that turns capture off and clears the flag. Closing
+            the drawer deliberately does not: this instrument has to survive the
+            reload somebody is reloading in order to use it. */}
+        {onDisable && (
+          <Button variant="ghost" size="sm" onClick={onDisable} title="Stop capturing debug data and hide the debug button. Closing this panel only hides it.">
+            Turn off
+          </Button>
+        )}
       </div>
+      <SttStatus poll={gateStatsPoll} active={active} />
+      <GateMeter level={gateLevel} diag={captureDiag} onThreshold={onThreshold} active={active} />
       <GateStats stats={gateStats} />
       <MessageLedger messages={messages} />
       {[...items].reverse().map((item, i) => {

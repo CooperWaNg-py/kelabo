@@ -3,7 +3,7 @@
 // exist. Until now the SPA's only gate was `npm run build`, which is why every
 // transcript boundary bug had to be found in a live kelabo.
 import assert from 'node:assert/strict'
-import { createComposer } from '../src/transcript/composer.js'
+import { createComposer, LOCAL_SPEAKER } from '../src/transcript/composer.js'
 import {
   apply,
   emptyTranscript,
@@ -12,7 +12,8 @@ import {
   messages,
   renameSpeaker,
 } from '../src/transcript/transcriptStore.js'
-import { readResult } from '../src/transcript/deepgram.js'
+import { createSpeakerLabels, MAX_LABELS } from '../src/transcript/speakerLabels.js'
+import { sttClient, sttClientIds } from '../src/stt/interface.js'
 import { fromWire, DELTA, SEALED, TAIL } from '../src/transcript/events.js'
 
 let passed = 0
@@ -46,7 +47,14 @@ function project(events, meta = {}) {
   return events.reduce((state, e) => apply(state, e, meta), emptyTranscript())
 }
 
-// --- Read: the Deepgram wire format -----------------------------------------
+// --- Read: the provider interface, for every provider ------------------------
+//
+// One suite over the registry, not one per provider. Adding a provider adds a
+// fixture set below and inherits every assertion here; if the interface is real
+// this file needs no other edit, and if a provider quietly returns seconds, or
+// a speaker index, or a bare string where a list belongs, it fails here rather
+// than as a transcript that looks subtly wrong in a live kelabo.
+
 // A Results frame as Deepgram documents it.
 const dg = (start, duration, transcript, extra = {}) => ({
   type: 'Results',
@@ -56,6 +64,150 @@ const dg = (start, duration, transcript, extra = {}) => ({
   channel: { alternatives: [{ transcript }] },
   ...extra,
 })
+
+const dgWords = (words, extra = {}) => ({
+  type: 'Results',
+  start: 0,
+  duration: Math.max(...words.map(w => w.end)),
+  is_final: true,
+  channel: { alternatives: [{ transcript: words.map(w => w.word).join(' '), words }] },
+  ...extra,
+})
+
+// One Soniox token, and one response carrying some.
+const tok = (text, start, end, extra = {}) => ({
+  text,
+  start_ms: start,
+  end_ms: end,
+  confidence: 0.97,
+  is_final: false,
+  ...extra,
+})
+const sx = (tokens, extra = {}) => ({
+  tokens,
+  final_audio_proc_ms: 0,
+  total_audio_proc_ms: 0,
+  ...extra,
+})
+
+/**
+ * What each provider has to supply to be conformance-tested. Keyed by provider
+ * id, and asserted to be complete against the registry — a provider added
+ * without fixtures fails the suite instead of silently going untested.
+ */
+const FIXTURES = {
+  deepgram: {
+    // Anything at all, to check the shape of what comes back.
+    samples: [
+      dg(0, 1.5, 'a guess'),
+      dg(0, 1.5, 'a settled thing', { is_final: true }),
+      dg(0, 1, ''),
+      { type: 'UtteranceEnd', last_word_end: 3.1 },
+    ],
+    // No diarization: one speaker, and it is whoever holds the microphone.
+    plain: dg(0, 2, 'just me talking', { is_final: true }),
+    // Two people inside ONE provider message.
+    multiSpeaker: dgWords([
+      { word: 'hello', start: 0.1, end: 0.5, speaker: 0 },
+      { word: 'there', start: 0.5, end: 0.9, speaker: 0 },
+      { word: 'hi', start: 1.0, end: 1.4, speaker: 1 },
+    ]),
+    // Read twice on a fresh reader, this must commit the same words both times:
+    // a new socket restarts the provider's clock, and a reader holding state
+    // from the old one drops the first thing said on the new one.
+    replayable: dg(0, 2, 'after a reconnect', { is_final: true }),
+  },
+
+  // Soniox sends tokens, not spans: subwords and words each carrying their own
+  // `is_final`, their own timestamps in ms, and their own leading spaces.
+  soniox: {
+    samples: [
+      sx([tok('How', 0, 200, { is_final: true }), tok(' are', 200, 400)]),
+      sx([tok(' you', 400, 600, { is_final: true })], { finished: false }),
+      sx([]),
+      { tokens: [], finished: true, final_audio_proc_ms: 600, total_audio_proc_ms: 600 },
+      { tokens: [], error_code: 503, error_type: 'service_unavailable', error_message: 'nope' },
+    ],
+    plain: sx([tok('just', 0, 300, { is_final: true }), tok(' me', 300, 600, { is_final: true })]),
+    multiSpeaker: sx([
+      tok('hello', 100, 500, { is_final: true, speaker: '1' }),
+      tok(' there', 500, 900, { is_final: true, speaker: '1' }),
+      tok('hi', 1000, 1400, { is_final: true, speaker: '2' }),
+    ]),
+    replayable: sx([tok('after a reconnect', 0, 2000, { is_final: true })]),
+  },
+}
+
+for (const id of sttClientIds()) {
+  const client = sttClient(id)
+  const fx = FIXTURES[id]
+  assert.ok(fx, `provider ${id} is registered but has no conformance fixtures`)
+
+  // Shape. Every field, every time — a caller that has to check whether `finals`
+  // exists is a caller that will forget.
+  {
+    const reader = client.createReader({ diarize: true, language: 'en' })
+    for (const msg of fx.samples) {
+      const r = reader.read(msg)
+      for (const k of ['finals', 'tails', 'active', 'endpoint', 'error', 'finished']) {
+        assert.ok(k in r, `${id}: read() must always return ${k}`)
+      }
+      assert.ok(Array.isArray(r.finals) && Array.isArray(r.tails) && Array.isArray(r.active))
+      assert.equal(typeof r.endpoint, 'boolean')
+      assert.equal(typeof r.finished, 'boolean')
+      for (const seg of [...r.finals, ...r.tails]) {
+        assert.equal(typeof seg.speaker, 'string', `${id}: speaker is an opaque string, never an index`)
+        assert.equal(typeof seg.text, 'string')
+        // Milliseconds, and whole ones. A provider that leaks seconds here puts
+        // every message at the very start of the kelabo, which reads as an
+        // ordering bug a long way from its cause.
+        assert.ok(Number.isInteger(seg.start), `${id}: start must be integer ms, got ${seg.start}`)
+        assert.ok(Number.isInteger(seg.end), `${id}: end must be integer ms, got ${seg.end}`)
+      }
+      for (const sp of r.active) assert.equal(typeof sp, 'string')
+    }
+    ok(`${id}: every read returns the SttRead shape, in milliseconds`)
+  }
+
+  // Text carries no speaker id when the stream is not separated into voices, so
+  // the caller can file it under the local speaker without knowing the provider.
+  {
+    const reader = client.createReader({ diarize: false, language: 'en' })
+    const r = reader.read(fx.plain)
+    assert.ok(r.finals.length >= 1)
+    for (const seg of r.finals) assert.equal(seg.speaker, '', `${id}: undiarized speech has no speaker id`)
+    ok(`${id}: undiarized speech is attributed to the stream, not to a voice`)
+  }
+
+  // THE multi-speaker requirement: one audio stream, several people, one message.
+  {
+    const reader = client.createReader({ diarize: true, language: 'en' })
+    const r = reader.read(fx.multiSpeaker)
+    const speakers = [...new Set(r.finals.map(s => s.speaker))]
+    assert.ok(speakers.length >= 2, `${id}: two voices in one message must read as two segments`)
+    assert.ok(r.finals.every(s => s.text), `${id}: no empty segments`)
+    // Stream order, so the composer appends each speaker's words in the order
+    // they were actually said.
+    const starts = r.finals.map(s => s.start)
+    assert.deepEqual(starts, [...starts].sort((a, b) => a - b), `${id}: segments in stream order`)
+    assert.deepEqual([...new Set(r.active)].sort(), speakers.slice().sort())
+    ok(`${id}: several speakers in one message read as one segment each`)
+  }
+
+  // reset() genuinely resets: whatever per-stream bookkeeping a wire format
+  // needs, none of it may survive into the next socket.
+  {
+    const reader = client.createReader({ diarize: false, language: 'en' })
+    const first = reader.read(fx.replayable)
+    reader.reset()
+    const again = reader.read(fx.replayable)
+    assert.deepEqual(again.finals, first.finals, `${id}: after reset the same audio reads the same way`)
+    ok(`${id}: reset() drops all per-stream state`)
+  }
+}
+
+// --- Read: Deepgram's wire format in particular -----------------------------
+const dgReader = (opts = {}) => sttClient('deepgram').createReader({ language: 'en', ...opts })
 
 {
   // The worked example from Deepgram's own docs: interims restate the segment in
@@ -69,19 +221,14 @@ const dg = (start, duration, transcript, extra = {}) => ({
     dg(3.26, 1.84, 'two two three three three three'),
     dg(3.26, 2.24, 'two two three three three three', { is_final: true, speech_final: true }),
   ]
-  let cursor = 0
+  const reader = dgReader()
   const finals = []
-  for (const f of frames) {
-    const r = readResult(f, { cursor })
-    if (r.cursor != null) cursor = r.cursor
-    if (r.kind === 'final') finals.push(r.text)
-  }
+  for (const f of frames) for (const seg of reader.read(f).finals) finals.push(seg.text)
   assert.deepEqual(finals, [
     'yeah so my credit card number is two two',
     'two two three three three three',
   ])
-  assert.equal(cursor, 5.5)
-  ok('Deepgram’s documented interim/final sequence reads as two settled segments')
+  ok('Deepgram\u2019s documented interim/final sequence reads as two settled segments')
 }
 
 {
@@ -90,105 +237,113 @@ const dg = (start, duration, transcript, extra = {}) => ({
   // `UtteranceEnd` or a `Finalize` answer — none of which are reliable once the
   // VAD gate has removed the silence they measure — left confirmed words sitting
   // as an unconfirmed tail for the whole utterance.
-  const r = readResult(dg(0, 2, 'no pause signal anywhere', { is_final: true }), { cursor: 0 })
-  assert.equal(r.kind, 'final')
-  assert.equal(r.segments.length, 1)
-  assert.equal(r.segments[0].text, 'no pause signal anywhere')
+  const r = dgReader().read(dg(0, 2, 'no pause signal anywhere', { is_final: true }))
+  assert.equal(r.finals.length, 1)
+  assert.equal(r.finals[0].text, 'no pause signal anywhere')
+  assert.equal(r.tails.length, 0, 'a final leaves nothing outstanding')
+  assert.equal(r.endpoint, false, 'Deepgram\u2019s pause signals are deliberately not read')
   ok('a final needs no speech_final, UtteranceEnd or Finalize to be settled')
 }
 
 {
   // Re-emission of an already finalized span (CJK models do this routinely).
-  let cursor = 0
-  const first = readResult(dg(0, 3.26, '今天天气很好', { is_final: true }), { cursor })
-  cursor = first.cursor
-  const again = readResult(dg(0, 3.26, '今天天气很好', { is_final: true }), { cursor })
-  assert.equal(again.kind, 'covered')
-  assert.equal(again.cursor, undefined, 'a covered span must never move the cursor back')
+  // Dropped, because it is already committed — but still that speaker talking,
+  // so it holds their message open rather than letting it seal mid-utterance.
+  const reader = dgReader()
+  const first = reader.read(dg(0, 3.26, '今天天气很好', { is_final: true }))
+  assert.equal(first.finals.length, 1)
+  const again = reader.read(dg(0, 3.26, '今天天气很好', { is_final: true }))
+  assert.deepEqual(again.finals, [], 'the same span must not be committed twice')
+  assert.deepEqual(again.active, [''], 'but it is still speech, and still holds the message open')
   ok('a final for a span already finalized is dropped, not committed twice')
 }
 
 {
   // Empty results are Deepgram idling on audio with no speech. They are not
   // activity (they must not hold the seal clock open) but an empty *final* still
-  // settles its audio, so the cursor moves.
-  const interim = readResult(dg(0, 1, ''), { cursor: 0 })
-  assert.deepEqual(interim, { kind: 'idle', hasText: false })
-  const final = readResult(dg(0, 1, '', { is_final: true }), { cursor: 0 })
-  assert.equal(final.kind, 'idle')
-  assert.equal(final.hasText, false)
-  assert.equal(final.cursor, 1)
-  ok('empty results are not activity, but an empty final still advances the span')
+  // settles its audio, so the next real final is not read as overlapping it.
+  const reader = dgReader()
+  const interim = reader.read(dg(0, 1, ''))
+  assert.deepEqual(interim.active, [], 'an empty result is not activity')
+  assert.deepEqual(interim.finals, [])
+  assert.deepEqual(interim.tails, [])
+  const settled = reader.read(dg(0, 1, '', { is_final: true }))
+  assert.deepEqual(settled.active, [])
+  // The span it settled is gone: a later final covering only that span is a
+  // re-emission, not new words.
+  assert.deepEqual(reader.read(dg(0, 1, 'late', { is_final: true })).finals, [])
+  ok('empty results are not activity, but an empty final still settles its span')
 }
 
 {
   // Non-Results frames (UtteranceEnd, SpeechStarted, Metadata) carry no
   // transcript. They are read, and they do nothing — deliberately.
-  const r = readResult({ type: 'UtteranceEnd', channel: [0, 1], last_word_end: 3.1 }, { cursor: 2 })
-  assert.deepEqual(r, { kind: 'other', hasText: false })
+  const r = dgReader().read({ type: 'UtteranceEnd', channel: [0, 1], last_word_end: 3.1 })
+  assert.deepEqual(r.finals, [])
+  assert.deepEqual(r.tails, [])
+  assert.deepEqual(r.active, [])
   ok('UtteranceEnd carries no transcript and changes nothing')
-}
-
-{
-  // Diarized: a result is split into runs by speaker, so the composer sees a
-  // speaker change and seals on it.
-  const words = [
-    { word: 'hello', start: 0.1, end: 0.5, speaker: 0 },
-    { word: 'there', start: 0.5, end: 0.9, speaker: 0 },
-    { word: 'hi', start: 1.0, end: 1.4, speaker: 1 },
-  ]
-  const r = readResult(
-    { type: 'Results', start: 0, duration: 1.4, is_final: true, channel: { alternatives: [{ transcript: 'hello there hi', words }] } },
-    { cursor: 0, diarize: true },
-  )
-  assert.deepEqual(r.segments.map(s => [s.sp, s.text]), [[0, 'hello there'], [1, 'hi']])
-  ok('a diarized final splits into one segment per speaker')
 }
 
 {
   // A final that partially overlaps what is already committed contributes only
   // its new words — otherwise the overlap is transcribed twice.
-  const words = [
+  const reader = dgReader({ diarize: true })
+  reader.read(dgWords([{ word: 'already', start: 0.1, end: 0.5, speaker: 0 },
+                       { word: 'said', start: 0.5, end: 1.0, speaker: 0 }]))
+  const r = reader.read(dgWords([
     { word: 'already', start: 0.1, end: 0.5, speaker: 0 },
-    { word: 'said', start: 0.5, end: 0.9, speaker: 0 },
+    { word: 'said', start: 0.5, end: 1.0, speaker: 0 },
     { word: 'new', start: 1.2, end: 1.6, speaker: 0 },
-  ]
-  const r = readResult(
-    { type: 'Results', start: 0, duration: 1.6, is_final: true, channel: { alternatives: [{ transcript: 'already said new', words }] } },
-    { cursor: 1.0, diarize: true },
-  )
-  assert.deepEqual(r.segments.map(s => s.text), ['new'])
+  ]))
+  assert.deepEqual(r.finals.map(s => s.text), ['new'])
   ok('a partially covered final contributes only the words it adds')
 }
 
 {
   // CJK: nova word lists mix phrase- and token-level entries, so re-joining them
-  // duplicates text. Undiarized, the response transcript is authoritative.
+  // duplicates text. Undiarized, the response transcript is authoritative — and
+  // the joiner is the READER\u2019s business, chosen from the language it was built
+  // with, so nothing upstream has to know which languages need it.
   const words = [
     { word: '今天', start: 0, end: 0.5 },
     { word: '今天天气', start: 0, end: 1.0 },
   ]
-  const r = readResult(
+  const r = sttClient('deepgram').createReader({ diarize: false, language: 'zh' }).read(
     { type: 'Results', start: 0, duration: 1.0, is_final: true, channel: { alternatives: [{ transcript: '今天天气', words }] } },
-    { cursor: 0, diarize: false, joiner: '' },
   )
-  assert.deepEqual(r.segments.map(s => s.text), ['今天天气'])
+  assert.deepEqual(r.finals.map(s => s.text), ['今天天气'])
   ok('an undiarized final trusts the transcript, not a re-join of its word list')
+}
+
+{
+  // A diarized interim stays ONE tail even though the interface allows several:
+  // Deepgram re-attributes words between revisions of the same guess, so
+  // splitting it would open and abandon a message per flicker. The finals it
+  // later commits are attributed stably, and those are what get persisted.
+  const r = dgReader({ diarize: true }).read({
+    type: 'Results', start: 0, duration: 1.4, is_final: false,
+    channel: { alternatives: [{ transcript: 'hello there hi', words: [
+      { word: 'hello', start: 0.1, end: 0.5, speaker: 0 },
+      { word: 'hi', start: 1.0, end: 1.4, speaker: 1 },
+    ] }] },
+  })
+  assert.equal(r.tails.length, 1)
+  assert.equal(r.tails[0].text, 'hello hi')
+  ok('a diarized guess is one tail, because Deepgram re-attributes guesses')
 }
 
 {
   // End to end through the composer: three finals with no pause signal at all
   // become one message with all three committed — nothing left as a tail.
   const { composer, events, advance } = harness()
-  let cursor = 0
+  const reader = dgReader()
   for (const f of [
     dg(0, 1.5, 'first part', { is_final: true }),
     dg(1.5, 1.5, 'second part', { is_final: true }),
     dg(3.0, 1.5, 'third part', { is_final: true }),
   ]) {
-    const r = readResult(f, { cursor })
-    cursor = r.cursor
-    for (const seg of r.segments) {
+    for (const seg of reader.read(f).finals) {
       composer.addFragment({ text: seg.text, speakerLabel: 'Moon', tStart: seg.start, tEnd: seg.end })
     }
   }
@@ -199,6 +354,107 @@ const dg = (start, duration, transcript, extra = {}) => ({
   assert.equal(sealed.text, 'first part second part third part')
   assert.equal(sealed.reason, 'silence', 'sealed by silence, not stranded until stt_stalled')
   ok('finals commit as they arrive and seal on silence — never stranded as a tail')
+}
+
+// --- Read: Soniox's wire format in particular -------------------------------
+const sxReader = (opts = {}) => sttClient('soniox').createReader(opts)
+
+{
+  // Tokens carry their own spacing, so a run is plain concatenation — and then
+  // trimmed, because the composer inserts the separator itself when it appends.
+  // Without the trim every word after the first arrives doubly spaced.
+  const r = sxReader().read(sx([
+    tok('How', 0, 200, { is_final: true }),
+    tok(' are', 200, 400, { is_final: true }),
+    tok(' you', 400, 600, { is_final: true }),
+  ]))
+  assert.equal(r.finals.length, 1)
+  assert.equal(r.finals[0].text, 'How are you')
+  assert.equal(r.finals[0].start, 0)
+  assert.equal(r.finals[0].end, 600)
+  ok('soniox tokens concatenate with no joiner and the run is trimmed')
+}
+
+{
+  // The composer then joins that onto what it already has, exactly once.
+  const { composer, events } = harness()
+  const reader = sxReader()
+  for (const msg of [
+    sx([tok('How', 0, 200, { is_final: true }), tok(' are', 200, 400)]),
+    sx([tok(' are', 200, 400, { is_final: true }), tok(' you', 400, 600)]),
+    sx([tok(' you', 400, 600, { is_final: true })]),
+  ]) {
+    const r = reader.read(msg)
+    for (const seg of r.finals) composer.addFragment({ text: seg.text, speakerLabel: 'Moon' })
+    for (const seg of r.tails) composer.setTail({ text: seg.text, speakerLabel: 'Moon' })
+  }
+  composer.seal('stop')
+  assert.equal(events.find(e => e.type === SEALED).text, 'How are you')
+  ok('a token stream composes into one correctly spaced message')
+}
+
+{
+  // ONE response, both kinds at once — the reason `finals` and `tails` are
+  // separate lists rather than a discriminated kind. Deepgram never does this;
+  // Soniox does it constantly.
+  const r = sxReader().read(sx([
+    tok('settled', 0, 300, { is_final: true }),
+    tok(' guess', 300, 600),
+  ]))
+  assert.deepEqual(r.finals.map(s => s.text), ['settled'])
+  assert.deepEqual(r.tails.map(s => s.text), ['guess'])
+  ok('one response carries confirmed and unconfirmed words together')
+}
+
+{
+  // And with two speakers, both halves split — the case the interface allows
+  // and Deepgram deliberately declines, because Soniox's guesses are stable
+  // per speaker where Deepgram's are re-attributed between revisions.
+  const r = sxReader({ diarize: true }).read(sx([
+    tok('I think', 0, 400, { is_final: true, speaker: '1' }),
+    tok('no wait', 400, 800, { speaker: '2' }),
+  ]))
+  assert.deepEqual(r.finals.map(s => [s.speaker, s.text]), [['1', 'I think']])
+  assert.deepEqual(r.tails.map(s => [s.speaker, s.text]), [['2', 'no wait']])
+  assert.deepEqual(r.active, ['1', '2'])
+  ok('two speakers can hold a confirmed and an unconfirmed run at the same time')
+}
+
+{
+  // `<end>` and `<fin>` are signals, not speech. Leaving them in the text posts
+  // literal "<end>" to the board and to the LLM.
+  for (const marker of ['<end>', '<fin>']) {
+    const r = sxReader().read(sx([
+      tok('all done', 0, 400, { is_final: true }),
+      tok(marker, 400, 400, { is_final: true }),
+    ]))
+    assert.deepEqual(r.finals.map(s => s.text), ['all done'], `${marker} must not reach the transcript`)
+    assert.equal(r.endpoint, true, `${marker} reports an endpoint`)
+  }
+  ok('marker tokens are read as an endpoint signal, never as words')
+}
+
+{
+  // Soniox reports failure in-band and then closes, so the reason is knowable
+  // — unlike a socket that merely drops.
+  const r = sxReader().read({
+    tokens: [], error_code: 403, error_type: 'temp_api_key_session_expired', error_message: 'expired',
+  })
+  assert.equal(r.error.code, 403)
+  assert.equal(r.error.type, 'temp_api_key_session_expired')
+  assert.deepEqual(r.finals, [])
+  assert.deepEqual(r.active, [], 'an error is not activity')
+  ok('an error response is reported, not parsed as speech')
+}
+
+{
+  const reader = sxReader()
+  assert.equal(reader.read(sx([])).active.length, 0, 'a response with no tokens is idle')
+  // Whitespace-only tokens are the gaps between words, not speech: counting
+  // them would hold a message open through a silence.
+  assert.deepEqual(reader.read(sx([tok(' ', 0, 10, { is_final: true })])).active, [])
+  assert.equal(reader.read({ tokens: [], finished: true }).finished, true)
+  ok('empty, whitespace-only and finished responses carry no speech')
 }
 
 // --- Compose: where messages begin and end ---------------------------------
@@ -238,7 +494,7 @@ const dg = (start, duration, transcript, extra = {}) => ({
   const { composer, events, advance } = harness()
   composer.addFragment({ text: 'hello', speakerLabel: 'Moon' })
   advance(500)
-  composer.noteActivity(true) // the Finalize answer comes back
+  composer.noteActivity([LOCAL_SPEAKER]) // the Finalize answer comes back
   advance(500)
   assert.equal(composer.sealIfIdle(), false, 'still inside the second')
   advance(600)
@@ -278,15 +534,111 @@ const dg = (start, duration, transcript, extra = {}) => ({
   ok('the word cap counts CJK characters, which have no spaces to split on')
 }
 
+// --- Compose: several speakers in one audio stream --------------------------
+//
+// A room mic carries more than one person, and a good diarizer separates them
+// mid-conversation. Composing that into a single open message and sealing on
+// every speaker change shredded both of them into one fragment per turn.
+
 {
   const { composer, events } = harness()
   composer.addFragment({ text: 'from A', speakerLabel: 'A', key: 'A' })
   composer.addFragment({ text: 'from B', speakerLabel: 'B', key: 'B' })
+  assert.equal(events.filter(e => e.type === SEALED).length, 0, 'a speaker change is not a seal')
+  assert.deepEqual(composer.openKeys(), ['A', 'B'], 'both are open at once')
+  ok('a second speaker opens their own message rather than closing the first')
+}
+
+{
+  // The failure this replaced: A and B interleaving produced a seal per turn.
+  // Now each speaker accumulates their own message, whatever order they arrive
+  // in, and the transcript holds two.
+  const { composer, events, advance } = harness()
+  for (const [key, text] of [
+    ['A', 'so I was thinking'],
+    ['B', 'go on'],
+    ['A', 'we should ship it'],
+    ['B', 'agreed'],
+  ]) {
+    composer.addFragment({ text, speakerLabel: key, key })
+    advance(100)
+  }
+  assert.equal(events.filter(e => e.type === SEALED).length, 0, 'nothing sealed while both were talking')
+  advance(1100)
+  assert.equal(composer.sealIfIdle(), true)
+
+  const sealed = events.filter(e => e.type === SEALED)
+  assert.equal(sealed.length, 2, 'two speakers, two messages — not four fragments')
+  assert.deepEqual(
+    sealed.map(e => [e.speakerLabel, e.text]).sort(),
+    [['A', 'so I was thinking we should ship it'], ['B', 'go on agreed']].sort(),
+  )
+  // And the projection agrees, ordered by when each person started speaking.
+  assert.deepEqual(messages(project(events)).map(m => m.speakerLabel), ['A', 'B'])
+  ok('INTERLEAVED SPEAKERS COMPOSE INTO ONE MESSAGE EACH (the multi-speaker invariant)')
+}
+
+{
+  // Each speaker's clock runs on their own. One person talking continuously
+  // must not hold a silent person's message open — that is how a room mic
+  // produces a single unbounded message per voice.
+  const { composer, events, advance } = harness()
+  composer.addFragment({ text: 'B says one thing', speakerLabel: 'B', key: 'B' })
+  for (let i = 0; i < 10; i++) {
+    advance(300)
+    composer.addFragment({ text: 'and', speakerLabel: 'A', key: 'A' })
+    composer.sealIfIdle()
+  }
+  const sealed = events.filter(e => e.type === SEALED)
+  assert.equal(sealed.length, 1, 'B sealed on B‘s silence')
+  assert.equal(sealed[0].speakerLabel, 'B')
+  assert.deepEqual(composer.openKeys(), ['A'], 'A is still talking')
+  ok('one speaker talking does not hold another speaker’s message open')
+}
+
+{
+  // Activity is keyed too. A guess suppressed by `finalOnly`, or a span already
+  // committed, still holds THAT speaker's message open and nobody else's.
+  const { composer, advance } = harness()
+  composer.addFragment({ text: 'a', speakerLabel: 'A', key: 'A' })
+  composer.addFragment({ text: 'b', speakerLabel: 'B', key: 'B' })
+  advance(800)
+  composer.noteActivity(['A'])
+  advance(400)
+  composer.sealIfIdle()
+  assert.deepEqual(composer.openKeys(), ['A'], 'A was held open, B timed out')
+  ok('noteActivity holds open only the speakers who actually said something')
+}
+
+{
+  // Mute, stop, kelabo end: everyone's message closes, because the stream is
+  // going away and nothing more can arrive for any of them.
+  const { composer, events } = harness()
+  composer.addFragment({ text: 'one', speakerLabel: 'A', key: 'A' })
+  composer.setTail({ text: 'two', speakerLabel: 'B', key: 'B' })
+  const ids = composer.seal('mute')
+  assert.equal(ids.length, 2)
+  assert.deepEqual(composer.openKeys(), [])
+  assert.deepEqual(
+    events.filter(e => e.type === SEALED).map(e => e.text).sort(),
+    ['one', 'two'],
+    'an unconfirmed guess is kept, not dropped, for every speaker',
+  )
+  ok('sealing without a speaker closes every open message')
+}
+
+{
+  // Caps are per message, so one person monologuing cannot cut somebody else off.
+  const { composer, events } = harness({ maxWords: 3 })
+  composer.addFragment({ text: 'one two', speakerLabel: 'A', key: 'A' })
+  composer.addFragment({ text: 'short', speakerLabel: 'B', key: 'B' })
+  composer.addFragment({ text: 'three four', speakerLabel: 'A', key: 'A' })
   const sealed = events.filter(e => e.type === SEALED)
   assert.equal(sealed.length, 1)
-  assert.equal(sealed[0].text, 'from A')
-  assert.equal(sealed[0].reason, 'speaker_change')
-  ok('a diarized speaker change seals the previous speaker’s message')
+  assert.equal(sealed[0].speakerLabel, 'A')
+  assert.equal(sealed[0].reason, 'max_words')
+  assert.deepEqual(composer.openKeys(), ['B'], 'B was nowhere near the cap')
+  ok('the word cap bounds one speaker’s message, not the whole stream')
 }
 
 // --- Compose: THE seal rule -------------------------------------------------
@@ -298,7 +650,7 @@ const dg = (start, duration, transcript, extra = {}) => ({
   composer.addFragment({ text: 'I am still talking', speakerLabel: 'Moon' })
   for (let i = 0; i < 60; i++) {
     advance(800) // interims arriving faster than the 1s timeout
-    composer.noteActivity(true)
+    composer.noteActivity([LOCAL_SPEAKER])
     composer.sealIfIdle()
   }
   assert.equal(events.filter(e => e.type === SEALED).length, 0, '48s of speech stayed one message')
@@ -323,7 +675,7 @@ const dg = (start, duration, transcript, extra = {}) => ({
   const { composer, events, advance } = harness()
   composer.addFragment({ text: 'keep going', speakerLabel: 'Moon' })
   advance(900)
-  composer.noteActivity(true) // an interim carrying text
+  composer.noteActivity([LOCAL_SPEAKER]) // an interim carrying text
   advance(900)
   assert.equal(composer.sealIfIdle(), false, 'the interim reset the clock')
   advance(200)
@@ -432,7 +784,7 @@ const dg = (start, duration, transcript, extra = {}) => ({
   composer.addFragment({ text: 'all done', speakerLabel: 'Moon' })
   for (let i = 0; i < 10; i++) {
     advance(300)
-    composer.noteActivity(false) // empty interim results streaming in
+    composer.noteActivity([]) // empty interim results streaming in
     composer.sealIfIdle()
   }
   assert.equal(events.filter(e => e.type === SEALED).length, 1, 'empty results did not hold it open')
@@ -650,6 +1002,54 @@ const dg = (start, duration, transcript, extra = {}) => ({
   assert.equal(e.type, SEALED)
   assert.equal(e.source, 'typed')
   ok('a typed message survives the wire as a sealed event with its source intact')
+}
+
+// --- Speaker labels: provider ids -> A/B/C ----------------------------------
+{
+  const labels = createSpeakerLabels()
+  // Soniox counts from "1", Deepgram from 0, and neither numbering reaches the
+  // transcript: what matters is the order people actually spoke in.
+  assert.equal(labels.labelFor('3'), 'A', 'the first voice heard is A, whatever the provider called it')
+  assert.equal(labels.labelFor('1'), 'B')
+  assert.equal(labels.labelFor('3'), 'A', 'and it stays A')
+  assert.equal(labels.labelFor('0'), 'C')
+  assert.equal(labels.count(), 3)
+  ok('speaker labels are assigned in order of first appearance, not by index')
+}
+
+{
+  // Ids are opaque: numbers, strings and whatever a future provider emits all
+  // work, and the numeric-looking ones are not secretly sorted.
+  const labels = createSpeakerLabels()
+  assert.equal(labels.labelFor(2), 'A')
+  assert.equal(labels.labelFor('2'), 'A', 'a number and its string are the same voice')
+  assert.equal(labels.labelFor('spk_alice'), 'B')
+  ok('a speaker id is opaque — any shape a provider emits gets a stable label')
+}
+
+{
+  // A label must always be something the gateway will accept as a diarization
+  // label (a single capital), so beyond the alphabet it clamps rather than
+  // running off the end into a caption the server would reject.
+  const labels = createSpeakerLabels()
+  for (let i = 0; i < MAX_LABELS + 5; i++) labels.labelFor(`v${i}`)
+  for (const label of labels.known().values()) assert.match(label, /^[A-Z]$/)
+  assert.equal(labels.labelFor('v0'), 'A')
+  assert.equal(labels.labelFor(`v${MAX_LABELS + 4}`), 'Z')
+  ok('every label is a single capital, even past the end of the alphabet')
+}
+
+{
+  // On reconnect the provider renumbers, so the map is dropped: keeping it would
+  // hand an existing label — and any rename the host applied to it — to whoever
+  // happens to speak first on the new socket.
+  const labels = createSpeakerLabels()
+  labels.labelFor('1')
+  labels.labelFor('2')
+  labels.reset()
+  assert.equal(labels.count(), 0)
+  assert.equal(labels.labelFor('9'), 'A')
+  ok('reset() forgets every assignment, so a new stream starts at A')
 }
 
 console.log(`\n${passed} transcript tests passed`)

@@ -1589,6 +1589,42 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
    any position:fixed child resolve against the drawer instead of the viewport.
    left:0 + width:auto rather than width:100vw — 100vw includes the scrollbar
    gutter, which would push the panel past the left edge. */
+/* The resize grip: a wide hit area straddling the drawer's edge, with a thin
+   line drawn inside it that only appears on hover or focus. A permanently
+   visible divider reads as a border and invites nobody to pull it; a 4px hit
+   area is a control most people cannot land on. Hence 11px of target and 2px
+   of paint.
+
+   `touch-action: none` so a drag on a touchscreen resizes rather than scrolling
+   the page out from under the gesture, and the transform transition is dropped
+   while dragging — the drawer would otherwise ease towards each new width and
+   lag a third of a second behind the pointer. */
+.drawer-grip {
+  position: absolute;
+  left: -5px; top: 0; bottom: 0;
+  width: 11px;
+  cursor: ew-resize;
+  touch-action: none;
+  z-index: 2;
+}
+.drawer-grip::before {
+  content: '';
+  position: absolute;
+  left: 4px; top: 0; bottom: 0;
+  width: 3px;
+  border-radius: 999px;
+  background: transparent;
+  transition: background-color .15s ease;
+}
+.drawer-grip:hover::before,
+.drawer-grip:focus-visible::before,
+.drawer.is-resizing .drawer-grip::before { background: var(--accent); }
+.drawer-grip:focus-visible { outline: none; }
+.drawer.is-resizing {
+  transition: none;
+  user-select: none;
+}
+
 .drawer.fullscreen { left: 0; width: auto; border-left: none; }
 .drawer.fullscreen .drawer-body { padding: var(--space-6) max(var(--space-5), calc((100vw - 1400px) / 2)); }
 .drawer.fullscreen .dbg-pre { max-height: 60vh; }

@@ -94,6 +94,10 @@ function fromEnv() {
       // holds no read grant on these values — they stay gateway-owned.
       llm: env.KELABO_SECRET_LLM,
       cloudflareRealtime: env.KELABO_SECRET_CLOUDFLARE_RTC,
+      apiOrigin: env.KELABO_SECRET_API_ORIGIN,
+    },
+    api: {
+      requireOriginSecret: env.KELABO_REQUIRE_ORIGIN_SECRET === "true",
     },
     auth: {
       sessionTtlSeconds: num(env.KELABO_SESSION_TTL_SECONDS, DEFAULTS.sessionTtlSeconds),
@@ -163,7 +167,9 @@ function fromLoadConfig(c) {
       mcpPrefix: c.secrets.mcpPrefix || "",
       llm: c.secrets.llm,
       cloudflareRealtime: c.secrets.cloudflareRealtime,
+      apiOrigin: c.secrets.apiOrigin,
     },
+    api: { requireOriginSecret: !!c.api?.requireOriginSecret },
     auth: {
       sessionTtlSeconds: c.auth?.sessionTtlSeconds ?? DEFAULTS.sessionTtlSeconds,
       refreshTtlDays: c.auth?.refreshTtlDays ?? DEFAULTS.refreshTtlDays,

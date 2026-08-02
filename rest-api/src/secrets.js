@@ -81,6 +81,10 @@ export function createSecrets({ region } = {}) {
     putMcpSecret,
     deleteMcpSecret,
     getCookieKey: (config) => getSecretRaw(config.secrets.cookieSigningKey),
+    // The value CloudFront sends as x-kelabo-origin. Cached like the rest, so
+    // the gate costs one Secrets Manager call per cold container, not one per
+    // request.
+    getApiOriginSecret: (config) => getSecretRaw(config.secrets.apiOrigin),
     getDeepgramKey: async (config) => {
       const s = await getSecretJson(config.secrets.deepgram);
       return s.apiKey || s.key || s.value;

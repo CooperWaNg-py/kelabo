@@ -24,6 +24,7 @@ import {
   agentApproveBodySchema,
   joinCodeRedeemBodySchema,
 } from "@kelabo/contracts";
+import { timingSafeEqual } from "node:crypto";
 import { ZodError } from "zod";
 import { ensureConfig } from "./config.js";
 import { createDb } from "./db.js";
@@ -47,6 +48,23 @@ import { parseCookies, readCookie, mintCookie, serializeCookie } from "./cookies
 import { ApiError, err } from "./errors.js";
 
 const VERSION = process.env.KELABO_VERSION || "0.1.0";
+
+/** The header CloudFront injects, and the only thing separating a request that
+ *  came through the distribution from one that went around it. */
+export const ORIGIN_SECRET_HEADER = "x-kelabo-origin";
+
+/**
+ * Constant-time comparison of the presented origin secret against the expected
+ * one. `timingSafeEqual` throws when the buffers differ in length, so length is
+ * checked first — it is not itself secret, since the value is generated at a
+ * fixed width.
+ */
+export function originSecretMatches(presented, expected) {
+  if (!expected || typeof presented !== "string" || !presented) return false;
+  const a = Buffer.from(presented, "utf8");
+  const b = Buffer.from(expected, "utf8");
+  return a.length === b.length && timingSafeEqual(a, b);
+}
 
 function log(level, msg, extra = {}) {
   const fn = level === "error" ? console.error : level === "warn" ? console.warn : console.log;
@@ -838,6 +856,36 @@ export function createApp(deps) {
     const path = event.rawPath || event.path || "/";
     const query = Object.fromEntries(new URLSearchParams(event.rawQueryString || "").entries());
     const headers = Object.fromEntries(Object.entries(event.headers || {}).map(([k, v]) => [k.toLowerCase(), v]));
+
+    // The API answers on its own execute-api URL as well as through
+    // CloudFront, and that URL passes neither the distribution nor the WAF —
+    // so without this, `allowIps` closes the portal and the Gateway while the
+    // whole control plane stays open to the internet (docs 07). CloudFront
+    // injects a secret header; a request without it arrived by the back door.
+    //
+    // Checked before the body is parsed, so nothing is done on an
+    // unauthorised caller's behalf, and answered with a bare 403 that names
+    // neither the header nor the reason.
+    if (config.api?.requireOriginSecret) {
+      let expected = null;
+      try {
+        expected = await secrets.getApiOriginSecret(config);
+      } catch (e) {
+        // Fail closed: a gate that opens when it cannot read its own secret is
+        // not a gate. Logged at error because it takes the API down with it,
+        // and the cause must not have to be inferred from a wall of 403s.
+        log("error", "origin_secret_unreadable", { secret: config.secrets?.apiOrigin, error: String(e) });
+      }
+      if (!originSecretMatches(headers[ORIGIN_SECRET_HEADER], expected)) {
+        log("warn", "origin_rejected", { method, path, ip: event.requestContext?.http?.sourceIp });
+        return {
+          statusCode: 403,
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ error: "forbidden" }),
+        };
+      }
+    }
+
     let body = null;
     if (event.body) {
       const raw = event.isBase64Encoded ? Buffer.from(event.body, "base64").toString("utf8") : event.body;

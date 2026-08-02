@@ -57,6 +57,10 @@ export class LambdaStack extends Stack {
         KELABO_SECRET_OIDC_GOOGLE: cfg.secrets.oidcGoogle,
         KELABO_SECRET_OIDC_APPLE: cfg.secrets.oidcApple,
         KELABO_SECRET_MCP_PREFIX: cfg.secrets.mcpPrefix,
+        // The shared secret CloudFront sends, and whether to insist on it.
+        // Only the NAME travels here; the value is read at runtime.
+        KELABO_SECRET_API_ORIGIN: cfg.secrets.apiOrigin,
+        KELABO_REQUIRE_ORIGIN_SECRET: cfg.api.requireOriginSecret ? "true" : "false",
         KELABO_SES_FROM_ADDRESS: cfg.ses.fromAddress,
         // Usually this stack's own region. It differs only when a deployment
         // moved an environment's mail to another region to give it its own
@@ -142,6 +146,9 @@ export class LambdaStack extends Stack {
       CookieKey: cfg.secrets.cookieSigningKey,
       OidcGoogle: cfg.secrets.oidcGoogle,
       OidcApple: cfg.secrets.oidcApple,
+      // Read, not describe: the Lambda compares the presented header against
+      // this value on every request that reaches a cold container.
+      ApiOrigin: cfg.secrets.apiOrigin,
     })) {
       secretsmanager.Secret.fromSecretNameV2(this, `Secret${id}`, secretName).grantRead(this.fn);
     }

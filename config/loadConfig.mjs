@@ -209,10 +209,59 @@ export function loadConfig(env,   configPath = join(here, "kelabo.json")) {
   // fine and falls back to generic wording.
   const organizationName = String(block.organizationName ?? "").trim();
 
+  // The API's own front door. CloudFront is not the only way in: API Gateway
+  // always answers on its own `https://<id>.execute-api.<region>.amazonaws.com`
+  // URL, which reaches the same Lambda while passing neither the distribution
+  // nor the WAF — so `allowIps` closes the portal and the Gateway and quietly
+  // does nothing for the control plane.
+  //
+  // It cannot be closed by address. HTTP APIs support neither WAF (that is REST
+  // APIs) nor resource policies, and an IP rule could not work anyway: requests
+  // arrive from CloudFront's edge, not the visitor's, so allowing the visitor
+  // blocks CloudFront and allowing CloudFront admits everyone else's
+  // distribution. Nor does `disableExecuteApiEndpoint` help — it needs a custom
+  // domain, which must resolve publicly, and so becomes the new bypass.
+  //
+  // What works is a secret only CloudFront knows: it injects the header, the
+  // Lambda requires it. The raw endpoint stays up and becomes useless.
+  //
+  // Three states rather than a boolean, because the safe rollout has a middle
+  // one and a boolean cannot express it. The Lambda stack deploys BEFORE the
+  // portal stack, so enforcing in the same pass that first sends the header
+  // means the API rejects CloudFront's own traffic until the distribution
+  // catches up — a control-plane outage for the length of a deploy.
+  //
+  //   "off"     nothing sent, nothing required. The default, so an existing
+  //             deployment upgrading into this changes nothing and needs no
+  //             secret to exist.
+  //   "send"    CloudFront sends the header; the API still serves anyone.
+  //             Phase one, and harmless on its own.
+  //   "require" the API rejects whatever arrives without it. Phase two.
+  //
+  // Anything else throws rather than defaulting: a typo silently meaning "off"
+  // would leave the control plane open while the config claims otherwise, and
+  // that is the one failure this knob exists to prevent.
+  const ORIGIN_SECRET_MODES = ["off", "send", "require"];
+  const originSecret = block.api?.originSecret ?? "off";
+  if (!ORIGIN_SECRET_MODES.includes(originSecret)) {
+    throw new Error(
+      `kelabo config: env "${env}" has api.originSecret "${originSecret}"; ` +
+        `expected one of ${ORIGIN_SECRET_MODES.join(", ")}.`,
+    );
+  }
+  const api = {
+    ...(block.api ?? {}),
+    originSecret,
+    // Convenience for the two consumers, so neither restates the rule.
+    sendOriginSecret: originSecret !== "off",
+    requireOriginSecret: originSecret === "require",
+  };
+
   return {
     ...block,
     env,
     organizationName,
+    api,
     app: raw.app,
     rtcApiBase,
     rtc,
@@ -229,6 +278,11 @@ export function loadConfig(env,   configPath = join(here, "kelabo.json")) {
       // kelabo.json loadable, using the conventional name.
       cloudflareRealtime:
         block.secrets?.cloudflareRealtime ?? `kelabo/${block.endpoint}/cloudflare-realtime`,
+      // Shared between CloudFront (which sends it) and the Lambda (which
+      // checks it). Defaulted like the others so a deployment upgrading into
+      // this needs no config edit — only `make origin-secret` to create the
+      // value, which is generated, never typed.
+      apiOrigin: block.secrets?.apiOrigin ?? `kelabo/${block.endpoint}/api-origin`,
     },
     baseDomain,
     portalDomain,

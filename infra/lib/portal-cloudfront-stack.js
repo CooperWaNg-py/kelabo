@@ -1,4 +1,4 @@
-import { Stack, Fn, RemovalPolicy, CfnOutput } from "aws-cdk-lib";
+import { Stack, Fn, RemovalPolicy, CfnOutput, SecretValue } from "aws-cdk-lib";
 import * as s3 from "aws-cdk-lib/aws-s3";
 import * as cloudfront from "aws-cdk-lib/aws-cloudfront";
 import * as origins from "aws-cdk-lib/aws-cloudfront-origins";
@@ -34,8 +34,26 @@ export class PortalCloudFrontStack extends Stack {
         "function handler(event){var r=event.request;if(r.uri==='/api'){r.uri='/';}else if(r.uri.indexOf('/api/')===0){r.uri=r.uri.slice(4);}return r;}",
       ),
     });
+    // The one thing that tells the Lambda a request came through here rather
+    // than straight to the execute-api URL, which answers the same Lambda while
+    // passing neither this distribution nor the WAF (docs 07). Sent always;
+    // whether the API insists on it is `api.requireOriginSecret`, so the header
+    // can ship one deploy ahead of the enforcement that depends on it.
+    //
+    // A CloudFormation dynamic reference, so the value is resolved at deploy
+    // time and appears in neither the repository nor a stack export. It is a
+    // custom origin header, which CloudFront sets after the viewer request, so
+    // a caller cannot forge it by simply sending one.
+    // Only referenced when switched on: a dynamic reference is resolved during
+    // the deploy, so emitting it unconditionally would fail the portal stack of
+    // every existing deployment that has not created the secret yet.
+    const originHeaders = cfg.api.sendOriginSecret
+      ? { "x-kelabo-origin": SecretValue.secretsManager(cfg.secrets.apiOrigin).unsafeUnwrap() }
+      : undefined;
     const apiBehavior = {
-      origin: new origins.HttpOrigin(apiDomain),
+      origin: new origins.HttpOrigin(apiDomain, {
+        ...(originHeaders ? { customHeaders: originHeaders } : {}),
+      }),
       allowedMethods: cloudfront.AllowedMethods.ALLOW_ALL,
       cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
       originRequestPolicy: cloudfront.OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER,

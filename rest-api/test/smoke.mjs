@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { createApp } from "../src/index.js";
+import { createApp, originSecretMatches, ORIGIN_SECRET_HEADER } from "../src/index.js";
 import { createDb } from "./stubDb.js";
 import { createOtp } from "../src/otp.js";
 import { createSessions } from "../src/sessions.js";
@@ -1630,6 +1630,91 @@ await test("unknown route -> 404 json", async () => {
   const res = await call("GET", "/nope");
   assert.equal(res.statusCode, 404);
   assert.equal(res.json.error, "not_found");
+});
+
+// ---------------------------------------------------------------------------
+// The origin gate. API Gateway answers on its own execute-api URL as well as
+// through CloudFront, and that URL passes neither the distribution nor the WAF
+// — so `allowIps` protects the portal and the Gateway while leaving the whole
+// control plane open. The gate is the only thing that closes it, which is why
+// its failure modes are pinned here rather than discovered in production.
+const ORIGIN_VALUE = "s3cret-origin-value";
+
+function gatedApp({ secretValue = ORIGIN_VALUE, throws = false } = {}) {
+  return createApp({
+    config: { ...config, api: { requireOriginSecret: true }, secrets: { ...config.secrets, apiOrigin: "api-origin" } },
+    db,
+    secrets: {
+      ...secrets,
+      getApiOriginSecret: async () => {
+        if (throws) throw new Error("AccessDeniedException");
+        return secretValue;
+      },
+    },
+    ses, sessions, auth, kelabos, join, joinCodes, records, deepgramToken,
+    internal, mcpOauth, scheduling, contacts, huddle, agent, version: "test",
+  });
+}
+
+async function callApp(target, { header } = {}) {
+  const res = await target({
+    requestContext: { http: { method: "GET", sourceIp: "9.9.9.9" } },
+    rawPath: "/health",
+    rawQueryString: "",
+    headers: { "content-type": "application/json", ...(header !== undefined ? { [ORIGIN_SECRET_HEADER]: header } : {}) },
+  });
+  return { ...res, json: res.body ? JSON.parse(res.body) : null };
+}
+
+await test("origin gate off (the default) — no header needed", async () => {
+  // `app` is built from a config with no `api` block at all, which is what an
+  // existing deployment looks like the moment this code ships.
+  const res = await call("GET", "/health");
+  assert.equal(res.statusCode, 200);
+});
+
+await test("origin gate on — a request with no header is refused", async () => {
+  const res = await callApp(gatedApp());
+  assert.equal(res.statusCode, 403);
+  assert.equal(res.json.error, "forbidden");
+  // The reply names neither the header nor the reason.
+  assert.equal(Object.keys(res.json).length, 1);
+});
+
+await test("origin gate on — a wrong header is refused", async () => {
+  assert.equal((await callApp(gatedApp(), { header: "not-it" })).statusCode, 403);
+  assert.equal((await callApp(gatedApp(), { header: "" })).statusCode, 403);
+  // Same length as the real value, so this fails on content rather than size.
+  assert.equal((await callApp(gatedApp(), { header: "x".repeat(ORIGIN_VALUE.length) })).statusCode, 403);
+});
+
+await test("origin gate on — the right header passes through to routing", async () => {
+  const res = await callApp(gatedApp(), { header: ORIGIN_VALUE });
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.json.ok, true);
+});
+
+await test("origin gate fails CLOSED when the secret cannot be read", async () => {
+  // A gate that opens when it cannot read its own secret is not a gate. This
+  // takes the API down, which is the correct direction to fail.
+  const res = await callApp(gatedApp({ throws: true }), { header: ORIGIN_VALUE });
+  assert.equal(res.statusCode, 403);
+});
+
+await test("originSecretMatches: only an exact match, and never on absence", async () => {
+  assert.equal(originSecretMatches("abc", "abc"), true);
+  assert.equal(originSecretMatches("abc", "abd"), false);
+  assert.equal(originSecretMatches("ab", "abc"), false, "shorter must not pass");
+  assert.equal(originSecretMatches("abcd", "abc"), false, "longer must not pass");
+  // An unset expectation must never be satisfiable — this is the case that
+  // would silently disable the gate.
+  assert.equal(originSecretMatches("", ""), false);
+  assert.equal(originSecretMatches("abc", ""), false);
+  assert.equal(originSecretMatches("abc", null), false);
+  assert.equal(originSecretMatches("abc", undefined), false);
+  assert.equal(originSecretMatches(undefined, "abc"), false);
+  assert.equal(originSecretMatches(null, "abc"), false);
+  assert.equal(originSecretMatches(["abc"], "abc"), false, "a non-string must not pass");
 });
 
 console.log(`\n${passed} tests passed${process.exitCode ? " (with failures)" : ""}`);

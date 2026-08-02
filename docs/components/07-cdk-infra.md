@@ -109,11 +109,61 @@ exceptions are the first lock and the last unlock: those add or remove a stack
 and the ALB's open rule, which only a deploy can do, and the script says so
 instead of appearing to succeed.
 
-**Still open, deliberately noted:** the API Gateway's own
-`https://<id>.execute-api.<region>.amazonaws.com` URL bypasses CloudFront and
-therefore the WebACL. AWS WAF does not support HTTP APIs (only REST and
-WebSocket), so closing it needs a CloudFront origin secret the Lambda verifies —
-tracked separately.
+**The execute-api bypass, and `api.originSecret`.** API Gateway always answers
+on its own `https://<id>.execute-api.<region>.amazonaws.com` URL, which reaches
+the same Lambda while passing neither CloudFront nor the WebACL. Left alone,
+`allowIps` closes the portal and the Gateway and does *nothing* for the control
+plane — the whole of `/auth`, `/kelabos`, `/records` stays open to the internet.
+It gives an allowlisted deployment a false sense of being closed, which is worse
+than being visibly open.
+
+It cannot be closed by address, and the reasons are worth recording because each
+looks like the answer:
+
+- **WAF** supports API Gateway *REST* APIs. This is an **HTTP** API, so no.
+- **A resource policy** — HTTP APIs do not support them at all. And an IP rule
+  could not work anyway: requests arrive from **CloudFront's edge**, not the
+  visitor's, so allowing the visitor blocks CloudFront, and allowing
+  CloudFront's ranges admits everyone else's distribution.
+- **`disableExecuteApiEndpoint`** needs a custom domain, and a CloudFront origin
+  must resolve publicly — so the custom domain becomes the new bypass. This is
+  the trap: it reads as the clean fix and merely moves the hole.
+
+What works is a secret only CloudFront knows. It injects `x-kelabo-origin` as a
+**custom origin header** (set after the viewer request, so a caller cannot forge
+it by sending one), and the Lambda requires it. The raw endpoint stays up and
+becomes useless. The gate runs before the body is parsed and **fails closed** if
+the secret cannot be read — a gate that opens when it loses its secret is not a
+gate, and that failure takes the API down, which is the correct direction.
+
+`api.originSecret` has three states, not two, because the safe rollout has a
+middle one:
+
+| | CloudFront sends | Lambda requires |
+|---|---|---|
+| `off` (default) | no | no |
+| `send` | yes | no |
+| `require` | yes | yes |
+
+**The order is not optional.** The Lambda stack deploys *before* the portal
+stack (`infra/bin/kelabo.js`), so going straight to `require` means the API
+rejects CloudFront's own traffic until the distribution catches up — a
+control-plane outage for the length of the deploy. And the header value is a
+CloudFormation *dynamic reference*, resolved during deploy, so the secret must
+exist before the portal stack is deployed at all:
+
+```
+make origin-secret env=<env>    # generates it; idempotent, never overwrites
+# set api.originSecret = "send", then:
+make deploy env=<env>
+# confirm the header arrives, set "require", then:
+make deploy env=<env>
+```
+
+An unrecognised value throws instead of defaulting to `off`: a typo that quietly
+meant "open" is the one failure this knob exists to prevent. Rotating the secret
+later needs the portal and the Lambda redeployed together, so `make
+origin-secret` refuses to overwrite an existing value.
 
 The Gateway ECS uses the **default VPC, public subnets, no NAT** (cost),
 `CircuitBreaker({rollback:true})`.

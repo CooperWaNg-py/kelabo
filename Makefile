@@ -79,7 +79,13 @@ frontend: ## build the SPA + s3 sync + CloudFront invalidation
 synth: ## cdk synth (offline-safe)
 	cd infra && npx cdk synth -c env=$(env)
 
-secrets: ## create/update secrets (needs DEEPGRAM_API_KEY=.. LLM_API_KEY=..)
+origin-secret: ## create the CloudFront->API shared secret (generated, idempotent)
+	@aws secretsmanager describe-secret --secret-id kelabo/$(env)/api-origin --region $(REGION) >/dev/null 2>&1 \
+	  && echo "kelabo/$(env)/api-origin already exists — left alone (rotating it needs the portal and the Lambda redeployed together)" \
+	  || (aws secretsmanager create-secret --name kelabo/$(env)/api-origin --secret-string "$$(openssl rand -hex 32)" --region $(REGION) --tags Key=app,Value=kelabo Key=endpoint,Value=$(env) >/dev/null \
+	      && echo "created kelabo/$(env)/api-origin")
+
+secrets: origin-secret ## create/update secrets (needs DEEPGRAM_API_KEY=.. LLM_API_KEY=..)
 	@test -n "$(DEEPGRAM_API_KEY)" || (echo "DEEPGRAM_API_KEY required"; exit 1)
 	@test -n "$(LLM_API_KEY)" || (echo "LLM_API_KEY required"; exit 1)
 	aws secretsmanager describe-secret --secret-id kelabo/$(env)/cookie-key --region $(REGION) >/dev/null 2>&1 \

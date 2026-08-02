@@ -2,7 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '../api'
 import { useToast } from '../components/Toaster'
 import { createSpeechGate, VAD_DEFAULTS } from './vad'
-import { createGateTuner } from './gateTuner'
+import { createSileroVad } from './silero'
+import { createResampler, createChunker, FRAME_SAMPLES as MODEL_FRAME_SAMPLES } from './resample'
 import { createComposer, LOCAL_SPEAKER } from '../transcript/composer'
 import { createSpeakerLabels } from '../transcript/speakerLabels'
 import { sttClient } from '../stt/interface'
@@ -124,22 +125,25 @@ export function useCapture({ kelaboId, enabled, finalOnly, startedAt, language =
   // second of skipped silence shifts word times earlier; `bursts` records, for
   // each contiguous run of streamed audio, where its start sat on both clocks.
   const gateRef = useRef(null)
-  // The hangover the gate should be using, learned from this room rather than
-  // taken from the defaults. It outlives individual gates: a new stream, or a
-  // re-acquired microphone, rebuilds the gate but must not throw away what has
-  // already been measured about the room.
-  const tunerRef = useRef(null)
-  // The last few corrections, for the Debug drawer. A ring rather than a log:
-  // this runs for the length of a kelabo and nobody reads the middle of it.
-  const tuneLogRef = useRef([])
-  // A pinned threshold survives the gate being rebuilt (a new stream, a
-  // re-acquired microphone) and the page being reloaded: it is a property of
-  // this person's microphone and room, and having to find it again every time
-  // would make it useless.
+  // The speech detector, and the two pure stages that feed it the 16kHz frames
+  // it insists on. All three outlive individual gates: the model takes seconds
+  // to fetch the first time and must not be reloaded because a stream
+  // reconnected.
+  const sileroRef = useRef(null)
+  const resamplerRef = useRef(null)
+  const chunkerRef = useRef(null)
+  // A pinned threshold survives the gate being rebuilt and the page being
+  // reloaded. Far less needed than when this was a decibel level — a
+  // probability means the same thing in every room — so it is now a
+  // diagnostic rather than a workaround.
+  //
+  // A DIFFERENT key from the decibel one it replaces. The old values were
+  // negative dBFS, and reading -40 back as a probability would clamp to 0 and
+  // hold the gate open for the whole kelabo, billing all of it.
   const thresholdRef = useRef(
     (() => {
-      const v = Number(localStorage.getItem('kelabo-vad-threshold'))
-      return Number.isFinite(v) && v < 0 ? v : null
+      const v = Number(localStorage.getItem('kelabo-vad-p'))
+      return Number.isFinite(v) && v > 0 && v <= 1 ? v : null
     })(),
   )
   const sentSamplesRef = useRef(0)
@@ -212,33 +216,20 @@ export function useCapture({ kelaboId, enabled, finalOnly, startedAt, language =
   composerRef.current.speakerId = myIdentity
 
 
-  // The gate feedback loop. Samples the gate's own counters on a slow cadence
-  // and corrects `hangoverMs` towards what this room actually needs — see
-  // capture/gateTuner.js for why that cannot be a constant.
-  //
-  // Slow on purpose. The tuner refuses to decide on less than 20s of audio, so
-  // polling faster only burns cycles; and a control loop that reacts inside one
-  // sentence would chase the speaker rather than the room.
+  // Fetch the detector as soon as the hook mounts, not when the first person
+  // speaks. It is ~13MB of WebAssembly and model weights, and every second it
+  // is not ready is a second of audio streamed ungated — correct, but billed.
   useEffect(() => {
-    const t = setInterval(() => {
-      const gate = gateRef.current
-      const tuner = tunerRef.current
-      if (!gate || !tuner) return
-      const change = tuner.sample(gate.stats())
-      if (!change) return
-      if (change.kind === 'attackFrames') gate.setAttackFrames(change.value)
-      else gate.setHangoverMs(change.value)
-      // Surfaced in the Debug drawer, not just the console: this is the loop
-      // silently changing how speech is cut into messages, and on a per-second
-      // provider it also moves the bill. It should never have to be inferred.
-      const unit = change.kind === 'attackFrames' ? ' frames' : 'ms'
-      dbg(
-        `vad ${change.kind} ${change.from}${unit} -> ${change.value}${unit} (${change.reason})`,
-        change.window,
-      )
-      tuneLogRef.current = [...tuneLogRef.current.slice(-9), { ...change, at: Date.now() }]
-    }, 5000)
-    return () => clearInterval(t)
+    if (!sileroRef.current) sileroRef.current = createSileroVad()
+    let live = true
+    sileroRef.current.load().then(() => {
+      if (!live) return
+      const st = sileroRef.current.status()
+      dbg(st.state === 'ready' ? 'vad model ready' : `vad model ${st.state}: ${st.error}`)
+    })
+    return () => {
+      live = false
+    }
   }, [])
 
   // The seal clock is polled, not armed. As a one-shot timer it had to be
@@ -402,6 +393,12 @@ export function useCapture({ kelaboId, enabled, finalOnly, startedAt, language =
           burstsRef.current = [{ audio: 0, wall: captureStartRef.current }]
           labelsRef.current.reset()
           gateRef.current?.reset()
+          // The model carries an LSTM state and 64 samples of context across
+          // frames. Audio either side of a stream restart is not continuous, so
+          // carrying them over is reasoning about a moment that never happened.
+          sileroRef.current?.reset()
+          resamplerRef.current?.reset()
+          chunkerRef.current?.reset()
         },
         onState: reportState,
         log: dbg,
@@ -447,7 +444,7 @@ export function useCapture({ kelaboId, enabled, finalOnly, startedAt, language =
       audioStatsRef.current.pipelines += 1
       processor.onaudioprocess = e => {
         // NOT gated on there being a transport. The gate has to run whenever
-        // the microphone does, because it feeds the live meter and the tuner —
+        // the microphone does, because it feeds the model and the live meter —
         // and the moment somebody most needs to see the gate is when nothing is
         // being transcribed and they are trying to find out why. Only SENDING
         // requires a transport.
@@ -457,37 +454,50 @@ export function useCapture({ kelaboId, enabled, finalOnly, startedAt, language =
         const samples = e.inputBuffer.getChannelData(0)
         const pcm = floatTo16BitPCM(samples)
         const now = Date.now()
-        // The gate ALWAYS runs. It is the analyser — level, noise floor,
-        // threshold — and only its *decisions* are optional. Tearing it down
-        // when silence skipping is switched off took the meter with it, so the
-        // one reading that would explain "why is my quiet speech being cut"
+        // The gate ALWAYS runs. It is the analyser — probability, threshold,
+        // margin — and only its *decisions* are optional. Tearing it down when
+        // silence skipping is switched off took the meter with it, so the one
+        // reading that would explain "why is my quiet speech being cut"
         // vanished exactly when somebody turned the feature off to investigate.
         // It also means the skipped ratio still answers "what would this save
         // if I turned it on".
         if (!gateRef.current) {
-          if (!tunerRef.current) {
-            tunerRef.current = createGateTuner({
-              hangoverMs: VAD_DEFAULTS.hangoverMs,
-              attackFrames: VAD_DEFAULTS.attackFrames,
-              frameMs: (FRAME_SAMPLES / ctx.sampleRate) * 1000,
-            })
-          }
           gateRef.current = createSpeechGate({
             sampleRate: ctx.sampleRate,
             frameSamples: FRAME_SAMPLES,
-            // Start from what this room has already taught us, not the default.
-            hangoverMs: tunerRef.current.hangoverMs,
-            attackFrames: tunerRef.current.attackFrames,
-            thresholdDb: thresholdRef.current,
+            threshold: thresholdRef.current,
           })
-          tunerRef.current.reset()
+          // The capture rate is whatever the hardware gave us; the model takes
+          // 16kHz and nothing else.
+          resamplerRef.current = createResampler({ inputRate: ctx.sampleRate })
+          chunkerRef.current = createChunker({ frameSamples: MODEL_FRAME_SAMPLES })
         }
-        const r = gateRef.current.push(samples, pcm)
+        // Hand this buffer to the model as however many 32ms frames it makes.
+        // Fire and forget: inference is async (0.45ms typical) and awaiting it
+        // here would block the audio thread on every callback.
+        for (const frame of chunkerRef.current.push(resamplerRef.current.push(samples))) {
+          sileroRef.current?.push(frame)
+        }
+        // The peak across the frames the model has finished since the last
+        // callback. Peak, not mean: over 85ms the question is "did speech start
+        // anywhere in here", and an average lets a quiet lead-in cancel out the
+        // syllable after it.
+        //
+        // Worst case this is one callback stale, because a frame pushed just
+        // above may not have been inferred yet. 85ms, against 400ms of pre-roll
+        // that is sent anyway — so the lag costs no words.
+        const ready = sileroRef.current?.ready()
+        const r = gateRef.current.push(ready ? sileroRef.current.take() : NaN, pcm)
         // From here on the gate has already measured this frame, so the meter
         // is live even with nothing to send it to.
         if (!transport) return
 
-        if (!vadRef.current) {
+        // No model, no gating. Until it has loaded — and for good if it fails —
+        // there is no probability to gate on, and the gate above is reading
+        // every frame as silence. Streaming everything is the correct fallback:
+        // the transcript stays right and only the bill suffers, where gating on
+        // a number that does not exist would lose speech instead.
+        if (!vadRef.current || !ready) {
           setSpeakingOnce(true)
           // Not gating: every frame goes over, and the provider is told once
           // that speech is permanently "on" so it does not sit waiting for an
@@ -761,19 +771,19 @@ export function useCapture({ kelaboId, enabled, finalOnly, startedAt, language =
   // separate from `gateStats`, which is a heavier snapshot polled once a second:
   // this one has to be cheap enough to read on every frame.
   /**
-   * Pin the gate's threshold, or pass null to hand it back to the noise-floor
-   * tracker. Applied to the live gate immediately so the effect is visible on
-   * the meter while the mouse is still over it.
+   * Pin the gate's speech probability threshold, or pass null to hand it back
+   * to the default. Applied to the live gate immediately, so the effect is
+   * visible on the meter while the mouse is still over it.
    */
-  const setGateThreshold = useCallback(db => {
-    const v = db == null || !Number.isFinite(db) ? null : Math.round(db * 10) / 10
+  const setGateThreshold = useCallback(p => {
+    const v = p == null || !Number.isFinite(p) ? null : Math.min(1, Math.max(0, Math.round(p * 100) / 100))
     thresholdRef.current = v
-    gateRef.current?.setThresholdDb?.(v)
+    gateRef.current?.setThreshold?.(v)
     try {
-      if (v == null) localStorage.removeItem('kelabo-vad-threshold')
-      else localStorage.setItem('kelabo-vad-threshold', String(v))
+      if (v == null) localStorage.removeItem('kelabo-vad-p')
+      else localStorage.setItem('kelabo-vad-p', String(v))
     } catch {}
-    dbg(v == null ? 'vad threshold -> auto' : `vad threshold pinned at ${v}dB`)
+    dbg(v == null ? 'vad threshold -> default' : `vad threshold pinned at p=${v}`)
   }, [])
 
   const gateLevel = useCallback(() => {
@@ -781,7 +791,11 @@ export function useCapture({ kelaboId, enabled, finalOnly, startedAt, language =
     if (!l) return null
     // Whether the gate's verdict is actually being applied. The measurement is
     // the same either way; what it means for the audio is not.
-    return { ...l, gating: vadRef.current }
+    //
+    // `model` rides along because a probability pinned at zero and a model that
+    // has not loaded look identical on a meter, and only one of them is a
+    // problem.
+    return { ...l, gating: vadRef.current, model: sileroRef.current?.status?.().state ?? 'idle' }
   }, [])
 
   const gateStats = useCallback(() => {
@@ -795,8 +809,9 @@ export function useCapture({ kelaboId, enabled, finalOnly, startedAt, language =
       // did, let alone why.
       hangoverMs: gateRef.current?.hangoverMs?.() ?? null,
       attackFrames: gateRef.current?.attackFrames?.() ?? null,
-      tuning: tuneLogRef.current,
-      tuner: tunerRef.current?.status?.() ?? null,
+      // The detector's own health. Without it a gate that never opens is
+      // indistinguishable from a model that never loaded.
+      model: sileroRef.current?.status?.() ?? null,
       ...(transport ? { transport } : {}),
     }
   }, [])

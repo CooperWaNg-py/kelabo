@@ -33,19 +33,21 @@ export const POOL_DEFAULTS = {
   // has a `Start request timeout` in its error catalogue but does not document
   // the duration, so this stays conservative until it has been measured.
   poolMaxAge: 30_000,
-  // Silence that ends an utterance, and with it the billed stream.
+  // How long after the last frame of audio the billed stream is ended.
   //
-  // COUPLED TO THE VAD HANGOVER, which is why it is not a round number. The
-  // gate stays open 900ms after the level drops (vad.js `hangoverMs`) and keeps
-  // handing over frames the whole time, so `lastVoiceAt` is already 900ms stale
-  // by the moment the gate shuts. Real end of speech to stream end is therefore
-  // 900 + this, and 1100 makes that an even 2s.
+  // Measured from `lastVoiceAt`, which is the last frame actually HANDED OVER —
+  // not the last frame containing speech. The gate goes on sending for its
+  // whole hangover (vad.js, 2000ms) precisely so the endpointer hears the
+  // silence it needs, so by the time this timer starts the provider has already
+  // been given everything it is going to get.
   //
-  // The floor is the composer's own seal (`silenceTimeoutMs`, 1s): a message
-  // must close BEFORE the stream carrying it does, or the trailing finals it is
-  // waiting on arrive on a connection that is already going away. Shortening
-  // this below that is what would strand the last words of every utterance.
-  silenceMs: 1100,
+  // Short, therefore. Its only job is to not cut the stream in the same instant
+  // as the final frame; anything still in flight is caught by `drainMs` below,
+  // which keeps listening for trailing finals after the end frame. This used to
+  // be 1100ms, back when the gate stopped sending at 900ms — which meant the
+  // stream sat open and billed for over a second receiving nothing at all, and
+  // the endpointer never got its silence either.
+  silenceMs: 300,
   // No response this long after a start request means the socket was already
   // dead when it came out of the pool.
   watchdogMs: 1500,
@@ -59,6 +61,20 @@ export const POOL_DEFAULTS = {
   // words.
   drainMs: 2500,
 }
+
+// The server's endpointing cap, restated here because the coupling it creates
+// is enforced on this side.
+//
+// `rest-api/src/stt/soniox.js` sends `max_endpoint_delay_ms` in the start
+// request: the longest Soniox will wait, listening, before forcing an endpoint
+// and finalising what it has. The gate must go on streaming audio for longer
+// than this, or that wait expires against no audio at all and the tail of every
+// utterance stays whatever the last interim guess happened to be.
+//
+// Duplicated across the client/server boundary on purpose. It is set there and
+// depended on here, and a silent disagreement costs the end of every sentence,
+// so it is asserted in `test/gate.mjs` rather than left as a comment.
+export const MAX_ENDPOINT_DELAY_MS = 1500
 
 /**
  * Which pooled connection to spend.

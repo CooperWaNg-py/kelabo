@@ -50,6 +50,55 @@ echo ">> syncing spa/dist -> s3://$BUCKET"
 # useful shape. The bucket/dist echoes above are the receipt.
 aws s3 sync "$ROOT/spa/dist" "s3://$BUCKET" --delete --region "$KELABO_REGION" --only-show-errors
 
+# The speech model and its WebAssembly runtime, re-uploaded compressed.
+#
+# Together they are ~13.5MB, which is an order of magnitude more than the rest
+# of the SPA put together, and CloudFront will not compress an object over 10MB
+# however `compress: true` is set — so the runtime would ship raw. Brotli takes
+# the pair from 13.54MB to 4.29MB, measured.
+#
+# The sync above already put them in place; this replaces them with compressed
+# copies carrying the right headers. Done as a second pass rather than by
+# excluding them from the sync, so that a failure here leaves the site working
+# with uncompressed assets rather than with none.
+#
+# `immutable` is safe only because Vite content-hashes both filenames: a new
+# model or a runtime upgrade is a new URL, so nothing has to be expired. Without
+# it the invalidation below would make every user re-download 4.29MB on every
+# deploy, for files that had not changed.
+#
+# These two objects are stored brotli-only, so they are served with
+# `Content-Encoding: br` to every client REGARDLESS of what it said it accepts —
+# S3 cannot content-negotiate, and there is no uncompressed copy to fall back
+# to. That is an assumption, not a guarantee: it holds because brotli over HTTPS
+# has been in Chrome since 50, Firefox 44 and Safari 11, and nothing that old
+# can run WebAssembly-backed capture anyway. If that ever stops being true the
+# symptom is a corrupt model, not a 404.
+if command -v brotli >/dev/null 2>&1; then
+  echo ">> re-uploading wasm/onnx brotli-compressed"
+  for f in "$ROOT"/spa/dist/assets/*.wasm "$ROOT"/spa/dist/assets/*.onnx; do
+    [ -e "$f" ] || continue
+    name="$(basename "$f")"
+    case "$name" in
+      *.wasm) ctype="application/wasm" ;;
+      *) ctype="application/octet-stream" ;;
+    esac
+    brotli -f -q 9 -o "$f.br" "$f"
+    aws s3 cp "$f.br" "s3://$BUCKET/assets/$name" \
+      --region "$KELABO_REGION" --only-show-errors \
+      --content-type "$ctype" \
+      --content-encoding br \
+      --cache-control "public,max-age=31536000,immutable"
+    echo "   $name  $(du -h "$f" | cut -f1) -> $(du -h "$f.br" | cut -f1)"
+    rm -f "$f.br"
+  done
+else
+  # Not fatal: the assets are already uploaded uncompressed and work. Said out
+  # loud because the difference is 9MB per first-time visitor, which is the kind
+  # of regression that is invisible from a developer machine on a fast link.
+  echo ">> WARNING: brotli not installed - wasm/onnx ship uncompressed (13.5MB not 4.3MB)"
+fi
+
 echo ">> creating CloudFront invalidation /*"
 aws cloudfront create-invalidation --distribution-id "$DIST_ID" --paths "/*" >/dev/null
 

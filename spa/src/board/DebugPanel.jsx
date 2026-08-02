@@ -440,11 +440,14 @@ function buildTimeline(entries) {
 
 /* ---------- live readouts ---------- */
 
-// Live VAD gate readout. A cycle is one open→shut pass of the speech gate, which
-// is what seals a spoken message — so these numbers say directly whether the
-// gate is landing on thought-groups (a few cycles a minute, mean open in the
-// seconds) or chopping inside sentences (many short cycles), which is the knob
-// behind `hangoverMs` in capture/vad.js.
+// Live speech-gate readout. A cycle is one open→shut pass: one run of speech,
+// NOT one message — where a message ends is the composer's decision on its own
+// silence clock, and the gate gets no vote (docs 13).
+//
+// What these numbers answer is whether gating is worth its cost. `skipped` is
+// the saving; `mean open` against the trailing-audio padding is what is being
+// paid for it. A room where almost nothing is skipped is one where gating is
+// buying nothing, and the reason will be visible on the meter above.
 /**
  * Is a transcription stream open RIGHT NOW?
  *
@@ -528,17 +531,17 @@ function GateMeter({ level, diag, onThreshold, active }) {
     if (!active || typeof level !== 'function') return undefined
     let raf = 0
     let lastText = 0
-    // dBFS -> 0..1 across the bar.
-    const norm = db => Math.max(0, Math.min(1, (db + 80) / 80))
+    // The bar is already 0..1: a probability needs no scaling, which is the
+    // whole difference from the decibel meter this replaces. There is no floor
+    // mark any more either — nothing is being estimated from the room.
     const tick = () => {
       raf = requestAnimationFrame(tick)
       const l = level()
       readingRef.current = l
       const el = ref.current
       if (el && l) {
-        el.style.setProperty('--level', norm(l.db).toFixed(4))
-        el.style.setProperty('--floor', norm(l.floorDb).toFixed(4))
-        el.style.setProperty('--threshold', norm(l.threshold).toFixed(4))
+        el.style.setProperty('--level', l.p.toFixed(4))
+        el.style.setProperty('--threshold', l.threshold.toFixed(4))
         el.dataset.open = l.open ? '1' : '0'
       }
       // The numbers move far slower than the bar, and text redrawn sixty times
@@ -557,7 +560,7 @@ function GateMeter({ level, diag, onThreshold, active }) {
   }, [active, level])
 
   const r = readingRef.current
-  const db = n => (n <= -99 ? '\u2212\u221e' : `${n.toFixed(1)}dB`)
+  const pp = n => n.toFixed(2)
 
   if (!r) {
     // "Nothing is being captured" on its own is a dead end: it restates the
@@ -620,76 +623,87 @@ function GateMeter({ level, diag, onThreshold, active }) {
             not gating
           </span>
         )}
+        {/* A model that is loading or broken reads as a flat zero, which on a
+            meter is indistinguishable from a quiet room. Said plainly, because
+            while it says this every frame is being streamed and billed. */}
+        {r.model !== 'ready' && (
+          <span
+            className="dbg-stt-flag"
+            title={
+              r.model === 'failed'
+                ? 'The speech model failed to load, so there is nothing to gate on and every frame is being sent. Transcription is unaffected; the bill is not.'
+                : 'The speech model is still downloading (~13MB, cached after the first time). Until it arrives every frame is sent.'
+            }
+          >
+            model {r.model}
+          </span>
+        )}
         <span className="spacer"></span>
         <span
-          className={'dbg-gate-head' + (r.headroomDb > 0 ? ' is-over' : '')}
-          title="How far this frame is over the threshold. Speech should clear it by a wide margin — a room where it hovers near zero is one where the gate is a coin toss frame to frame."
+          className={'dbg-gate-head' + (r.margin > 0 ? ' is-over' : '')}
+          title="How far this frame is over the threshold. Speech normally clears it by a wide margin — the model is confident or it is not, and values that hover near the line are rare."
         >
-          headroom <b>{r.headroomDb > 0 ? '+' : ''}{r.headroomDb.toFixed(1)}dB</b>
+          margin <b>{r.margin > 0 ? '+' : ''}{pp(r.margin)}</b>
         </span>
       </div>
-      {/* CLICK ANYWHERE ON THE BAR to pin the threshold there. The adaptive
-          floor is right for most rooms and wrong for some in ways no amount of
-          tracking fixes — a constant hum a few dB under speech, a mic with its
-          own gain control. In those the answer is visible on this meter and
-          invisible to the algorithm, so the person watching it gets to say. */}
+      {/* CLICK ANYWHERE ON THE BAR to pin the threshold there. Far less often
+          needed than when this was a decibel level tracking an estimated noise
+          floor — a probability means the same thing in every room and on every
+          microphone — so this is now a diagnostic rather than an escape hatch. */}
       <div
-        className={'dbg-gate-meter' + (r.manualThresholdDb != null ? ' is-pinned' : '')}
+        className={'dbg-gate-meter' + (r.manualThreshold != null ? ' is-pinned' : '')}
         ref={ref}
         role="slider"
         tabIndex={0}
-        aria-label="Speech gate threshold"
-        aria-valuemin={-80}
-        aria-valuemax={0}
-        aria-valuenow={Math.round(r.threshold)}
-        aria-valuetext={`${r.threshold.toFixed(1)} decibels${r.manualThresholdDb != null ? ', pinned' : ', tracking the noise floor'}`}
-        title="Click to pin the threshold here. Arrow keys nudge it, Escape hands it back to the noise-floor tracker."
+        aria-label="Speech probability threshold"
+        aria-valuemin={0}
+        aria-valuemax={1}
+        aria-valuenow={r.threshold}
+        aria-valuetext={`probability ${pp(r.threshold)}${r.manualThreshold != null ? ', pinned' : ''}`}
+        title="Speech probability from the model. Click to pin the threshold here; arrow keys nudge it, Escape restores the default."
         onClick={e => {
           const box = e.currentTarget.getBoundingClientRect()
           if (!box.width) return
-          const frac = Math.min(Math.max((e.clientX - box.left) / box.width, 0), 1)
-          onThreshold?.(-80 + frac * 80)
+          onThreshold?.(Math.min(Math.max((e.clientX - box.left) / box.width, 0), 1))
         }}
         onKeyDown={e => {
-          const step = e.shiftKey ? 5 : 1
+          const step = e.shiftKey ? 0.1 : 0.02
           if (e.key === 'ArrowLeft') { e.preventDefault(); onThreshold?.(r.threshold - step) }
           else if (e.key === 'ArrowRight') { e.preventDefault(); onThreshold?.(r.threshold + step) }
           else if (e.key === 'Escape' || e.key === 'Backspace') { e.preventDefault(); onThreshold?.(null) }
         }}
       >
         <span className="dbg-gate-fill"></span>
-        <span className="dbg-gate-mark dbg-gate-floor" title="Tracked noise floor"></span>
-        <span className="dbg-gate-mark dbg-gate-thr" title="Threshold the level must cross"></span>
+        <span className="dbg-gate-mark dbg-gate-thr" title="Threshold this frame had to cross"></span>
       </div>
       <div className="dbg-kv">
-        <span title="This frame's RMS level.">level <b>{db(r.db)}</b></span>
-        <span title="The adaptive noise floor. Falls fast towards a quieter room and creeps up slowly, and only while the gate is shut — so speech cannot drag it up and close the gate mid-sentence.">
-          floor <b>{db(r.floorDb)}</b>
+        <span title="How likely the model thinks it is that this 32ms of audio is someone speaking.">
+          speech <b>{pp(r.p)}</b>
         </span>
         <span
           title={
-            r.manualThresholdDb != null
-              ? 'Pinned by hand. The noise-floor tracker is not touching it.'
-              : 'floor + open margin, but never below the absolute minimum for speech.'
+            r.manualThreshold != null
+              ? 'Pinned by hand. The defaults are not being used.'
+              : 'The model\u2019s natural operating point. While the gate is open the lower of the pair applies, so a moment of doubt mid-word does not chatter it.'
           }
         >
-          threshold <b>{db(r.threshold)}</b>{' '}
-          {r.manualThresholdDb != null ? (
+          threshold <b>{pp(r.threshold)}</b>{' '}
+          {r.manualThreshold != null ? (
             <button type="button" className="dbg-linkish" onClick={() => onThreshold?.(null)}>
-              pinned · auto
+              pinned · default
             </button>
           ) : (
-            <span className="text-meta">auto</span>
+            <span className="text-meta">default</span>
           )}
         </span>
-        <span title="Consecutive frames required over the threshold before the gate opens. Raised automatically in a room where clicks and keystrokes keep tripping it.">
+        <span title="Consecutive frames over the threshold before the gate opens. One, because the model already rejects clicks and keystrokes on their own — they do not sound like a voice.">
           attack <b>{r.attackFrames}</b> ({Math.round(r.attackFrames * r.frameMs)}ms)
         </span>
-        <span title="How long the gate stays open after the level drops. Tuned for this room while the kelabo runs.">
+        <span title="How long the gate stays open after speech stops, so trailing words survive and the provider still sees the silence its endpointer needs.">
           hangover <b>{r.hangoverMs}ms</b>
         </span>
-        <span title="Margins either side of the floor: how far over to open, how far over to stay open. The gap between them is the hysteresis that stops a soft syllable chattering the gate.">
-          margins <b>+{r.openDb}/{r.closeDb}dB</b>
+        <span title="Open and close thresholds. The gap between them is the hysteresis that stops a frame sitting on the line chattering the gate.">
+          open/close <b>{r.openThreshold}/{r.closeThreshold}</b>
         </span>
       </div>
     </div>
@@ -699,37 +713,51 @@ function GateMeter({ level, diag, onThreshold, active }) {
 function GateStats({ stats }) {
   if (!stats || !stats.framesSeen) return null
   const pct = n => `${Math.round(n * 100)}%`
+  // How much of what was streamed is the trailing audio sent after each speaker
+  // stopped. Not waste: it is what lets the provider endpoint and revise its
+  // last guess. But it IS the largest deliberate cost in the capture path, and
+  // it scales with the number of utterances rather than with how much was said
+  // — so a room of short interjections pays far more of it than one of long
+  // explanations, and that is only visible if it is shown.
+  const paddingMs = (stats.cycles || 0) * (stats.hangoverMs || 0)
+  const paddingShare = stats.sentMs ? Math.min(1, paddingMs / stats.sentMs) : 0
   return (
     <details className="card card-pad dbg-card dbg-fold">
       <summary className="dbg-fold-head">
         <span className="dbg-twisty" aria-hidden="true"><Icon name="chevron-right" size={12} /></span>
-        VAD gate
-        <span className="text-meta">{stats.cycles} cycles · {stats.cyclesPerMin}/min</span>
+        Speech gate
+        <span className="text-meta">{pct(stats.skipped)} skipped · {stats.cycles} utterances</span>
       </summary>
       <div className="dbg-kv">
-        <span title="Open→shut passes of the speech gate. Each one normally seals a message.">
-          cycles <b>{stats.cycles}</b> ({stats.cyclesPerMin}/min)
+        <span title="Open→shut passes of the gate: one per run of speech. NOT one per message — where a message ends is the composer's decision, on its own silence clock, and the gate deliberately gets no vote (docs 13).">
+          utterances <b>{stats.cycles}</b> ({stats.cyclesPerMin}/min)
         </span>
-        <span title="Mean time the gate stays open — roughly the length of one utterance.">
+        <span title="Mean time the gate stays open. This INCLUDES the trailing audio below, so it is one run of speech plus the hangover — not the length of the speech itself.">
           mean open <b>{stats.meanOpenMs}ms</b>
         </span>
-        <span title="Mean silence between utterances, as measured on the mic.">
+        <span title="Mean time the gate stays shut between runs of speech.">
           mean shut <b>{stats.meanShutMs}ms</b>
         </span>
-        <span title="Share of captured audio never handed to the provider. On a provider billed by the audio it receives this is a direct saving; on one billed by stream duration it saves bandwidth and nothing else.">
+        <span title="Share of captured audio never handed to the provider. On a provider billed by the audio it receives this is a direct saving. On one billed by stream duration — Soniox pooled — it is the whole mechanism: audio that is never sent is a billable stream that is never opened.">
           silence skipped <b>{pct(stats.skipped)}</b>
         </span>
-        <span title="Audio actually streamed vs wall clock.">
+        <span title="Audio actually streamed, against wall clock.">
           streamed <b>{Math.round(stats.sentMs / 1000)}s</b> / {Math.round(stats.seenMs / 1000)}s
         </span>
-        <span title="Gate openings, and runs that cleared the threshold without lasting long enough to become one. Rejections are the attack doing its job — clicks, keystrokes, a knock on the desk. Many rejections and few openings means something other than speech keeps hitting this microphone.">
-          opened <b>{stats.attacks ?? 0}</b> · rejected <b>{stats.rejected ?? 0}</b>
-        </span>
         {stats.hangoverMs != null && (
-          <span title="How long the gate stays open after the level drops. Measured for this room rather than configured — it decides where messages end, whether trailing words survive, and (on a provider billed by stream duration) how much of every utterance is paid for after the speaker stopped.">
-            hangover <b>{stats.hangoverMs}ms</b>
-          </span>
+          <>
+            <span title="How long the gate keeps STREAMING after speech stops. This is not politeness at the end of a sentence: the provider decides a speaker has finished by listening to the silence that follows them, and finalises — and corrects — its last unconfirmed guess from that audio. Cut it short and the tail of every utterance keeps whatever the provider happened to be guessing at the moment the microphone went quiet.">
+              trailing audio <b>{stats.hangoverMs}ms</b>
+            </span>
+            <span title="What that trailing audio costs, as a share of everything streamed. It is charged per utterance, so this climbs in a room of short exchanges and falls in one where people talk in paragraphs. If it dominates, the lever is the provider's endpoint delay, not this number on its own.">
+              of it padding <b>{pct(paddingShare)}</b> ({Math.round(paddingMs / 1000)}s)
+            </span>
+          </>
         )}
+        <span title="Gate openings, and runs that crossed the threshold without lasting long enough to become one. With the attack at one frame there is nothing to reject and this stays zero — transients are turned away by the model, which scores a click or a keystroke near zero because it does not sound like a voice. It only becomes meaningful if the attack is raised.">
+          opened <b>{stats.attacks ?? 0}</b>
+          {stats.rejected ? <> · rejected <b>{stats.rejected}</b></> : ''}
+        </span>
         {stats.transport && (
           <>
             <span title="How the provider is carrying this session. 'pooled' opens a billable stream per utterance and keeps spare connections warm and unbilled between them; 'continuous' holds one stream open for the whole session.">
@@ -745,41 +773,38 @@ function GateStats({ stats }) {
           </>
         )}
       </div>
-      {/* THE LOOP'S HEARTBEAT. Its correct behaviour in a healthy room is to do
-          nothing, which is indistinguishable from not running — so it reports
-          what it has measured and what it concluded, not merely what it
-          changed. A window count that climbs is the loop proving it is awake. */}
-      {stats.tuner && (
+      {/* THE DETECTOR'S OWN HEALTH. A gate that never opens and a model that
+          never loaded look identical from the transcript, and only one of them
+          is fixable by talking louder. */}
+      {stats.model && (
         <div className="dbg-kv">
-          <span title={`Completed observation windows. Nothing is decided on less than ${Math.round((stats.tuner.minWindowMs || 0) / 1000)}s of audio, because short windows produce wild ratios and retuning on those settles on nothing.`}>
-            tuner windows <b>{stats.tuner.windows}</b>
+          <span
+            title={
+              stats.model.state === 'ready'
+                ? 'The speech model is loaded and judging every frame.'
+                : stats.model.state === 'failed'
+                  ? 'The model could not be loaded, so nothing is gated and every frame is sent. The transcript is unaffected; the bill is not.'
+                  : 'The model is still being fetched. Until it arrives every frame is sent.'
+            }
+          >
+            model <b>{stats.model.state}</b>
+            {stats.model.error ? ` · ${stats.model.error}` : ''}
           </span>
-          <span title="What the last completed window concluded. 'healthy' means it looked and found nothing worth changing — which is the expected answer in a room that is working.">
-            verdict <b>{stats.tuner.lastVerdict?.reason ?? 'waiting for first window'}</b>
-          </span>
-          {stats.tuner.lastWindow && (
-            <span title="The measurements the last verdict was based on.">
-              last window <b>{Math.round(stats.tuner.lastWindow.seenMs / 1000)}s</b>{' '}
-              {stats.tuner.lastWindow.cyclesPerMin}/min · open{' '}
-              {stats.tuner.lastWindow.meanOpenMs}ms · {pct(stats.tuner.lastWindow.skipped)} skipped
+          {stats.model.frames > 0 && (
+            <>
+              <span title="Frames the model has judged, at one per 32ms of captured audio.">
+                judged <b>{stats.model.frames}</b>
+              </span>
+              <span title="Time for one inference. This runs on the main thread alongside React; if it climbs towards the 32ms a frame represents, it belongs in a Worker instead.">
+                inference <b>{stats.model.meanMs}ms</b> mean · {stats.model.p95Ms}ms p95
+              </span>
+            </>
+          )}
+          {stats.model.dropped > 0 && (
+            <span title="Frames discarded without being judged because the queue was full — the main thread stalled long enough to fall behind the microphone. The gate treats them as silence.">
+              dropped <b>{stats.model.dropped}</b>
             </span>
           )}
-        </div>
-      )}
-      {stats.tuning?.length > 0 && (
-        <div className="dbg-kv">
-          {/* The feedback loop's own history. It changes how speech is cut into
-              messages while the kelabo runs, so a reading that disagrees with
-              the defaults should be explainable rather than mysterious. */}
-          {stats.tuning.map((t, i) => (
-            <span
-              key={i}
-              title={`over ${Math.round(t.window.seenMs / 1000)}s: ${t.window.cyclesPerMin}/min, mean open ${t.window.meanOpenMs}ms, ${pct(t.window.skipped)} skipped`}
-            >
-              {new Date(t.at).toISOString().slice(11, 19)} {t.kind === 'attackFrames' ? 'attack' : 'hangover'}{' '}
-              <b>{t.from}→{t.value}{t.kind === 'attackFrames' ? ' frames' : 'ms'}</b> ({t.reason})
-            </span>
-          ))}
         </div>
       )}
     </details>

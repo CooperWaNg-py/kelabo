@@ -1298,10 +1298,12 @@
   .dbg-stt[data-billing='1'] .dbg-stt-dot { animation: none !important; }
 }
 
-/* --- debug: the adaptive gate, live --------------------------------------- */
-/* dB-scaled, -80..0 dBFS across the bar. A linear meter sits near 4% in a quiet
-   room and pins at the faintest sound, which reads as a broken widget rather
-   than a measurement.
+/* --- debug: the speech gate, live ----------------------------------------- */
+/* The bar is a probability, 0..1, straight from the model — no scaling, which
+   is the whole difference from the dBFS meter this replaces. That one needed a
+   logarithmic scale because a linear one sat near 4% in a quiet room and pinned
+   at the faintest sound; a probability is already the number a person wants to
+   read, and it means the same thing on every microphone.
 
    Everything here is positioned from CSS custom properties written onto the
    node each frame — never a keyframe. A live readout built as an animation
@@ -1343,18 +1345,14 @@
 }
 .dbg-gate-meter[data-open='1'] .dbg-gate-fill { background: var(--success); }
 .dbg-gate-mark { position: absolute; top: 0; bottom: 0; }
-/* The threshold is the decision; the floor is what it is derived from, so one
-   is drawn as a line and the other as a hint. */
+/* The threshold is the whole decision, so it is the only mark left. The old
+   meter also drew the tracked noise floor beside it, because the threshold was
+   derived from an estimate that could itself be wrong; nothing is being
+   estimated any more. */
 .dbg-gate-thr {
   left: calc(var(--threshold, 0) * 100%);
   width: 2px;
   background: var(--accent);
-}
-.dbg-gate-floor {
-  left: calc(var(--floor, 0) * 100%);
-  width: 1px;
-  background: var(--text-3);
-  opacity: .55;
 }
 
 /* The two facts that disagree, side by side and readable at a glance: which one
@@ -1381,7 +1379,6 @@
    fail in completely different ways and should never be mistaken for each
    other at a glance. */
 .dbg-gate-meter.is-pinned .dbg-gate-thr { width: 3px; border-radius: 0; }
-.dbg-gate-meter.is-pinned .dbg-gate-floor { opacity: .3; }
 
 .dbg-linkish {
   border: 0;

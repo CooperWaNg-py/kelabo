@@ -1,132 +1,128 @@
-// Voice activity detection for the capture pipeline.
+// The capture gate: given how likely it is that someone is speaking, decide
+// what audio to send.
 //
-// Deepgram bills streaming by the audio actually sent, and in a kelabo any one
-// participant is silent most of the time — with one mic per person, streaming
-// wall-clock means paying to transcribe other people's silence. The gate
-// decides, frame by frame, whether the mic carries speech; `useCapture` streams
-// only those frames and holds the socket open with `KeepAlive` (free, and what
-// Deepgram documents for exactly this) through the rest.
+// A provider bills for the audio it receives — Deepgram by the second of audio,
+// Soniox by the wall-clock life of a stream — and in a kelabo any one
+// participant is silent most of the time. With one microphone per person,
+// streaming continuously means paying to transcribe other people's silence.
 //
-// The detector is a plain energy gate with an adaptive noise floor: no model, no
-// bundle cost, and close-talk kelabo mics leave it a wide margin. Two details
-// make it safe to put in front of an STT stream:
-//   - **preroll** — frames from just before the gate opened are kept in a ring
-//     buffer and sent first, so the word that tripped the gate is not clipped;
-//   - **hangover** — the gate stays open a while after the level drops, so
-//     trailing words survive and Deepgram still sees the trailing silence its
-//     endpointer needs (`endpointing=300`) to emit `speech_final`.
+// The judgement of what is speech is not made here. `silero.js` runs a model
+// over the audio and produces a probability per 32ms; this module takes that
+// number and decides what to do about it. The split is deliberate:
 //
-// Cutting silence also breaks the assumption that Deepgram's word timestamps
-// track wall clock — they count sent audio only. `useCapture` compensates by
-// stamping each burst (see `opened`) against the wall clock.
+//   - Detection needs a WebAssembly runtime and 13MB of binaries, so it can
+//     only be exercised in a live kelabo.
+//   - The decisions here are where words get lost — a hangover a beat too
+//     short clips the end of a sentence, an attack a frame too long eats the
+//     first syllable — and they are testable, so they are pure and tested.
+//
+// Three things make the gate safe to put in front of an STT stream:
+//   - **pre-roll** — frames from before the gate opened are kept and sent
+//     first, so the word that tripped it is not clipped;
+//   - **hangover** — it stays open a while after speech stops, so trailing
+//     words survive and a provider's endpointer still sees the silence it
+//     needs to finalise;
+//   - **hysteresis** — the level that keeps it open is lower than the level
+//     that opens it, so a moment of doubt mid-word does not chatter it.
+//
+// Cutting silence breaks the assumption that provider word timestamps track
+// wall clock — they count sent audio only. `useCapture` compensates by stamping
+// each burst against the wall clock (see `opened`).
 
 export const VAD_DEFAULTS = {
-  // Audio retained before speech onset. Two ScriptProcessor frames (~85ms each)
-  // are enough for the attack of a word; four is comfortable.
+  // Audio retained before speech onset. Comfortably longer than the attack
+  // delay, which is what makes waiting to be sure cost nothing.
   prerollMs: 400,
-  // Kept open after the level drops. Long enough that a provider still sees the
-  // trailing silence its endpointer needs, and — where a stream is billed by
-  // duration — added to every utterance, so it is not free.
-  hangoverMs: 900,
-  // ATTACK: consecutive frames that must clear the threshold before the gate
-  // opens at all.
+  // How long the gate KEEPS SENDING AUDIO after speech stops.
   //
-  // Without this, ONE frame over the line opens the gate for the whole
-  // hangover, and a frame is 85ms of RMS — so a single mouse click, a key
-  // press, or a knock on the desk starts an utterance and holds it open for
-  // most of a second. On a provider billed by stream duration it also starts
-  // the meter. Speech sustains for hundreds of milliseconds; a transient does
-  // not, and that is the whole difference between them at this resolution.
+  // This is not politeness at the end of a sentence, it is the mechanism by
+  // which the last words of an utterance become correct. A provider's
+  // endpointer decides that a speaker has finished by listening to the silence
+  // that follows them, and it finalises — and revises — its unconfirmed guess
+  // using that audio. Cut the audio off at the last syllable and the endpointer
+  // never fires from sound; the tail stays a guess, and whatever the provider
+  // had at that instant is what the transcript keeps.
   //
-  // Two frames (~170ms) costs nothing in practice because the pre-roll ring is
-  // longer than the delay: the audio that opened the gate is sent anyway, so
-  // waiting to be sure loses no words.
-  attackFrames: 2,
-  // Level above the noise floor that opens the gate, and the lower level that
-  // keeps it open (hysteresis, so a soft syllable does not chatter the gate).
-  openDb: 10,
-  closeDb: 6,
-  // Absolute levels. `minSpeechDb` stops a very quiet room (low noise floor +
-  // 10dB is still nothing) from opening the gate on fan noise; `noiseFloorDb`
-  // stops digital silence from dragging the floor so low that anything opens it.
-  minSpeechDb: -55,
-  noiseFloorDb: -70,
-  // How the floor climbs to meet a room noisier than it currently believes.
+  // So the floor is the provider's own endpoint delay: Soniox is configured
+  // with `max_endpoint_delay_ms` of 1500 (rest-api/src/stt/soniox.js), which is
+  // the longest it will wait before forcing an endpoint. Streaming less than
+  // that guarantees the case this is meant to prevent. 2000 clears it with
+  // margin and matches the two seconds of silence that ends an utterance.
   //
-  // The floor used to be frozen while the gate was open, so that speech could
-  // not drag it up and close the gate mid-sentence. But that made a room louder
-  // than the floor unrecoverable: room tone sat above `floor + closeDb`, every
-  // pause frame counted as speech, and the gate latched open for the rest of the
-  // kelabo — no seal trigger, and no audio skipped, so VAD saved nothing.
+  // It is billed. On Soniox the stream is charged by wall clock, so every
+  // utterance pays for this — which is the price of a correct ending, and is
+  // why it is not larger.
+  hangoverMs: 2000,
+  // Consecutive frames over the threshold before the gate opens at all.
   //
-  // Only frames within `floorTrackDb` of the floor pull it up. Room tone is a
-  // few dB above the floor and adapts within a pause; speech is far above it and
-  // still cannot move it, which is what the freeze was protecting.
-  floorTrackDb: 12,
-  floorRiseRate: 0.05,
-  // A FIXED threshold in dBFS, or null for the adaptive one above.
+  // One, now. This existed because an energy gate cannot tell a mouse click
+  // from a syllable - both are simply loud - so it needed a transient to prove
+  // itself over two frames before being believed. A model does not have that
+  // problem: a click scores near zero because it does not sound like a voice.
+  // Measured, a loud 440Hz tone reads 0.0008 and white noise 0.0020, where an
+  // energy gate opens on both.
   //
-  // The adaptive floor is right for most rooms and wrong for some in ways no
-  // amount of tracking fixes: a constant hum a few dB under speech, a mic with
-  // its own gain control, a room where the useful margin is two decibels wide.
-  // In those, watching the meter and pinning the line where it obviously
-  // belongs beats any amount of automatic correction — the person can see the
-  // answer and the algorithm cannot.
-  thresholdDb: null,
-}
-
-// Frame level in dBFS. -Infinity is avoided so the floor tracker stays finite.
-function frameDb(samples) {
-  let sum = 0
-  for (let i = 0; i < samples.length; i++) sum += samples[i] * samples[i]
-  return 20 * Math.log10(Math.sqrt(sum / samples.length) + 1e-10)
+  // The knob stays because the pre-roll makes it nearly free, so if a room
+  // turns out to fool the model repeatedly there is somewhere to turn.
+  attackFrames: 1,
+  // Probability that opens the gate, and the lower one that keeps it open.
+  // 0.5 is the model's own natural operating point; measured over 33s of real
+  // speech, 61.4% of frames clear it at a median confidence of 0.997, so the
+  // margin either side of the line is wide and the exact value is not delicate.
+  openThreshold: 0.5,
+  closeThreshold: 0.35,
+  // A FIXED threshold, or null to use the pair above.
+  //
+  // Far less necessary than it was. The old gate compared loudness against a
+  // noise floor it had to estimate, so it was wrong in any room whose noise sat
+  // near speech level, and pinning the line by hand was the only escape. A
+  // probability means the same thing in every room and on every microphone, so
+  // this is now a diagnostic rather than a workaround.
+  threshold: null,
 }
 
 /**
- * @param {{sampleRate?:number, frameSamples?:number}} opts
- * @returns gate with `push(samples, payload)` -> what to send now
+ * @param {{sampleRate?:number, frameSamples?:number}} opts — the CALLER's frame
+ *   size, not the model's. The gate runs at the cadence audio arrives in
+ *   (~85ms), reducing the several model frames inside each one to a single
+ *   probability, so that hangover, pre-roll and the burst clock all stay
+ *   expressed in the units the audio pipeline actually delivers.
+ * @returns gate with `push(probability, payload)` -> what to send now
  */
 export function createSpeechGate({ sampleRate = 48000, frameSamples = 4096, ...overrides } = {}) {
   const cfg = { ...VAD_DEFAULTS, ...overrides }
   const frameMs = (frameSamples / sampleRate) * 1000
   const prerollFrames = Math.max(1, Math.round(cfg.prerollMs / frameMs))
-  // Not const: the right hangover is a property of the room, so it is measured
-  // and corrected while the kelabo runs (capture/gateTuner.js). A change takes
-  // effect on the next quiet frame — never mid-close, which would drop the
-  // trailing words of whatever is being said at that instant.
+  // Not const: adjustable while running, and a change takes effect on the next
+  // quiet frame - never mid-close, which would drop the trailing words of
+  // whatever is being said at that instant.
   let hangoverFrames = Math.max(1, Math.round(cfg.hangoverMs / frameMs))
 
-  // Seeded pessimistically (a quiet room, not digital silence): the floor falls
-  // fast, so a wrong seed costs at most a second of extra audio, while a seed
-  // that is too low would gate real speech out.
-  let floorDb = -50
   let open = false
   let quietFrames = 0
   let ring = []
-  // `cycles` and the open/shut frame totals exist to tune `hangoverMs`, which is
-  // what decides message granularity: the gate close is the primary seal trigger
-  // for a spoken message (useCapture), so how often it fires in a real room is
-  // the difference between one message per thought and one per half-sentence.
+  // `cycles` and the open/shut totals are how the gate's effect on the
+  // transcript is seen: a cycle is one open->shut pass, normally one utterance.
   const stats = {
-    framesSent: 0, framesSeen: 0, cycles: 0, openFrames: 0, shutFrames: 0,
-    // Gate openings, and frames that cleared the threshold but did not sustain
-    // long enough to be one. A room full of the second is a room full of
-    // clicks, keyboards and door knocks — which is a different problem from a
-    // gate tuned too tight, and wants a different correction.
-    attacks: 0, rejected: 0,
+    framesSent: 0,
+    framesSeen: 0,
+    cycles: 0,
+    openFrames: 0,
+    shutFrames: 0,
+    // Gate openings, and runs that cleared the threshold without lasting long
+    // enough to become one. With attackFrames at 1 the second is always zero;
+    // it becomes meaningful only if the attack is raised.
+    attacks: 0,
+    rejected: 0,
   }
-  // The last frame's readings, kept so the room can be shown what the gate is
-  // actually deciding on. Without them the gate is a black box: a participant
-  // whose speech sits 2dB over the threshold and one whose speech sits 25dB
-  // over it behave completely differently and look identical from outside.
-  let lastDb = cfg.noiseFloorDb
-  let lastThreshold = cfg.minSpeechDb
-  // Consecutive frames over the threshold while the gate is shut. This is what
-  // a transient cannot sustain.
+  // The last frame's reading, kept so the room can be shown what the gate is
+  // deciding on. Without it the gate is a black box, and "it is not picking me
+  // up" has no answer.
+  let lastP = 0
+  let lastThreshold = cfg.openThreshold
+  // Consecutive frames over the threshold while shut.
   let hot = 0
-  // null = follow the noise floor. A number = the participant put the line
-  // there by hand and it stays there.
-  let manualThresholdDb = cfg.thresholdDb ?? null
+  let manualThreshold = cfg.threshold ?? null
   let cycleFrames = 0
   const NOTHING = []
 
@@ -134,7 +130,7 @@ export function createSpeechGate({ sampleRate = 48000, frameSamples = 4096, ...o
     frameMs,
     prerollFrames,
 
-    /** The tuner's correction. Bounded by the caller; clamped to a frame here. */
+    /** Bounded by the caller; clamped to a frame here. */
     setHangoverMs(ms) {
       cfg.hangoverMs = ms
       hangoverFrames = Math.max(1, Math.round(ms / frameMs))
@@ -142,46 +138,38 @@ export function createSpeechGate({ sampleRate = 48000, frameSamples = 4096, ...o
     hangoverMs: () => cfg.hangoverMs,
 
     /**
-     * Pin the threshold, or hand it back to the noise-floor tracker with null.
-     * Hysteresis is preserved either way: the level needed to KEEP the gate open
-     * stays the same distance below the level needed to open it, or a syllable
-     * sitting exactly on the line chatters the gate open and shut.
+     * Pin the threshold, or hand it back with null. Hysteresis is preserved
+     * either way: the probability needed to KEEP the gate open stays the same
+     * distance below the one needed to open it, or a frame sitting exactly on
+     * the line chatters the gate open and shut.
      */
-    setThresholdDb(db) {
-      manualThresholdDb = db == null || !Number.isFinite(db) ? null : db
+    setThreshold(p) {
+      manualThreshold = p == null || !Number.isFinite(p) ? null : Math.min(1, Math.max(0, p))
     },
-    thresholdDb: () => manualThresholdDb,
+    threshold: () => manualThreshold,
 
-    /** The tuner's other correction: how hard it is to trip the gate at all. */
     setAttackFrames(n) {
       cfg.attackFrames = Math.max(1, Math.round(n))
     },
     attackFrames: () => cfg.attackFrames,
 
     /**
-     * What the gate is seeing right now, for a live meter. A getter rather than
-     * a callback: this changes every frame (~12/s) and nothing should re-render
-     * at that rate — the caller samples it when it has somewhere to draw it.
-     */
-    /**
-     * Everything the adaptive gate is currently deciding on. All of it, not a
-     * summary: the point of a live readout is to explain a decision that has
-     * already been made, and "the gate opened" with no threshold, no floor and
-     * no headroom beside it explains nothing.
+     * Everything the gate is currently deciding on. All of it, not a summary:
+     * a live readout exists to explain a decision already made, and "the gate
+     * opened" with no probability and no threshold beside it explains nothing.
+     *
+     * A getter rather than a callback: this changes ~12 times a second and
+     * nothing should re-render at that rate.
      */
     level: () => ({
-      db: lastDb,
-      floorDb,
+      p: lastP,
       threshold: lastThreshold,
-      // Where the line is coming from. The meter draws them differently,
-      // because "the algorithm chose this" and "you chose this" fail in
-      // completely different ways.
-      manualThresholdDb,
-      // The number that actually decides, and the one worth watching: how far
-      // over the line this frame is. Speech should clear it by a wide margin;
-      // a room where it hovers near zero is a room where the gate is a coin
-      // toss frame to frame.
-      headroomDb: lastDb - lastThreshold,
+      // Where the line comes from. A meter should draw them differently,
+      // because "the model decided" and "you decided" fail differently.
+      manualThreshold,
+      // How far over the line this frame is. Speech should clear it widely; a
+      // room where it hovers near zero is one where the gate is a coin toss.
+      margin: lastP - lastThreshold,
       open,
       hot,
       attackFrames: cfg.attackFrames,
@@ -189,48 +177,46 @@ export function createSpeechGate({ sampleRate = 48000, frameSamples = 4096, ...o
       hangoverFrames,
       hangoverMs: cfg.hangoverMs,
       frameMs,
-      floorFloorDb: cfg.noiseFloorDb,
-      minSpeechDb: cfg.minSpeechDb,
-      openDb: cfg.openDb,
-      closeDb: cfg.closeDb,
+      openThreshold: cfg.openThreshold,
+      closeThreshold: cfg.closeThreshold,
     }),
 
     /**
-     * Feed one captured frame. `payload` is whatever the caller wants to send
-     * for it (an encoded PCM buffer) — the gate only stores and hands it back.
-     * @returns {{send:any[], opened:boolean, closed:boolean, active:boolean, db:number, floorDb:number}}
+     * Feed one captured frame's verdict. `payload` is whatever the caller wants
+     * sent for it (an encoded PCM buffer) — the gate only stores it and hands
+     * it back.
+     *
+     * @param {number} probability 0..1 that this frame is speech
+     * @param {any} payload
+     * @returns {{send:any[], opened:boolean, closed:boolean}}
      */
-    push(samples, payload) {
+    push(probability, payload) {
       stats.framesSeen += 1
-      const db = frameDb(samples)
-      // The floor follows the level down quickly and creeps up slowly, and only
-      // creeps up while the gate is shut — otherwise speech raises the floor and
-      // the gate closes on the speaker mid-sentence.
-      if (db < floorDb) floorDb += (db - floorDb) * 0.25
-      else if (db < floorDb + cfg.floorTrackDb) floorDb += (db - floorDb) * cfg.floorRiseRate
-      else if (!open) floorDb += (db - floorDb) * 0.002
-      if (floorDb < cfg.noiseFloorDb) floorDb = cfg.noiseFloorDb
+      // A model that has not loaded, or a frame it has not reached yet, must
+      // not read as speech. Treated as silence so the failure is a gate that
+      // stays shut, which `useCapture` can see and fall back from - rather than
+      // one that latches open and streams the whole kelabo.
+      const p = Number.isFinite(probability) ? probability : 0
 
-      const hysteresisDb = Math.max(0, cfg.openDb - cfg.closeDb)
       const threshold =
-        manualThresholdDb != null
+        manualThreshold != null
           ? open
-            ? manualThresholdDb - hysteresisDb
-            : manualThresholdDb
+            ? // Same gap the automatic pair uses, kept proportional so a pin
+              // near either end of the range does not lose its hysteresis.
+              manualThreshold * (cfg.closeThreshold / cfg.openThreshold)
+            : manualThreshold
           : open
-            ? Math.max(floorDb + cfg.closeDb, cfg.minSpeechDb - 3)
-            : Math.max(floorDb + cfg.openDb, cfg.minSpeechDb)
-      lastDb = db
+            ? cfg.closeThreshold
+            : cfg.openThreshold
+      lastP = p
       lastThreshold = threshold
-      const speech = db > threshold
+      const speech = p > threshold
 
       let opened = false
       let closed = false
       if (speech) {
         quietFrames = 0
         if (!open) {
-          // Sustained, not merely loud. A click clears the threshold on one
-          // frame and is gone on the next, so it never reaches the count.
           hot += 1
           if (hot >= cfg.attackFrames) {
             open = true
@@ -243,9 +229,8 @@ export function createSpeechGate({ sampleRate = 48000, frameSamples = 4096, ...o
         }
       } else {
         // Below the threshold: whatever run was building is over. Without this
-        // the count is cumulative rather than consecutive, so a click a minute
-        // eventually opens the gate on its own — the attack would reject
-        // nothing and merely delay it.
+        // the count is cumulative rather than consecutive, so an occasional
+        // stray frame eventually opens the gate on its own.
         if (hot > 0) stats.rejected += 1
         hot = 0
       }
@@ -262,23 +247,24 @@ export function createSpeechGate({ sampleRate = 48000, frameSamples = 4096, ...o
       cycleFrames += 1
 
       if (open) {
-        // On open the ring buffer goes out ahead of the current frame, oldest
-        // first, so the provider receives one contiguous stream.
+        // On open the ring goes out ahead of the current frame, oldest first,
+        // so the provider receives one contiguous stream.
         const send = opened ? [...ring, payload] : [payload]
         ring = []
         stats.framesSent += send.length
-        return { send, opened, closed: false, active: true, db, floorDb }
+        return { send, opened, closed: false }
       }
       ring.push(payload)
       if (ring.length > prerollFrames) ring.shift()
-      return { send: NOTHING, opened: false, closed, active: false, db, floorDb }
+      return { send: NOTHING, opened: false, closed }
     },
 
-    // Called on (re)connect: a new socket restarts Deepgram's audio clock, and
-    // buffered preroll from the old one would be transcribed twice.
+    // Called on (re)connect: a new stream restarts the provider's audio clock,
+    // and pre-roll buffered against the old one would be transcribed twice.
     reset() {
       open = false
       quietFrames = 0
+      hot = 0
       ring = []
     },
 
@@ -288,28 +274,18 @@ export function createSpeechGate({ sampleRate = 48000, frameSamples = 4096, ...o
       return {
         framesSent,
         framesSeen,
-        // The RAW counters as well as the derived figures. The tuner works on
-        // deltas between samples, so it needs the totals it can subtract — it
-        // was reading the means instead, which are already averaged over the
-        // whole gate lifetime and cannot be differenced. Every window then had
-        // `meanOpenMs: 0`, which matches "opened and sustained nothing", so a
-        // perfectly healthy room was diagnosed as full of clicks.
         openFrames,
         shutFrames,
-        // Gate openings, and runs that cleared the threshold without lasting
-        // long enough to become one. A high `rejected` is the attack doing its
-        // job; a high `rejected` with a low `attacks` is a room where something
-        // other than speech keeps hitting the microphone.
         attacks,
         rejected,
         sentMs: Math.round(framesSent * frameMs),
         seenMs,
-        // Share of captured audio never sent (and so never billed).
+        // Share of captured audio never sent, and so never billed. The number
+        // that says whether any of this is worth doing.
         skipped: framesSeen ? 1 - framesSent / framesSeen : 0,
-        // Tuning signal for `hangoverMs`. A cycle is one open→shut pass, i.e.
-        // one utterance and therefore (normally) one sealed message. If
-        // `cyclesPerMin` is high and `meanOpenMs` is short, the gate is closing
-        // inside sentences and the hangover wants raising.
+        // A cycle is one open->shut pass, i.e. one utterance. How often it
+        // fires in a real room is the difference between one message per
+        // thought and one per half-sentence.
         cycles,
         cyclesPerMin: seenMs ? +(cycles / (seenMs / 60000)).toFixed(1) : 0,
         meanOpenMs: cycles ? Math.round((openFrames * frameMs) / cycles) : 0,

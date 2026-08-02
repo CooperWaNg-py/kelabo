@@ -152,26 +152,34 @@ const ok = msg => {
 }
 
 {
-  // THE ORDERING THAT MUST HOLD. A message has to seal before the stream
-  // carrying it goes away, or the trailing finals it is still waiting on arrive
-  // on a connection that is already closing — and the last words of every
-  // single utterance are lost.
+  // THE ORDERING THAT MUST HOLD, end to end.
+  //
+  // A speaker stops. The gate keeps streaming for `hangoverMs` so the provider
+  // can endpoint and revise from that audio. `silenceMs` later the billed
+  // stream is ended, and `drainMs` after that the socket is finally dropped —
+  // so the very latest a corrected final can arrive is the sum of all three.
+  //
+  // The composer must still have the message open when it does. Its stale
+  // timeout is the one that applies, because an utterance waiting to be
+  // corrected is by definition one with an unconfirmed tail.
+  const latestCorrectionMs =
+    VAD_DEFAULTS.hangoverMs + POOL_DEFAULTS.silenceMs + POOL_DEFAULTS.drainMs
   assert.ok(
-    POOL_DEFAULTS.silenceMs > COMPOSER_DEFAULTS.silenceTimeoutMs,
-    `stream end (${POOL_DEFAULTS.silenceMs}ms) must outlast the message seal ` +
-      `(${COMPOSER_DEFAULTS.silenceTimeoutMs}ms)`,
+    latestCorrectionMs <= COMPOSER_DEFAULTS.staleTimeoutMs,
+    `a correction can arrive ${latestCorrectionMs}ms after the last word, but the ` +
+      `composer seals an unconfirmed message after ${COMPOSER_DEFAULTS.staleTimeoutMs}ms — ` +
+      `it would land on a sealed message and open a second bubble`,
   )
-  ok('a message always seals before the stream carrying it ends')
+  ok('a late correction still finds its message open')
 }
 
 {
-  // The gate keeps handing over frames for its whole hangover, so `lastVoiceAt`
-  // is already that stale when the gate finally shuts. Real end of speech to
-  // stream end is the sum, and it is worth stating out loud because tuning
-  // either number alone silently moves it.
-  const realWorldMs = VAD_DEFAULTS.hangoverMs + POOL_DEFAULTS.silenceMs
-  assert.equal(realWorldMs, 2000, `end-of-speech to stream end is ${realWorldMs}ms`)
-  ok('end of speech to end of billing is the hangover plus the silence gate')
+  // The stream must not be ended while the provider is still being sent audio,
+  // or the hangover is pointless. Trivially true while silenceMs is positive
+  // and measured from the last frame handed over, but stated so that setting
+  // silenceMs to zero fails here rather than in a kelabo.
+  assert.ok(POOL_DEFAULTS.silenceMs > 0, 'the stream would end on the same tick as the last frame')
+  ok('the billed stream outlives the last frame of audio')
 }
 
 // --- keepalive --------------------------------------------------------------

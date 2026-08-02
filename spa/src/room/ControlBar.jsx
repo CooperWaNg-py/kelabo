@@ -266,7 +266,7 @@ export function ControlBar({
                       icon={<Icon name="waveform" />}
                       checked={stt.vad}
                       disabled={ended}
-                      title="Only send audio while you are speaking — silence is skipped, which is most of a kelabo for any one person. It is also what starts and stops the transcription stream, so turning it off streams continuously for the whole kelabo. Turn it off if quiet speech is being cut."
+                      title="Only send audio while you are speaking — silence is skipped, which is most of a kelabo for any one person. A speech model decides, so it is not fooled by a quiet voice or a noisy room the way a loudness threshold was. It is also what starts and stops the transcription stream, so turning it off streams continuously for the whole kelabo."
                       onChange={stt.onVad}
                     >
                       Silence skipping

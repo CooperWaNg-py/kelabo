@@ -165,6 +165,22 @@ meant "open" is the one failure this knob exists to prevent. Rotating the secret
 later needs the portal and the Lambda redeployed together, so `make
 origin-secret` refuses to overwrite an existing value.
 
+**An environment belongs to the config that declares it, not to the repository.**
+`cdk deploy -c env=<name>` builds whatever the *current working tree's*
+`config/kelabo.json` says that environment is. Two checkouts of this repo — a
+fork, a second worktree, a colleague's clone — can each hold a different
+definition of the same environment name, and CloudFormation will faithfully
+converge the live stacks onto whichever one you ran from. There is no ownership
+marker in the stacks and no warning: the deploy succeeds.
+
+What that looks like in practice is not a failed deploy but a destructive one —
+`[-] AWS::Route53::RecordSet … destroy` on the records serving the site,
+`replace` on a certificate in use, or a second SES identity for a domain another
+stack already owns. **So `cdk diff` before any deploy you did not just make
+yourself is not caution, it is the only check that exists.** A clean diff means
+the tree you are standing in is the one that built what is running; a diff full
+of destroys means it is not, and the fix is to change directory, not to proceed.
+
 The Gateway ECS uses the **default VPC, public subnets, no NAT** (cost),
 `CircuitBreaker({rollback:true})`.
 

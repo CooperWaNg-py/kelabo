@@ -17,13 +17,28 @@ export function loadConfig(env,   configPath = join(here, "kelabo.json")) {
   const block = raw.environments?.[env];
   if (!block) throw new Error(`kelabo config: unknown env "${env}" (have: ${Object.keys(raw.environments || {}).join(", ")})`);
 
-  // An environment may live on its own registrable domain (dev/test on
-  // kelabo.dev, production on kelabo.me): cookies are scoped to
-  // .<portalDomain>, so environments sharing one registrable domain send each
-  // other their session cookies — harmless (different signing keys) but not
-  // hygiene. Per-env baseDomain keeps non-prod traffic off the production
-  // domain entirely.
-  const baseDomain = block.baseDomain ?? raw.baseDomain;
+  // The registrable domain this environment answers on — declared by the
+  // environment itself, with no shared default.
+  //
+  // Environments routinely live on different domains (test on kelabo.dev,
+  // production on kelabo.me), because cookies are scoped to .<portalDomain>:
+  // two environments under one registrable domain send each other their session
+  // cookies. Harmless — each verifies with its own signing key — but not
+  // hygiene, and production tokens have no business transiting a test host.
+  //
+  // A root-level fallback used to supply this. It was dropped because it made
+  // the most important fact about an environment the one thing its own block
+  // did not state, and because it failed silently: an absent value is
+  // `undefined`, and `gw.${undefined}` is the string "gw.undefined", so a typo
+  // bought a certificate request, DNS records and cookies for a domain nobody
+  // owns rather than an error.
+  const baseDomain = block.baseDomain;
+  if (!baseDomain) {
+    throw new Error(
+      `kelabo config: env "${env}" has no baseDomain. Every environment declares its own ` +
+        `(e.g. "baseDomain": "example.com"); there is deliberately no shared default.`
+    );
+  }
   const portalDomain = block.subdomains.portal
     ? `${block.subdomains.portal}.${baseDomain}`
     : baseDomain;
@@ -50,6 +65,39 @@ export function loadConfig(env,   configPath = join(here, "kelabo.json")) {
     history: `kelabo-${block.endpoint}-history`,
     mcp: `kelabo-${block.endpoint}-mcp`,
     contacts: `kelabo-${block.endpoint}-contacts`,
+  };
+
+  // Close the whole deployment to everything but a list of source addresses —
+  // a corporate egress range while a pilot runs, the team's addresses while an
+  // environment is under test. Empty (the default) is open, which is what every
+  // kelabo.json written before this knob existed means.
+  //
+  // It has to cover the WHOLE deployment or it covers nothing: the browser
+  // reaches CloudFront and the Gateway ALB by separate paths on separate names,
+  // so restricting one only moves the door. Both families are kept because
+  // CloudFront answers on IPv6 by default — an allowlist holding only someone's
+  // IPv4 address blocks them the moment their browser prefers IPv6, and that
+  // failure looks like an outage, not like a rule.
+  const allowIps = (Array.isArray(block.allowIps) ? block.allowIps : [])
+    .map((s) => String(s).trim())
+    .filter(Boolean);
+  const allowIpsV4 = allowIps.filter((c) => !c.includes(":"));
+  const allowIpsV6 = allowIps.filter((c) => c.includes(":"));
+
+  // SES sandbox status, sending quota, reputation and the bounce/complaint
+  // suppression list are all account+**region** scoped, and nothing inside an
+  // identity separates two domains that share one — configuration sets give
+  // per-set metrics and IP pools, never a per-set sandbox. So a deployment that
+  // wants one environment's mail unable to affect another's sends it from a
+  // different region: staged rollout (production access granted to test while
+  // production stays sandboxed) is only expressible that way. Defaults to the
+  // environment's own region, which is what a single-region deployment wants
+  // and what every kelabo.json written before this knob existed means.
+  const ses = {
+    ...block.ses,
+    // `||`, not `??`: this file is hand-edited JSON, and an empty string left
+    // behind from a template is "unset", not "region named the empty string".
+    region: block.ses?.region || block.region,
   };
 
   // Cloudflare Realtime's API host. Derived here (not written in a consumer) so
@@ -116,12 +164,26 @@ export function loadConfig(env,   configPath = join(here, "kelabo.json")) {
     ...(block.joinCode ?? {}),
   };
 
+  // What this deployment calls itself, shown to people and used for nothing
+  // else: the sign-in sentence and the browser tab. Strictly cosmetic —
+  // tenancy is the verified email domain (`allowedEmailDomain`), and this must
+  // never become a second source of truth for it. A deployment may well call
+  // itself "Acme" while admitting acme-corp.com. Normalised here so no
+  // consumer has to decide what a missing or padded value means; empty is
+  // fine and falls back to generic wording.
+  const organizationName = String(block.organizationName ?? "").trim();
+
   return {
     ...block,
     env,
+    organizationName,
     app: raw.app,
     rtcApiBase,
     rtc,
+    ses,
+    allowIps,
+    allowIpsV4,
+    allowIpsV6,
     contacts,
     auth,
     joinCode,

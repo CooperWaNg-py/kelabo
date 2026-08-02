@@ -1,9 +1,9 @@
 {
   "app": "kelabo",
-  "baseDomain": "example.com",
   "environments": {
     "dev": {
       "endpoint": "dev",
+      "baseDomain": "example.com",
       "account": "123456789012",
       "region": "ap-southeast-2",
       "hostedZone": {
@@ -15,6 +15,7 @@
         "gateway": "gw.dev"
       },
       "allowedEmailDomain": "example.com",
+      "organizationName": "Example Corp",
       "secrets": {
         "deepgram": "kelabo/dev/deepgram",
         "llm": "kelabo/dev/llm",
@@ -49,6 +50,7 @@
         "diarizeModel": "latest",
         "tokenTtlSeconds": 60
       },
+      "allowIps": [],
       "ses": {
         "fromAddress": "otp@example.com",
         "hostedZone": {
@@ -84,6 +86,7 @@
     },
     "staging": {
       "endpoint": "staging",
+      "baseDomain": "example.com",
       "account": "123456789012",
       "region": "ap-southeast-2",
       "hostedZone": {
@@ -95,6 +98,7 @@
         "gateway": "staging-gw"
       },
       "allowedEmailDomain": "example.com",
+      "organizationName": "Example Corp",
       "secrets": {
         "deepgram": "kelabo/staging/deepgram",
         "llm": "kelabo/staging/llm",
@@ -160,6 +164,7 @@
     },
     "prod": {
       "endpoint": "prod",
+      "baseDomain": "example.com",
       "account": "123456789012",
       "region": "ap-southeast-2",
       "hostedZone": {
@@ -171,6 +176,7 @@
         "gateway": "gw"
       },
       "allowedEmailDomain": "example.com",
+      "organizationName": "Example Corp",
       "secrets": {
         "deepgram": "kelabo/prod/deepgram",
         "llm": "kelabo/prod/llm",

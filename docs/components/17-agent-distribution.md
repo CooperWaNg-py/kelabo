@@ -326,7 +326,7 @@ to reading `connector/package.json` when running from source.
 | Command | Behaviour |
 |---|---|
 | `setup` | resolve config → back up → apply this runtime's keys → write manifest → pair if not paired → print next steps |
-| `login` | device-code pairing only (unchanged); re-pairing overwrites the credential |
+| `login` | device-code pairing only; re-pairing overwrites the credential. **Asks for the API base URL with the stored one as the default** — Enter keeps it, a new value moves the machine to another deployment. `--api`/`KELABO_API_BASE_URL` still skip the prompt. The stored endpoint is deliberately not a silent fallback: inheriting it is exactly wrong for the case that sends anyone back to `login`, and re-pairing is not a *de*-registration — the old token stays valid until it expires, because `DELETE /agent/tokens/:jti` authenticates with a session cookie and a terminal has neither. `login` prints the revoke URL instead, as `uninstall --purge` does. |
 | `status` | the doctor, §8 |
 | `uninstall [--purge]` | remove the three keys → delete every `~/.kelabo/bridge-*.json` → with `--purge`, delete the credential and print the revoke URL → print `npm rm -g …` |
 | `reset` | `uninstall --purge` followed by `setup` |

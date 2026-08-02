@@ -115,6 +115,20 @@ guests.
 - **OTP:** email → code. States `idle → sending → code_sent → verifying →
   success|error`. Errors: wrong/expired code, domain not allowed, rate-limited. OTP
   inputs support paste-to-fill; resend countdown.
+- **The allowed domain is named, and optional to type.** `config.allowedEmailDomain`
+  reaches the bundle as `VITE_ALLOWED_EMAIL_DOMAIN` (from `deploy-frontend.sh`), so
+  the copy above renders the real domain instead of `company.com`, and `rico`
+  submits as `rico@mycompany.com`. The field stays a real `type="email"` input
+  rather than a suffix-locked one, because a locked suffix loses email autofill and
+  turns a *pasted* full address into `rico@x.com@x.com`. What gets submitted is
+  decided by `spa/src/emailDomain.js` — pure, so `spa/test/emailDomain.mjs` pins
+  that trap and the wrong-domain refusal under plain node. Empty config = open
+  registration, and every string falls back to the generic wording.
+- **The deployment names itself.** `config.organizationName` → `VITE_ORG_NAME` →
+  "Use your **Acme Corp** email to receive a sign-in code", and `document.title`
+  becomes `Acme Corp · kelabo` (set once in `main.jsx`, not per route — it is a
+  build-time constant). Cosmetic only: it is never consulted about who may sign
+  in. Unset leaves "Use your corp email…" and the plain `kelabo` tab title.
 - **No password field anywhere.**
 
 **Silent refresh (no re-login every open):** on app load, if `/me` returns 401 the

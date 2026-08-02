@@ -9,6 +9,7 @@ import { LambdaStack } from "../lib/lambda-stack.js";
 import { ApiGatewayStack } from "../lib/apigateway-stack.js";
 import { GatewayEcsStack } from "../lib/gateway-ecs-stack.js";
 import { PortalCloudFrontStack } from "../lib/portal-cloudfront-stack.js";
+import { WafStack } from "../lib/waf-stack.js";
 
 const app = new App();
 const envName = app.node.tryGetContext("env") ?? "dev";
@@ -19,6 +20,9 @@ Tags.of(app).add("endpoint", cfg.endpoint);
 
 const homeEnv = { account: cfg.account, region: cfg.region };
 const usEast1Env = { account: cfg.account, region: "us-east-1" };
+// Usually homeEnv. An environment that moved its mail elsewhere puts the
+// identity there instead, because an identity only exists in its own region.
+const sesEnv = { account: cfg.account, region: cfg.ses.region };
 const prefix = `${cfg.app}-${cfg.endpoint}`;
 
 let synthProps = {};
@@ -52,8 +56,21 @@ const ddb = new DynamoDbStack(app, `${prefix}-ddb`, { ...synthProps, env: homeEn
 // the same domain, exactly one of them owns the identity; the others set
 // ses.createIdentity: false and just use it (the send permission in the lambda
 // stack is identity-independent).
+//
+// That same scoping is why the stack goes in `sesEnv` rather than `homeEnv`:
+// sandbox status, sending quota, reputation and the bounce/complaint
+// suppression list are all per region, so moving an environment's mail to
+// another region is the only way to keep it from affecting another
+// environment's — and the identity has to be verified where the mail is sent
+// from, not where the rest of the environment lives.
 if (cfg.ses.createIdentity !== false) {
-  const ses = new SesStack(app, `${prefix}-ses`, { ...synthProps, env: homeEnv, cfg, zone: dns.zone });
+  const ses = new SesStack(app, `${prefix}-ses`, {
+    ...synthProps,
+    env: sesEnv,
+    crossRegionReferences: true,
+    cfg,
+    zone: dns.zone,
+  });
   ses.addDependency(dns);
 }
 
@@ -81,6 +98,15 @@ const gateway = new GatewayEcsStack(app, `${prefix}-gateway`, {
 gateway.addDependency(ddb);
 gateway.addDependency(cert);
 
+// `allowIps` closes the deployment to a list of source addresses. Only the
+// CloudFront half needs a stack of its own, and only in us-east-1, because that
+// is the one region a CLOUDFRONT-scope WebACL exists in. Empty list, no stack,
+// no charge — an open deployment synthesizes exactly what it did before.
+let waf;
+if (cfg.allowIps.length) {
+  waf = new WafStack(app, `${prefix}-waf`, { ...synthProps, env: usEast1Env, cfg });
+}
+
 const portal = new PortalCloudFrontStack(app, `${prefix}-portal`, {
   ...synthProps,
   env: homeEnv,
@@ -89,6 +115,8 @@ const portal = new PortalCloudFrontStack(app, `${prefix}-portal`, {
   zone: dns.zone,
   portalCert: certUse1.portalCert,
   httpApi: api.httpApi,
+  webAclArn: waf?.webAclArn,
 });
+if (waf) portal.addDependency(waf);
 portal.addDependency(api);
 portal.addDependency(certUse1);

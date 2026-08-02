@@ -118,13 +118,16 @@ All configuration is one file. Nothing anywhere else needs editing.
 
    | Field | Meaning |
    |---|---|
-   | `baseDomain` | e.g. `mycompany.com` — every endpoint hangs off this |
+   | `environments.<env>.baseDomain` | e.g. `mycompany.com` — the registrable domain this environment's names hang off. **Per environment, with no shared default**, so an environment can sit on a different domain entirely (test on `mycompany.dev`, production on `mycompany.com`) and none can silently inherit the wrong one. Cookies are scoped to the portal host, so environments sharing a registrable domain also send each other their session cookies — harmless, since each verifies with its own key, but not hygiene |
    | `environments.<env>.account` / `region` | your AWS account ID and region |
    | `environments.<env>.hostedZone.name` / `id` | the Route 53 zone from C1 |
    | `environments.<env>.subdomains.portal` / `gateway` | e.g. `kelabo` and `gw.kelabo` → `kelabo.mycompany.com`, `gw.kelabo.mycompany.com` |
-   | `environments.<env>.allowedEmailDomain` | e.g. `mycompany.com` — **this is your tenant boundary**: only addresses at this domain can sign in, and everyone at it is one organisation |
+   | `environments.<env>.allowedEmailDomain` | e.g. `mycompany.com` — **this is your tenant boundary**: only addresses at this domain can sign in, and everyone at it is one organisation. The sign-in page names it and fills it in, so people can type just `rico`; it reaches the browser as a build-time `VITE_*` value, so changing it needs `make frontend` as well as `make backend` |
+   | `environments.<env>.organizationName` | e.g. `Acme Corp` — what the deployment calls itself, on the sign-in page ("Use your Acme Corp email…") and in the browser tab. **Display only**: it never decides who may sign in — `allowedEmailDomain` does — so a deployment may call itself anything. Omit it and the wording stays generic. Build-time like the domain, so changing it needs `make frontend` |
+   | `environments.<env>.allowIps` | empty (the default) means anyone can reach the deployment; sign-in is still the access control. A list of CIDRs closes it to those sources only — your corporate egress range while a pilot runs, say. It covers the portal, the API and the Gateway; add IPv6 ranges too if your network has them, or a browser preferring IPv6 is locked out. Manage it with `make allow-ip` / `allow-list` / `allow-rm` rather than by hand |
    | `environments.<env>.ses.fromAddress` | e.g. `kelabo@mycompany.com` — where sign-in codes come from |
    | `environments.<env>.ses.createIdentity` | leave unset. Set `false` only when another env in the same account already verified the sending domain (SES identities are account-scoped; two stacks can't create the same one) |
+   | `environments.<env>.ses.region` | leave unset — mail then goes from the env's own region. Set it only to put an environment's mail in a *different* region, which is the one way to give it its own sandbox status, quota, reputation and bounce list (§C1). The identity must be verified in that region, and production access requested there separately |
 
    Leave `auth.socialProviders` as `[]` — work-email sign-in is the
    self-hosting identity path. (Google/Apple sign-in requires registering

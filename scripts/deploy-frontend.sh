@@ -16,6 +16,12 @@ import('./loadConfig.mjs').then((m) => {
     VITE_GATEWAY_BASE_URL: c.gatewayBaseUrl,
     VITE_PORTAL_URL: c.portalUrl,
     VITE_SOCIAL_PROVIDERS: (c.auth?.socialProviders ?? []).join(','),
+    // Empty when the env allows any domain — the sign-in page reads that as
+    // open registration, exactly as the server does.
+    VITE_ALLOWED_EMAIL_DOMAIN: c.allowedEmailDomain ?? '',
+    // Display only — the deployment's own name on the sign-in page and the
+    // browser tab. Empty falls back to generic wording.
+    VITE_ORG_NAME: c.organizationName ?? '',
     VITE_ENV: c.endpoint,
     KELABO_REGION: c.region,
   };

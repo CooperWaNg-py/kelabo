@@ -13,6 +13,7 @@ REGION = $(eval REGION := $(shell cd config && KELABO_ENV=$(env) node --input-ty
 STACK_PREFIX := kelabo-$(env)
 
 .PHONY: help deploy infra docker gateway restart backend frontend synth secrets rtc-secrets bootstrap test check \
+	allow-list allow-ip allow-rm \
 	agent-login agent-pack agent-publish agent-release agent-tarball connector-install install-connector install-oc-connector \
 	install-cc-connector uninstall-connector uninstall-oc-connector uninstall-cc-connector
 
@@ -36,6 +37,9 @@ help: ## show this help
 	@echo
 	@echo "deploy (needs AWS creds + config/kelabo.json):"
 	@awk 'BEGIN{FS=":.*## "} /^(deploy|infra|docker|reserver|gateway|restart|backend|frontend|synth|secrets):.*## /{printf "  %-10s %s\n",$$1,$$2}' $(MAKEFILE_LIST)
+	@echo
+	@echo "access control (allowIps — empty means open):"
+	@awk 'BEGIN{FS=":.*## "} /^(allow-list|allow-ip|allow-rm):.*## /{printf "  %-12s %s\n",$$1,$$2}' $(MAKEFILE_LIST)
 	@echo
 	@echo "notes: the ECS task pins the mutable :latest tag, so \`make docker\` alone"
 	@echo "       does not roll the service — follow it with \`make restart\`."
@@ -99,6 +103,20 @@ rtc-secrets: ## Cloudflare Realtime creds (CF_SFU_APP_ID=.. CF_SFU_APP_SECRET=..
 	  && aws secretsmanager put-secret-value --secret-id kelabo/$(env)/cloudflare-realtime --secret-string '$(CF_JSON)' --region $(REGION) \
 	  || aws secretsmanager create-secret --name kelabo/$(env)/cloudflare-realtime --secret-string '$(CF_JSON)' --region $(REGION) --tags Key=app,Value=kelabo Key=endpoint,Value=$(env)
 	@echo "cloudflare realtime secret ready for env=$(env) — run 'make restart env=$(env)' to pick it up"
+
+# `allowIps` — who may reach the deployment at all. Adding an address writes
+# config/kelabo.json *and* edits AWS live, so the two cannot drift and a new
+# address works in seconds. The exception is the first lock and the last
+# unlock, which change CDK-owned resources and say so.
+allow-list: ## show the source addresses allowed to reach this env, config vs live
+	@scripts/allowlist.sh $(env) list
+
+allow-ip: ## allow a source address (IP=1.2.3.4/32, or omit for this device)
+	@scripts/allowlist.sh $(env) add $(if $(IP),$(IP),this)
+
+allow-rm: ## stop allowing a source address (IP=1.2.3.4/32)
+	@test -n "$(IP)" || (echo "IP required, e.g. make allow-rm env=$(env) IP=1.2.3.4/32"; exit 1)
+	@scripts/allowlist.sh $(env) rm $(IP)
 
 bootstrap: ## npm install in every package (root + 6 components)
 	npm install

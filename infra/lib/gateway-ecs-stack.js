@@ -80,6 +80,11 @@ export class GatewayEcsStack extends Stack {
       publicLoadBalancer: true,
       certificate,
       redirectHTTP: true,
+      // The pattern's default is to open the listener to 0.0.0.0/0. When
+      // `allowIps` is set that rule has to be absent rather than merely joined
+      // by narrower ones — a security group is a union, so an open rule beside
+      // an allowlist is just an open rule. The replacements go in below.
+      openListener: cfg.allowIps.length === 0,
       circuitBreaker: { rollback: true },
       taskImageOptions: {
         image: ecs.ContainerImage.fromEcrRepository(this.repo, cfg.gateway.imageTag),
@@ -132,6 +137,31 @@ export class GatewayEcsStack extends Stack {
 
     this.service.targetGroup.configureHealthCheck({ path: "/health" });
     this.service.loadBalancer.setAttribute("idle_timeout.timeout_seconds", "240");
+
+    // `allowIps` — the Gateway's half of it (the portal's is a WAF WebACL, see
+    // waf-stack.js). A security group rather than WAF because the ALB is
+    // regional and already has one: refusing the connection is stronger than
+    // accepting it and answering 403, and it costs nothing.
+    //
+    // Port 80 is listed as well as 443 only because `redirectHTTP` above opens
+    // it. Leaving it out would not be safer — it would make an allowlisted
+    // browser typing `http://` hang instead of being redirected, which reads as
+    // the service being down.
+    if (cfg.allowIps.length) {
+      const lb = this.service.loadBalancer;
+      const open = (peer, label) => {
+        lb.connections.allowFrom(peer, ec2.Port.tcp(443), `allowIps ${label}`);
+        lb.connections.allowFrom(peer, ec2.Port.tcp(80), `allowIps ${label} (http redirect)`);
+      };
+      for (const cidr of cfg.allowIpsV4) open(ec2.Peer.ipv4(cidr), cidr);
+      for (const cidr of cfg.allowIpsV6) open(ec2.Peer.ipv6(cidr), cidr);
+    }
+
+    // `make allow-ip` edits this group live, so it has to be findable without
+    // guessing at a name CloudFormation generated.
+    new CfnOutput(this, "GatewayAlbSecurityGroupId", {
+      value: this.service.loadBalancer.connections.securityGroups[0].securityGroupId,
+    });
 
     const taskRole = this.service.taskDefinition.taskRole;
     tables.kelabos.grantReadWriteData(taskRole);

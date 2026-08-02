@@ -108,7 +108,13 @@ function fromEnv() {
       diarizeModel: env.KELABO_DEEPGRAM_DIARIZE_MODEL || "latest",
       tokenTtlSeconds: num(env.KELABO_DEEPGRAM_TOKEN_TTL_SECONDS, 60),
     },
-    ses: { fromAddress: env.KELABO_SES_FROM_ADDRESS },
+    // `region` falls back to the Lambda's own region: an environment that never
+    // moved its mail has no KELABO_SES_REGION, and the identity is where the
+    // rest of it lives.
+    ses: {
+      fromAddress: env.KELABO_SES_FROM_ADDRESS,
+      region: env.KELABO_SES_REGION || env.AWS_REGION || "us-east-1",
+    },
     // The control plane only stamps the kelabo's transport and reports it back;
     // all Cloudflare credentials and signalling live in the Gateway (docs 15).
     rtc: {
@@ -171,7 +177,7 @@ function fromLoadConfig(c) {
       diarizeModel: c.deepgram?.diarizeModel ?? "latest",
       tokenTtlSeconds: c.deepgram?.tokenTtlSeconds ?? 60,
     },
-    ses: { fromAddress: c.ses?.fromAddress },
+    ses: { fromAddress: c.ses?.fromAddress, region: c.ses?.region || c.region },
     rtc: { ...DEFAULTS.rtc, ...(c.rtc || {}) },
     otp: { ...DEFAULTS.otp, ...(c.otp || {}) },
     joinCode: { ...DEFAULTS.joinCode, ...(c.joinCode || {}) },

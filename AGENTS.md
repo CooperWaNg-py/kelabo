@@ -21,7 +21,7 @@ installs nothing but esbuild.
 | `connector/` | the agent bridge: an MCP server a developer's own coding agent spawns, which tunnels to the Gateway (docs 16). `private`; publishes as `@kelabome/agents` via `build/pack.mjs` (docs 17) | dev laptop |
 | `rig/` | Docker image packaging opencode + the bridge for people who do not configure an agent themselves; no `package.json` — it bundles `connector/` | dev laptop |
 | `spa/` | Vite + React + Tailwind, pure JSX | S3 + CloudFront |
-| `infra/` | CDK app (`infra/bin/kelabo.js`), 9 stacks per env from 8 files in `infra/lib/` | AWS CDK |
+| `infra/` | CDK app (`infra/bin/kelabo.js`), 9 stacks per env from 9 files in `infra/lib/` (+ `-waf` when `allowIps` is set) | AWS CDK |
 
 ## Hard rules
 

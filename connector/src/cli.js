@@ -774,8 +774,14 @@ async function cmdLaunch(id, argv) {
 
 async function cmdLogin(flags) {
   const stored = readCredential();
+  // The stored endpoint is a *default*, never an assumption. Re-pairing is
+  // usually re-pairing against somewhere else — the deployment moved, and a
+  // token minted by the old one means nothing to the new one — so silently
+  // inheriting it pairs you back into the endpoint you were trying to leave.
+  // Offering it and taking Enter costs one keystroke and makes the change
+  // possible at all.
   const apiBaseUrl =
-    flags.api || process.env.KELABO_API_BASE_URL || stored.apiBaseUrl || (await promptApiBase());
+    flags.api || process.env.KELABO_API_BASE_URL || (await promptApiBase(stored.apiBaseUrl || ""));
   // No runtime selection: one credential serves all of them. What goes on the
   // wire is a label for the Settings page, not a binding.
   await login({
@@ -783,6 +789,20 @@ async function cmdLogin(flags) {
     runtime: flags.runtime && flags.runtime !== true ? String(flags.runtime) : installedRuntimes().join(",") || "agent",
     label: flags.label || "",
   });
+
+  // Re-pairing replaces the credential file, which does not touch the token it
+  // held: that one stays valid until it expires. Deregistering it here is not
+  // possible — DELETE /agent/tokens/:jti authenticates with a session cookie
+  // (rest-api/src/index.js), and a terminal has an agent token, not a session.
+  // So say where it can actually be killed, as `uninstall --purge` already does,
+  // and point at the endpoint that minted it rather than the new one.
+  if (stored.agentToken) {
+    const portal = (stored.apiBaseUrl || "").replace(/\/api\/?$/, "");
+    out(
+      `  The previous token is replaced locally but still valid until it expires.\n` +
+        `  Revoke it at ${portal ? `${portal}/settings` : "your Kelabo Settings page"}\n\n`
+    );
+  }
 }
 
 export async function main(argv) {

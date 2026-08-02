@@ -193,6 +193,30 @@ cdk deploy -c env=prod  --all
   stays sandboxed. `SesStack` then deploys to that region (`sesEnv` in
   `infra/bin/kelabo.js`) and the Lambda gets `KELABO_SES_REGION`; unset, it is
   the environment's own region and nothing changes.
+- **`ses.spf` / `ses.dmarc` publish one record each, and both are opt-in for the
+  same reason: a domain may hold only one of either.** A deployment whose domain
+  already carries a policy from its mail provider would get a second record and a
+  failed deploy. `dmarc: true` writes `v=DMARC1; p=none;` — monitor-only, the
+  sole safe opening policy, since anything stricter quarantines mail from senders
+  nobody has inventoried yet. `spf: true` writes
+  `v=spf1 include:amazonses.com -all`. Be clear on what SPF buys: it is evaluated
+  against the *envelope* sender, and SES's default envelope is
+  `<id>@<region>.amazonses.com`, so this record does **not** authenticate our own
+  mail and is not what makes DMARC pass — Easy DKIM is. It denies the domain to
+  anyone else's envelope. SPF *alignment* would need a custom MAIL FROM
+  subdomain, which neither knob provides.
+- **Two environments may share a hosted zone, but only one may own its mail
+  records.** DKIM CNAMEs, the apex SPF and `_dmarc` are singletons per *domain*,
+  while portal/gateway records are per *subdomain* and never collide. So
+  `corp.kelabo.dev` (dev) and `saas.kelabo.dev` (saasdev) coexist in one zone
+  happily, and the mail records there belong to exactly one stack. What keeps
+  them apart is `ses.hostedZone`: dev points it at the *other* domain, so its
+  `SesStack` writes SPF/DMARC/DKIM into that zone instead. Point two
+  environments' `ses.hostedZone` at the same zone with `spf`/`dmarc` on and both
+  stacks try to create the same record, which fails the deploy with "already
+  exists". **No code can catch this** — the two configs are separate files (and
+  on a fork, separate branches), so no single `loadConfig` call ever sees both.
+  It is a convention or it is nothing.
 
 ---
 

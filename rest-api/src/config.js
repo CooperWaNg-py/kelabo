@@ -118,6 +118,7 @@ function fromEnv() {
     ses: {
       fromAddress: env.KELABO_SES_FROM_ADDRESS,
       region: env.KELABO_SES_REGION || env.AWS_REGION || "us-east-1",
+      configurationSet: env.KELABO_SES_CONFIG_SET || "",
     },
     // The control plane only stamps the kelabo's transport and reports it back;
     // all Cloudflare credentials and signalling live in the Gateway (docs 15).
@@ -183,7 +184,11 @@ function fromLoadConfig(c) {
       diarizeModel: c.deepgram?.diarizeModel ?? "latest",
       tokenTtlSeconds: c.deepgram?.tokenTtlSeconds ?? 60,
     },
-    ses: { fromAddress: c.ses?.fromAddress, region: c.ses?.region || c.region },
+    ses: {
+      fromAddress: c.ses?.fromAddress,
+      region: c.ses?.region || c.region,
+      configurationSet: c.ses?.configurationSetName || "",
+    },
     rtc: { ...DEFAULTS.rtc, ...(c.rtc || {}) },
     otp: { ...DEFAULTS.otp, ...(c.otp || {}) },
     joinCode: { ...DEFAULTS.joinCode, ...(c.joinCode || {}) },

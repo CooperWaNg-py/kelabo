@@ -102,11 +102,16 @@ function formatWhen(scheduledAt, durationMinutes) {
 const esc = (v) =>
   String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 
-export function createSesSender({ region, sendEmail } = {}) {
+export function createSesSender({ region, sendEmail, configurationSet, client: injectedClient } = {}) {
   // The stub seam used by the tests: one function stands in for every kind of
   // mail, so a test can assert on what would have been sent without a client.
   if (sendEmail) return { sendOtp: sendEmail, sendInvite: sendEmail, sendCancellation: sendEmail, sendReschedule: sendEmail };
-  const client = new SESv2Client({ region: region || process.env.AWS_REGION });
+  const client = injectedClient || new SESv2Client({ region: region || process.env.AWS_REGION });
+  // Spread into every command so bounces and complaints reach the
+  // configuration set's destination. ABSENT, not empty, when unconfigured:
+  // SES rejects a send that names a set which does not exist, so an empty
+  // string here would take all mail down rather than merely lose the events.
+  const configSet = configurationSet ? { ConfigurationSetName: configurationSet } : {};
   return {
     async sendInvite({ to, from, hostName, title, scheduledAt, durationMinutes, note, inviteUrl }) {
       const when = formatWhen(scheduledAt, durationMinutes);
@@ -132,6 +137,7 @@ export function createSesSender({ region, sendEmail } = {}) {
       try {
         await client.send(
           new SendEmailCommand({
+            ...configSet,
             FromEmailAddress: from,
             Destination: { ToAddresses: [to] },
             Content: {
@@ -170,6 +176,7 @@ export function createSesSender({ region, sendEmail } = {}) {
       try {
         await client.send(
           new SendEmailCommand({
+            ...configSet,
             FromEmailAddress: from,
             Destination: { ToAddresses: [to] },
             Content: { Simple: { Subject: { Data: `Cancelled: ${title}` }, Body: { Text: { Data: text }, Html: { Data: html } } } },
@@ -206,6 +213,7 @@ export function createSesSender({ region, sendEmail } = {}) {
       try {
         await client.send(
           new SendEmailCommand({
+            ...configSet,
             FromEmailAddress: from,
             Destination: { ToAddresses: [to] },
             Content: { Simple: { Subject: { Data: `Rescheduled: ${title}` }, Body: { Text: { Data: text }, Html: { Data: html } } } },
@@ -245,6 +253,7 @@ export function createSesSender({ region, sendEmail } = {}) {
       try {
         await client.send(
           new SendEmailCommand({
+            ...configSet,
             FromEmailAddress: from,
             Destination: { ToAddresses: [to] },
             Content: {

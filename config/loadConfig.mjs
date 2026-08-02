@@ -127,10 +127,31 @@ export function loadConfig(env,   configPath = join(here, "kelabo.json")) {
       : block.ses.spf
     : null;
 
+  // Bounce and complaint visibility. The account suppression list already stops
+  // mailing an address that hard-bounces — silently, which is the problem: the
+  // person types their address, sees "code sent", and no code ever arrives
+  // again, while our logs record a successful send. A configuration set with an
+  // event destination is the only way to learn it happened.
+  //
+  // Opt-in, and only meaningful where the environment creates its own SES stack
+  // (`createIdentity !== false`), since that stack is where the set is made.
+  // The name is derived rather than configured: naming a set that does not
+  // exist makes SES reject every send outright, so the fewer places the string
+  // is written, the better.
+  const sesEvents = block.ses?.events === true;
+  if (sesEvents && block.ses?.createIdentity === false) {
+    throw new Error(
+      `kelabo config: env "${env}" sets ses.events but also ses.createIdentity:false. ` +
+        `The configuration set is created by this environment's SES stack, which that turns off.`,
+    );
+  }
+
   const ses = {
     ...block.ses,
     dmarc,
     spf,
+    events: sesEvents,
+    configurationSetName: sesEvents ? `kelabo-${block.endpoint}-mail` : "",
     // `||`, not `??`: this file is hand-edited JSON, and an empty string left
     // behind from a template is "unset", not "region named the empty string".
     region: block.ses?.region || block.region,

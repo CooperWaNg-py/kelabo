@@ -59,6 +59,9 @@ export class LambdaStack extends Stack {
         KELABO_SECRET_MCP_PREFIX: cfg.secrets.mcpPrefix,
         // The shared secret CloudFront sends, and whether to insist on it.
         // Only the NAME travels here; the value is read at runtime.
+        // Empty unless the env made a configuration set. Naming one that does
+        // not exist makes SES reject every send, so this is derived, never typed.
+        KELABO_SES_CONFIG_SET: cfg.ses.configurationSetName,
         KELABO_SECRET_API_ORIGIN: cfg.secrets.apiOrigin,
         KELABO_REQUIRE_ORIGIN_SECRET: cfg.api.requireOriginSecret ? "true" : "false",
         KELABO_SES_FROM_ADDRESS: cfg.ses.fromAddress,

@@ -1,5 +1,6 @@
 import { Stack, CfnOutput } from "aws-cdk-lib";
 import * as ses from "aws-cdk-lib/aws-ses";
+import * as sns from "aws-cdk-lib/aws-sns";
 import * as route53 from "aws-cdk-lib/aws-route53";
 
 export class SesStack extends Stack {
@@ -54,6 +55,42 @@ export class SesStack extends Stack {
         values: [`${parts.join("; ")};`],
       });
       new CfnOutput(this, "SesDmarcPolicy", { value: `${parts.join("; ")};` });
+    }
+
+    // Bounce/complaint visibility. Without this the account suppression list
+    // stops mailing a bounced address silently: the person keeps asking for a
+    // sign-in code, we keep reporting a successful send, and nobody can tell
+    // why they can no longer get in. The events go to SNS so something can act
+    // on them; subscribing is left to the deployment, since where an operator
+    // wants to be told is not ours to decide.
+    //
+    // The Lambda names this set on every send, and SES rejects a send naming a
+    // set that does not exist — so this stack must exist before the Lambda
+    // references it. It does: `infra/bin/kelabo.js` builds SES before Lambda.
+    if (cfg.ses.events) {
+      const topic = new sns.Topic(this, "MailEventsTopic", {
+        topicName: `kelabo-${cfg.endpoint}-mail-events`,
+        displayName: `Kelabo ${cfg.endpoint} mail events`,
+      });
+      const configurationSet = new ses.ConfigurationSet(this, "ConfigurationSet", {
+        configurationSetName: cfg.ses.configurationSetName,
+      });
+      new ses.ConfigurationSetEventDestination(this, "MailEventsToSns", {
+        configurationSet,
+        destination: ses.EventDestination.snsTopic(topic),
+        // Delivery is included so a working address can be told apart from a
+        // silent failure; opens and clicks are deliberately not, since this is
+        // transactional mail and tracking pixels are neither wanted nor honest.
+        events: [
+          ses.EmailSendingEvent.BOUNCE,
+          ses.EmailSendingEvent.COMPLAINT,
+          ses.EmailSendingEvent.REJECT,
+          ses.EmailSendingEvent.DELIVERY_DELAY,
+          ses.EmailSendingEvent.DELIVERY,
+        ],
+      });
+      new CfnOutput(this, "SesConfigurationSet", { value: cfg.ses.configurationSetName });
+      new CfnOutput(this, "SesMailEventsTopicArn", { value: topic.topicArn });
     }
 
     new CfnOutput(this, "SesIdentityDomain", { value: sesZone.zoneName });

@@ -1701,6 +1701,32 @@ await test("origin gate fails CLOSED when the secret cannot be read", async () =
   assert.equal(res.statusCode, 403);
 });
 
+// The configuration set name is spread into every SendEmailCommand, and SES
+// rejects a send naming a set that does not exist — so "unconfigured" must mean
+// the key is ABSENT, not empty. Getting this wrong loses no events; it stops
+// all mail, including every sign-in code.
+await test("SES configuration set: named when set, absent when not", async () => {
+  const { createSesSender } = await import("../src/otp.js");
+  const sent = [];
+  const stubClient = { send: async (cmd) => { sent.push(cmd.input); return {}; } };
+
+  const withSet = createSesSender({ client: stubClient, configurationSet: "kelabo-test-mail" });
+  await withSet.sendOtp({ to: "a@example.com", from: "otp@example.com", code: "123456" });
+  assert.equal(sent.at(-1).ConfigurationSetName, "kelabo-test-mail");
+
+  for (const unset of [undefined, "", null]) {
+    const without = createSesSender({ client: stubClient, configurationSet: unset });
+    await without.sendInvite({
+      to: "b@example.com", from: "otp@example.com", hostName: "Rico",
+      title: "T", scheduledAt: Date.now(), inviteUrl: "https://x/invite/1",
+    });
+    assert.ok(
+      !("ConfigurationSetName" in sent.at(-1)),
+      `ConfigurationSetName must be absent, not empty, for ${JSON.stringify(unset)}`,
+    );
+  }
+});
+
 await test("originSecretMatches: only an exact match, and never on absence", async () => {
   assert.equal(originSecretMatches("abc", "abc"), true);
   assert.equal(originSecretMatches("abc", "abd"), false);

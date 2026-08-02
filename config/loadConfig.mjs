@@ -110,9 +110,27 @@ export function loadConfig(env,   configPath = join(here, "kelabo.json")) {
     ? { policy: "none", ...(block.ses.dmarc === true ? {} : block.ses.dmarc) }
     : null;
 
+  // SPF, same opt-in reasoning: one record per domain, so a deployment whose
+  // domain already publishes one must not get a second.
+  //
+  // Worth being clear about what this does and does not do. SPF is checked
+  // against the envelope sender, and SES's default envelope is
+  // `…@<region>.amazonses.com` — so this record does NOT authenticate our own
+  // mail, and it is not what makes DMARC pass (Easy DKIM is). What it does is
+  // state that nothing may use this domain as an envelope sender, which closes
+  // that avenue to a spoofer and is what a deliverability review expects to
+  // find. SPF *alignment* needs a custom MAIL FROM subdomain, which is a
+  // separate thing this knob deliberately does not pretend to be.
+  const spf = block.ses?.spf
+    ? block.ses.spf === true
+      ? "v=spf1 include:amazonses.com -all"
+      : block.ses.spf
+    : null;
+
   const ses = {
     ...block.ses,
     dmarc,
+    spf,
     // `||`, not `??`: this file is hand-edited JSON, and an empty string left
     // behind from a template is "unset", not "region named the empty string".
     region: block.ses?.region || block.region,

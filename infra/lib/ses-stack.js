@@ -33,6 +33,18 @@ export class SesStack extends Stack {
     // `p=none` monitors without asking anyone to reject, which is the only safe
     // opening position: a stricter policy on a domain whose other senders are
     // not yet inventoried quarantines that domain's own legitimate mail.
+    // SPF at the apex. This does not authenticate our own mail — SES's default
+    // envelope sender is amazonses.com, so that is the domain an SPF check
+    // actually reads — but it denies the domain to anyone else's envelope, and
+    // its absence is conspicuous to a reviewer.
+    if (cfg.ses.spf) {
+      new route53.TxtRecord(this, "SpfRecord", {
+        zone: sesZone,
+        values: [cfg.ses.spf],
+      });
+      new CfnOutput(this, "SesSpf", { value: cfg.ses.spf });
+    }
+
     if (cfg.ses.dmarc) {
       const parts = [`v=DMARC1`, `p=${cfg.ses.dmarc.policy}`];
       if (cfg.ses.dmarc.rua) parts.push(`rua=${cfg.ses.dmarc.rua}`);

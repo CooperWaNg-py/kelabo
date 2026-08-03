@@ -63,7 +63,7 @@ make check                       # node --check over every .js/.mjs (syntax only
 make test                        # rest-api + gateway + connector smoke, spa test + build, cdk synth
 cd contracts && npm test         # node test/frames.mjs (the agent wire protocol) && node test/mention.mjs
 cd gateway  && npm test          # node test/agent.mjs && node test/rtc.mjs && node test/presence.mjs && node test/smoke.mjs
-cd rest-api && npm test          # node test/smoke.mjs && node test/reserved.mjs
+cd rest-api && npm test          # node test/smoke.mjs && node test/reserved.mjs && node test/otpMail.mjs
 cd connector && npm test         # queue + envelope + persona + cards + install + runtimes + launch + channel + control (pure), smoke, pack
 cd spa && npm test               # test/transcript.mjs (compose + project) + test/rtc.mjs (pull reconcile, retry policy) + test/presence.mjs
 cd spa && npm run build          # the only syntax gate for JSX

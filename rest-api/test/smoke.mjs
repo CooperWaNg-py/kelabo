@@ -1718,6 +1718,10 @@ await test("SES configuration set: named when set, absent when not", async () =>
   const withSet = createSesSender({ client: stubClient, configurationSet: "kelabo-test-mail" });
   await withSet.sendOtp({ to: "a@example.com", from: "otp@example.com", code: "123456" });
   assert.equal(sent.at(-1).ConfigurationSetName, "kelabo-test-mail");
+  // Raw, not Simple: `Simple` content cannot carry a part, so going back to it
+  // silently drops the inline logo and nothing else notices (see otpMail.mjs).
+  assert.ok(sent.at(-1).Content?.Raw?.Data, "the sign-in mail must be sent as raw MIME");
+  assert.ok(!sent.at(-1).Content?.Simple, "raw and simple content are mutually exclusive");
 
   for (const unset of [undefined, "", null]) {
     const without = createSesSender({ client: stubClient, configurationSet: unset });

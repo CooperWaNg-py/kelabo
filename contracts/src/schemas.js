@@ -144,6 +144,8 @@ export const userSettingsSchema = z.object({
   theme: z.enum(["light", "dark"]).optional(),
   scheme: z.string().max(16).optional(),
   notif: z.boolean().optional(),
+  // Room chimes (join/leave/message). On unless explicitly off.
+  sounds: z.boolean().optional(),
   finalOnly: z.boolean().optional(),
   sttLang: z.string().max(16).optional(),
   vad: z.boolean().optional(),

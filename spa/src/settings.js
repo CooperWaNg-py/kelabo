@@ -8,6 +8,7 @@ const KEY_MAP = {
   'kelabo-theme': 'theme',
   'kelabo-scheme': 'scheme',
   'kelabo-notif': 'notif',
+  'kelabo-sounds': 'sounds',
   'kelabo-final-only': 'finalOnly',
   'kelabo-stt-lang': 'sttLang',
   'kelabo-vad': 'vad',
@@ -21,7 +22,7 @@ const KEY_MAP = {
   // every colleague) draws the avatar the user actually kept.
   'kelabo-avatar': 'avatar',
 }
-const BOOL_KEYS = new Set(['notif', 'finalOnly', 'vad', 'muteHidden', 'joinMuted', 'joinCamera'])
+const BOOL_KEYS = new Set(['notif', 'sounds', 'finalOnly', 'vad', 'muteHidden', 'joinMuted', 'joinCamera'])
 const TS_KEY = 'kelabo-settings-ts'
 export const SETTINGS_SYNCED_EVENT = 'kelabo-settings-synced'
 

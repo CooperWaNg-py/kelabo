@@ -93,21 +93,40 @@ browser reaches CloudFront and the Gateway ALB by separate names:
 - **CloudFront** — a WAF WebACL, because a distribution has no security group.
   CLOUDFRONT scope exists only in us-east-1, so it is its own stack and the ARN
   crosses regions on the same `crossRegionReferences` path as the portal cert.
-- **Gateway ALB** — a security group. `openListener: false` suppresses the
-  pattern's own `0.0.0.0/0` rules, which matters: a security group is a union,
-  so an open rule beside an allowlist is just an open rule. Port 80 is listed
-  as well as 443 only because `redirectHTTP` opens it.
+- **Gateway ALB** — **listener rules**: the default action becomes a 403, one
+  rule forwards `/internal/*`, and further rules forward the allowed addresses
+  (five per rule — an ALB rule holds five condition values). The security group
+  stays open at 0.0.0.0/0.
+
+**Why not a security group on the ALB.** It was one, and it silently broke the
+product. `/internal/*` is the REST API calling the Gateway server to server:
+ending a kelabo (S3 archive → history row → participant index → minutes),
+ringing a contact, cancelling or rescheduling. The Lambda is not in the VPC, so
+it arrives over the public internet from an AWS-owned address that changes per
+invocation and cannot be allowlisted. Every one of those calls was dropped at
+layer 4; `rest-api` logged `gateway end call failed: TypeError: fetch failed`
+and marked the kelabo ended anyway. **Kelabos ended with no record, no minutes,
+and no error shown to anyone.** Nothing else broke, because the browser's own
+traffic comes from an allowlisted address — which is why it survived a whole
+deployment unnoticed. A refused connection is stronger than a 403, but only if
+it can express the exemption, and a security group cannot name a path.
+
+Filtering `/internal/*` by source address bought nothing anyway: it is already
+authenticated by the internal JWT, signed with the cookie key and carrying its
+own `aud` (`INTERNAL_JWT_AUD`), which every verifier checks.
 
 Both families are carried. CloudFront answers on IPv6 by default, so a list
 holding only someone's IPv4 address blocks them the moment their browser
-prefers IPv6 — and that reads as an outage, not as a rule.
+prefers IPv6 — and that reads as an outage, not as a rule. A source-ip
+condition takes both families in one list, so the Gateway needs no split.
 
 `make allow-ip` / `allow-list` / `allow-rm` (`scripts/allowlist.sh`) write
-`config/kelabo.json` *and* edit the IPSets and the security group live, so a new
-address works in seconds and the next deploy re-asserts the same thing. The two
-exceptions are the first lock and the last unlock: those add or remove a stack
-and the ALB's open rule, which only a deploy can do, and the script says so
-instead of appearing to succeed.
+`config/kelabo.json` *and* edit the IPSets and the listener rules live, so a new
+address works in seconds and the next deploy re-asserts the same thing. Three
+things still need a deploy, and the script says so rather than appearing to
+succeed: the first lock and the last unlock (they add or remove a stack and
+flip the ALB's default action), and growing the list past what the existing
+rules hold — a sixth address needs a sixth rule, and rules are CDK's.
 
 **The execute-api bypass, and `api.originSecret`.** API Gateway always answers
 on its own `https://<id>.execute-api.<region>.amazonaws.com` URL, which reaches

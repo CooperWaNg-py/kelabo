@@ -13,12 +13,22 @@ import {
 } from "./db.js";
 import { parseMinutesJson } from "./agent/serverAgentRunner.js";
 
-export async function endKelabo(c, kelaboId) {
+export async function endKelabo(c, kelaboId, { retry = false } = {}) {
   const meta = await getMeta(c, kelaboId);
   if (!meta) return { status: 404, body: { error: "kelabo_not_found" } };
-  if (meta.status === "ended") return { status: 409, body: { error: "already_ended" } };
+  // A kelabo can be "ended" and still have no record: the control plane marks
+  // it ended whether or not this call got through (it must, or an unreachable
+  // Gateway would strand it live forever), and this is the only thing that
+  // writes the archive. `retry` is that second attempt, and it is not the same
+  // as ending twice — `archivePending` on META is what says the first one never
+  // landed, and it is cleared below.
+  const resuming = retry && meta.archivePending === true;
+  if (meta.status === "ended" && !resuming) return { status: 409, body: { error: "already_ended" } };
 
-  const endedAt = Date.now();
+  // A resumed end keeps the moment the kelabo actually stopped. Stamping
+  // `Date.now()` on the retry would silently stretch the kelabo by however long
+  // the Gateway was unreachable, and that number is on the record forever.
+  const endedAt = (resuming && typeof meta.endedAt === "number" ? meta.endedAt : null) ?? Date.now();
   const agentRuntime = c.tunnel.attachedRuntime(kelaboId);
 
   // Use any minutes already generated during the kelabo (e.g. via the
@@ -93,6 +103,10 @@ export async function endKelabo(c, kelaboId) {
     return { status: 500, body: { error: "internal_error" } };
   }
 
+  // Whether the record exists. Reported back so the control plane knows
+  // whether to leave `archivePending` set — a swallowed failure here is the
+  // record silently not existing, which is what this whole path is about.
+  let archived = false;
   try {
     await putHistoryRow(c, {
       archiveId: archive.archiveId,
@@ -115,6 +129,7 @@ export async function endKelabo(c, kelaboId) {
         c.logError("participant_index_failed", err, { kelaboId, identity: p.identity })
       );
     }
+    archived = true;
   } catch (err) {
     c.logError("history_write_failed", err, { kelaboId });
   }
@@ -126,6 +141,9 @@ export async function endKelabo(c, kelaboId) {
       endedAt,
       hasMinutes: !!(minutes || meta.hasMinutes),
       tenantStatus: `${meta.tenantId ?? ""}#ended`,
+      // Cleared only once the row is actually there, so a second retry still
+      // finds something to resume.
+      ...(archived ? { archivePending: null } : { archivePending: true }),
       ttl,
     });
     await deleteHostActive(c, meta.hostIdentity);
@@ -160,7 +178,7 @@ export async function endKelabo(c, kelaboId) {
     c.tunnel.endTunnel(kelaboId);
   }
 
-  return { status: 200, body: { ok: true, archiveId: archive.archiveId, s3Key } };
+  return { status: 200, body: { ok: true, archived, archiveId: archive.archiveId, s3Key } };
 }
 
 async function generateMinutesInBackground(c, kelaboId, archive, s3Key, agentRuntime) {

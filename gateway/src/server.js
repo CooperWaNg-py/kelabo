@@ -143,6 +143,7 @@ async function route(c, req, res) {
     const key = await c.getCookieKey();
     const payload = verifyInternalJwt(bearerToken(req), key);
     if (!payload) return send(res, 401, { error: "unauthenticated" });
+    const body = await readJson(req).catch(() => ({}));
     c.log("internal_request", { kelaboId, action, sub: payload.sub });
     const handlers = {
       end: endKelabo,
@@ -150,7 +151,11 @@ async function route(c, req, res) {
       cancel: cancelKelabo,
       reschedule: rescheduleKelabo,
     };
-    const result = await handlers[action](c, kelaboId);
+    // `retry` reaches `endKelabo` only: the control plane sets it when a
+    // previous end reached DynamoDB but never reached here, so the kelabo is
+    // already "ended" and has no record. Without it the retry would 409 on the
+    // status it set itself.
+    const result = await handlers[action](c, kelaboId, { retry: body?.retry === true });
     return send(res, result.status, result.body);
   }
 

@@ -27,7 +27,13 @@ export function createInternal({ config, secrets, fetchImpl = fetch }) {
 
   return {
     mintInternalJwt,
-    endKelabo: (kelaboId, identity) => post(`/internal/kelabos/${kelaboId}/end`, identity),
+    // `retry` resumes an end that marked the kelabo ended here but never
+    // reached the Gateway, so there is no record. Without it the Gateway 409s
+    // on the very status this side wrote.
+    endKelabo: async (kelaboId, identity, { retry = false } = {}) => {
+      const res = await post(`/internal/kelabos/${kelaboId}/end`, identity, { retry });
+      return res.json().catch(() => ({ ok: true, archived: true }));
+    },
     requestMinutes: (kelaboId, identity) => post(`/internal/kelabos/${kelaboId}/minutes`, identity),
     // Tear down any prep binding for a cancelled scheduled kelabo (docs 18
     // §2.4). Best-effort at the call site: the kelabo is cancelled in DynamoDB

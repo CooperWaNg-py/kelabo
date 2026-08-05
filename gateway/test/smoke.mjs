@@ -776,6 +776,27 @@ async function main() {
     console.log("ok: internal end (dev mode) → fast end + archive request, S3 + history + participant-index, SSE ended, async minutes, kelabo ended");
   }
 
+  {
+    // A kelabo can be "ended" here and still have no record: the control plane
+    // marks it ended whether or not this call landed, so an unreachable Gateway
+    // does not strand it live. `retry` is how it asks again — but only for a
+    // kelabo the control plane itself flagged. `retry` alone must not reopen an
+    // archived kelabo, or a replayed end would rewrite a record.
+    metaItem.status = "ended";
+    const headers = { authorization: `Bearer ${internalJwt}` };
+    const again = await req(port, { method: "POST", path: `/internal/kelabos/${KELABO}/end`, headers });
+    assert.equal(again.status, 409);
+
+    const retryUnflagged = await req(port, {
+      method: "POST",
+      path: `/internal/kelabos/${KELABO}/end`,
+      headers,
+      body: { retry: true },
+    });
+    assert.equal(retryUnflagged.status, 409, "retry is not a bypass; archivePending is the permission");
+    console.log("ok: a second end is a conflict, and `retry` alone does not reopen an archived kelabo");
+  }
+
   server.close();
   await c.shutdown();
   console.log("\nSMOKE TEST PASSED");

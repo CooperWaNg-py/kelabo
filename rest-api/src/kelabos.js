@@ -167,25 +167,43 @@ export function createKelabos({ config, db, internal, secrets }) {
     const meta = await db.getKelaboMeta(kelaboId);
     if (!meta) throw err(404, "kelabo_not_found");
     if (meta.hostIdentity !== identity) throw err(403, "not_host");
-    if (meta.status !== "active") throw err(409, "already_ended");
-    const endedAt = Date.now();
+    // An already-ended kelabo whose archive never landed is not "already
+    // ended", it is half-ended: the host has no record and nothing else will
+    // ever produce one. Ending it again resumes the archive instead of 409ing.
+    const resuming = meta.status === "ended" && meta.archivePending === true;
+    if (meta.status !== "active" && !resuming) throw err(409, "already_ended");
+    const endedAt = resuming ? (meta.endedAt ?? Date.now()) : Date.now();
     const ttl = Math.floor(endedAt / 1000) + config.retentionDays * 86400;
     // Call the gateway FIRST while the kelabo is still "active": the gateway's
     // endKelabo writes the S3 archive + history row (and kicks off summary/minutes
     // generation asynchronously). If we marked it ended here first, the gateway
     // would short-circuit with 409 and never create the record.
+    let archived = false;
     try {
-      await internal.endKelabo(kelaboId, identity);
+      const out = await internal.endKelabo(kelaboId, identity, { retry: resuming });
+      archived = out?.archived !== false;
     } catch (e) {
       console.warn(JSON.stringify({ level: "warn", msg: "gateway end call failed", kelaboId, error: String(e) }));
     }
     // Ensure the kelabo is marked ended locally regardless of the gateway
-    // outcome (the gateway also sets this on success; this is idempotent).
-    await db.updateKelaboMeta(kelaboId, { status: "ended", endedAt, ttl, tenantStatus: null });
+    // outcome (the gateway also sets this on success; this is idempotent) —
+    // an unreachable Gateway must not leave a kelabo live forever.
+    //
+    // But say so. Before this flag, a failed archive was indistinguishable from
+    // a successful one on this side, and the host simply had no record and no
+    // error: `allowIps` closed the Gateway's ALB to this Lambda for an entire
+    // deployment and nothing surfaced it (docs 07).
+    await db.updateKelaboMeta(kelaboId, {
+      status: "ended",
+      endedAt,
+      ttl,
+      tenantStatus: null,
+      archivePending: archived ? null : true,
+    });
     // Legacy cleanup: guard rows written before hosts could run several live
     // kelabos (pre-2026-07-31). Nothing writes them any more.
     await db.deleteHostGuard(identity);
-    return { kelaboId, status: "ended" };
+    return { kelaboId, status: "ended", archived };
   }
 
   async function requestMinutes({ kelaboId, identity }) {

@@ -73,6 +73,8 @@ export function RoomShell({
   me,
   isHost,
   ended,
+  // { failed, onRetry } — the record's own state, separate from `ended`.
+  archive,
   boardOnly,
   agentPresent,
   agentLabel,
@@ -467,8 +469,18 @@ export function RoomShell({
         </Button>
       </div>
 
-      {(alerts.length > 0 || call.needsUnblock) && (
+      {(alerts.length > 0 || call.needsUnblock || archive?.failed) && (
         <div className="room-alerts">
+          {/* The kelabo ended but no record exists. Shown rather than toasted
+              because it does not go away by itself and the host is the only
+              person who can ask for it again — a toast for this is how a
+              deployment loses every record and nobody notices. */}
+          {archive?.failed && (
+            <Banner kind="warn">
+              The kelabo ended, but its record could not be saved.{' '}
+              <Button size="sm" onClick={archive.onRetry}>Save the record</Button>
+            </Banner>
+          )}
           {call.needsUnblock && (
             <Banner kind="warn">
               Your browser blocked audio playback until you interact with the page.{' '}

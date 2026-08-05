@@ -89,7 +89,14 @@ const internalCalls = [];
 // Which identities the fake gateway considers "online" for ring delivery.
 const onlineSet = new Set();
 const internal = {
-  endKelabo: async (kelaboId, identity) => internalCalls.push({ op: "end", kelaboId, identity }),
+  // Set to make the fake gateway unreachable, the way a closed ALB made the
+  // real one (docs 07 `allowIps`).
+  endUnreachable: false,
+  endKelabo: async (kelaboId, identity, { retry = false } = {}) => {
+    internalCalls.push({ op: "end", kelaboId, identity, ...(retry ? { retry } : {}) });
+    if (internal.endUnreachable) throw new TypeError("fetch failed");
+    return { ok: true, archived: true };
+  },
   requestMinutes: async (kelaboId, identity) => internalCalls.push({ op: "minutes", kelaboId, identity }),
   cancelKelabo: async (kelaboId, identity) => internalCalls.push({ op: "cancel", kelaboId, identity }),
   rescheduleKelabo: async (kelaboId, identity) => internalCalls.push({ op: "reschedule", kelaboId, identity }),
@@ -598,7 +605,7 @@ await test("POST /kelabos/:id/end (host only) signals gateway", async () => {
 
   const res = await call("POST", `/kelabos/${kelaboId}/end`, { cookies: sessionCookies });
   assert.equal(res.statusCode, 200);
-  assert.deepEqual(res.json, { kelaboId, status: "ended" });
+  assert.deepEqual(res.json, { kelaboId, status: "ended", archived: true });
   assert.deepEqual(internalCalls, [{ op: "end", kelaboId, identity: "host@example.com" }]);
 
   const gone = await call("GET", `/kelabos/${kelaboId}`);
@@ -608,6 +615,36 @@ await test("POST /kelabos/:id/end (host only) signals gateway", async () => {
   const again = await call("POST", `/kelabos/${kelaboId}/end`, { cookies: sessionCookies });
   assert.equal(again.statusCode, 409);
   assert.equal(again.json.error, "already_ended");
+});
+
+// The failure that cost a whole deployment its records: `allowIps` closed the
+// Gateway's ALB to this Lambda, every internal call died with "fetch failed",
+// and this side ended the kelabo anyway and said nothing. The kelabo must still
+// end — an unreachable Gateway cannot leave it live forever — but it must say
+// the record is missing, and it must be possible to ask again.
+await test("an end the gateway never received is flagged, and can be retried", async () => {
+  const created = await call("POST", "/kelabos", { cookies: sessionCookies, body: { title: "unreachable" } });
+  const id = created.json.kelaboId;
+  internalCalls.length = 0;
+
+  internal.endUnreachable = true;
+  const failed = await call("POST", `/kelabos/${id}/end`, { cookies: sessionCookies });
+  assert.equal(failed.statusCode, 200, "the kelabo ends regardless");
+  assert.equal(failed.json.archived, false, "but the caller is told there is no record");
+  assert.equal((await db.getKelaboMeta(id)).archivePending, true);
+
+  // Ending again is a resume, not a second end: no 409, and the gateway is told
+  // so it does not 409 on the status this side wrote.
+  internal.endUnreachable = false;
+  const retried = await call("POST", `/kelabos/${id}/end`, { cookies: sessionCookies });
+  assert.equal(retried.statusCode, 200);
+  assert.equal(retried.json.archived, true);
+  assert.deepEqual(internalCalls.at(-1), { op: "end", kelaboId: id, identity: "host@example.com", retry: true });
+  assert.equal((await db.getKelaboMeta(id)).archivePending, undefined, "the flag is removed, not nulled");
+
+  // And once archived it is an ordinary ended kelabo again.
+  const third = await call("POST", `/kelabos/${id}/end`, { cookies: sessionCookies });
+  assert.equal(third.statusCode, 409);
 });
 
 await test("POST /auth/refresh rotates refresh token", async () => {

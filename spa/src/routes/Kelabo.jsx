@@ -27,7 +27,7 @@ import { CallLogPanel } from '../board/CallLogPanel'
 import { pushSettings } from '../settings'
 import { joinPrefs } from '../joinPrefs'
 import { useLeaveGuard } from '../useLeaveGuard'
-import { playEventSound, rosterDiff } from '../sounds'
+import { playEventSound, rosterDiff, shouldChimeUtterance } from '../sounds'
 
 /**
  * The kelabo route: everything the room needs, and nothing about how it looks.
@@ -282,9 +282,9 @@ function KelaboRoom() {
   }, [])
 
   const onUtteranceEvent = useCallback(utt => {
-    // Own captions echo back down the stream; the chime is for other people's
-    // messages — you know you sent yours.
-    if (utt?.by && utt.by !== myIdentityRef.current) playEventSound('message')
+    // Sealed remote messages only — live partial fragments stream constantly
+    // while someone talks, and your own echo comes back down the same event.
+    if (shouldChimeUtterance(utt, myIdentityRef.current)) playEventSound('message')
     capture.addRemoteUtterance(utt)
   }, [capture.addRemoteUtterance])
 

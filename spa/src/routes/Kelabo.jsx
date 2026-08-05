@@ -27,6 +27,7 @@ import { CallLogPanel } from '../board/CallLogPanel'
 import { pushSettings } from '../settings'
 import { joinPrefs } from '../joinPrefs'
 import { useLeaveGuard } from '../useLeaveGuard'
+import { playEventSound, rosterDiff } from '../sounds'
 
 /**
  * The kelabo route: everything the room needs, and nothing about how it looks.
@@ -257,17 +258,47 @@ function KelaboRoom() {
   // The kelabo's one EventSource. Everything the server pushes rides it —
   // contributions, transcript echo, LLM debug, conference signalling — so it is
   // mounted here, once, above every view that reads from it.
+  //
+  // The identity the stream knows this participant by. Roster and utterance
+  // events carry it, and the sound hooks compare against it so your own
+  // arrivals and messages never chime back at you.
+  const myIdentityRef = useRef('')
+  myIdentityRef.current = kelabo?.me || identity?.email || ''
+  // Baseline for join/leave sounds: `null` until the first roster arrives.
+  // That snapshot is "who was already here", not a wave of joins — and after a
+  // resubscribe the same holds again, which is also what swallows your own
+  // reconnect flapping inside the server's grace window.
+  const rosterIdsRef = useRef(null)
+
+  const onRosterEvent = useCallback(r => {
+    setRoster(r)
+    const next = Array.isArray(r?.participants) ? r.participants : []
+    const prev = rosterIdsRef.current
+    rosterIdsRef.current = next
+    if (!prev) return
+    const { joined, left } = rosterDiff(prev, next, myIdentityRef.current)
+    if (joined.length) playEventSound('join')
+    if (left.length) playEventSound('leave')
+  }, [])
+
+  const onUtteranceEvent = useCallback(utt => {
+    // Own captions echo back down the stream; the chime is for other people's
+    // messages — you know you sent yours.
+    if (utt?.by && utt.by !== myIdentityRef.current) playEventSound('message')
+    capture.addRemoteUtterance(utt)
+  }, [capture.addRemoteUtterance])
+
   const board = useBoard({
     kelaboId: id,
     ended,
     onEnded: handleEnded,
     onRename: capture.renameSpeaker,
-    onUtterance: capture.addRemoteUtterance,
+    onUtterance: onUtteranceEvent,
     onHistory: h => adoptHistory(h),
     onDebug: onDebugEvent,
     onRtc: call.onServerEvent,
     onAgent: setAgent,
-    onRoster: setRoster,
+    onRoster: onRosterEvent,
     onStreamStatus: setStreamStatus,
     authorName: me,
   })

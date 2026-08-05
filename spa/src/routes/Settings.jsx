@@ -13,6 +13,7 @@ import { useToast } from '../components/Toaster'
 import { useConfirm } from '../components/ConfirmDialog'
 import { SCHEMES, currentScheme, currentTheme, setScheme, setTheme } from '../theme'
 import { pushSettings, SETTINGS_SYNCED_EVENT } from '../settings'
+import { playEventSound } from '../sounds'
 
 // One long scroll of seven cards became four named groups. `general` is first
 // so a bare /settings lands somewhere sensible; the tab is mirrored into the
@@ -34,6 +35,9 @@ export default function Settings() {
     localStorage.getItem('kelabo-name') || displayName(identity) || ''
   )
   const [notif, setNotif] = useState(localStorage.getItem('kelabo-notif') === '1')
+  // Room chimes are on unless explicitly off — the inverse of the OS
+  // notification toggle, which asks before it intrudes.
+  const [sounds, setSounds] = useState(localStorage.getItem('kelabo-sounds') !== '0')
   const [finalOnly, setFinalOnly] = useState(localStorage.getItem('kelabo-final-only') === '1')
   const [muteHidden, setMuteHidden] = useState(localStorage.getItem('kelabo-mute-hidden') === '1')
   const [joinMuted, setJoinMuted] = useState(() => joinPrefs().muted)
@@ -241,6 +245,16 @@ export default function Settings() {
     pushSettings()
   }
 
+  const onSoundsChange = on => {
+    setSounds(on)
+    toast(on ? 'Room sounds on' : 'Room sounds off')
+    localStorage.setItem('kelabo-sounds', on ? '1' : '0')
+    pushSettings()
+    // Turning them on is a gesture, so the preview doubles as the AudioContext
+    // unlock — the first real chime later is not swallowed by autoplay policy.
+    if (on) playEventSound('join')
+  }
+
   // These two are the defaults; the device check on the way into a kelabo
   // writes the same keys, so changing it there changes it here and vice versa.
   const onJoinMutedChange = on => {
@@ -330,6 +344,7 @@ export default function Settings() {
     const resync = () => {
       setName(localStorage.getItem('kelabo-name') || displayName(identity) || '')
       setNotif(localStorage.getItem('kelabo-notif') === '1')
+      setSounds(localStorage.getItem('kelabo-sounds') !== '0')
       setFinalOnly(localStorage.getItem('kelabo-final-only') === '1')
       setMuteHidden(localStorage.getItem('kelabo-mute-hidden') === '1')
       setLang(localStorage.getItem('kelabo-stt-lang') || 'en')
@@ -527,6 +542,13 @@ export default function Settings() {
                 <div className="sr-sub">OS notification when a new contribution arrives while the tab is unfocused.</div>
               </div>
               <Switch checked={notif} onChange={onNotifChange} ariaLabel="Board notifications" />
+            </div>
+            <div className="settings-row">
+              <div className="sr-main">
+                <div className="sr-title">Room sounds</div>
+                <div className="sr-sub">A soft chime when someone joins, leaves, or sends a message. The chime follows your colour scheme.</div>
+              </div>
+              <Switch checked={sounds} onChange={onSoundsChange} ariaLabel="Room sounds" />
             </div>
             <div className="settings-row">
               <div className="sr-main">

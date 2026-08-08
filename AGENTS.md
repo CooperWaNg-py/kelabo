@@ -298,4 +298,9 @@ Order matters and is non-obvious:
 - **Message boundaries belong to the speaker.** `messageId` is the only grouping
   key; nothing downstream re-derives boundaries from speaker, adjacency or time.
 - **A kelabo's `rtcMode` never changes after creation**, and a full `mesh` room
-  refuses joiners (`mesh_room_full`) instead of falling back to the SFU.
+  refuses joiners (`mesh_room_full`) instead of falling back to the SFU. The one
+  exception is `rtcRoom.demote()` (docs 15 §1.1), `sfu` → `mesh` and never the
+  other way: the rule guards against a participant being moved to a *weaker*
+  promise, and mesh is the stronger one. It refuses rather than degrades when
+  the room is larger than `meshMaxParticipants` — mesh is N−1 uplinks per
+  person, not a cheaper SFU.

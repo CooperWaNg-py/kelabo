@@ -288,8 +288,20 @@ cdk deploy -c env=prod  --all
   against the *envelope* sender, and SES's default envelope is
   `<id>@<region>.amazonses.com`, so this record does **not** authenticate our own
   mail and is not what makes DMARC pass — Easy DKIM is. It denies the domain to
-  anyone else's envelope. SPF *alignment* would need a custom MAIL FROM
-  subdomain, which neither knob provides.
+  anyone else's envelope. SPF *alignment* needs a custom MAIL FROM subdomain,
+  which is `ses.mailFrom`'s job, not these knobs'.
+- **`ses.mailFrom` sets a custom MAIL FROM subdomain, the missing half of the
+  SPF story.** `true` derives `mail.<from-domain>`; a string names the
+  subdomain outright (it must be a subdomain of the verified identity — SES
+  rejects anything else at deploy). The envelope sender becomes that subdomain
+  instead of amazonses.com, so SPF authenticates the deployment's own mail and
+  *aligns* for DMARC: messages then pass on SPF and DKIM both, which is what a
+  deliverability or SES production-access review means by "fully set up". The
+  stack publishes the subdomain's MX (`feedback-smtp.<region>.amazonses.com`,
+  which keeps async bounces routing back into SES) and its SPF TXT beside the
+  DKIM CNAMEs. `BehaviorOnMxFailure` is `USE_DEFAULT_VALUE`: if the MX record
+  ever disappears, SES falls back to the amazonses.com envelope rather than
+  refusing to send — losing alignment beats losing sign-in codes.
 - **Two environments may share a hosted zone, but only one may own its mail
   records.** DKIM CNAMEs, the apex SPF and `_dmarc` are singletons per *domain*,
   while portal/gateway records are per *subdomain* and never collide. So

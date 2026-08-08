@@ -127,6 +127,22 @@ export function loadConfig(env,   configPath = join(here, "kelabo.json")) {
       : block.ses.spf
     : null;
 
+  // Custom MAIL FROM domain — the missing half of the SPF story above. With it,
+  // SES uses `<mailFrom>` as the envelope sender instead of amazonses.com, so
+  // SPF authenticates *this domain's* mail and aligns for DMARC: the message
+  // then passes on both SPF and DKIM rather than DKIM alone, which is what a
+  // deliverability (or SES production-access) review means by "fully set up".
+  // Opt-in like dmarc/spf; `true` derives `mail.<from-domain>`, a string names
+  // the subdomain outright. Must be a subdomain of the verified identity — SES
+  // rejects anything else at deploy time. The MX and SPF records the subdomain
+  // needs are published by the SES stack alongside the DKIM CNAMEs.
+  const sesIdentityDomain = block.ses?.hostedZone?.name || block.baseDomain;
+  const sesMailFrom = block.ses?.mailFrom
+    ? block.ses.mailFrom === true
+      ? `mail.${sesIdentityDomain}`
+      : block.ses.mailFrom
+    : "";
+
   // Bounce and complaint visibility. The account suppression list already stops
   // mailing an address that hard-bounces — silently, which is the problem: the
   // person types their address, sees "code sent", and no code ever arrives
@@ -150,6 +166,7 @@ export function loadConfig(env,   configPath = join(here, "kelabo.json")) {
     ...block.ses,
     dmarc,
     spf,
+    mailFrom: sesMailFrom,
     events: sesEvents,
     configurationSetName: sesEvents ? `kelabo-${block.endpoint}-mail` : "",
     // `||`, not `??`: this file is hand-edited JSON, and an empty string left

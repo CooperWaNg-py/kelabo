@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useState } from 'react'
+import { createContext, useContext, useEffect, useRef, useState } from 'react'
 import { Link, NavLink, useLocation, useNavigate } from 'react-router-dom'
 import { api, logout } from '../api'
 import { SETTINGS_SYNCED_EVENT } from '../settings'
@@ -38,6 +38,7 @@ const AppDataContext = createContext({
   scheduled: null,
   kelabosError: false,
   recordsError: false,
+  pendingArchive: new Set(),
   removeRecord: () => {},
   endLiveKelabo: () => {},
   respondToInvite: () => {},
@@ -83,6 +84,13 @@ export function AppShell({ children }) {
   const [records, setRecords] = useState(null)
   const [recordsError, setRecordsError] = useState(false)
   const [scheduled, setScheduled] = useState(null)
+  // Kelabos ended from here whose record has not landed yet. The server drops
+  // a kelabo from the active list the moment it ends and the archive arrives
+  // seconds later — without this set the row vanishes from Live now on the
+  // next poll and pops back under Recents a minute after that. A ref AND
+  // state: the ref is read inside the polling closure, the state re-renders.
+  const pendingArchiveRef = useRef(new Set())
+  const [pendingArchive, setPendingArchive] = useState(() => new Set())
 
   // Re-render on any settings change (local edit or a pull from another
   // device): the rail's name and avatar variant are read from localStorage
@@ -107,7 +115,36 @@ export function AppShell({ children }) {
       api.listKelabos()
         .then(data => {
           if (cancelled) return
-          setKelabos(Array.isArray(data) ? data : (data?.active || data?.kelabos || []))
+          const incoming = Array.isArray(data) ? data : (data?.active || data?.kelabos || [])
+          // A kelabo ended from here keeps its row — marked ended — until its
+          // record exists. The active list drops it at once, and leaving the
+          // gap to the record list is what made an ended kelabo disappear for
+          // a minute before popping up under Recents.
+          setKelabos(prev => {
+            // A kelabo that was live and is gone ended somewhere else (the
+            // room, another device): refresh the records now rather than on
+            // the next navigation, so it lands under Recents continuously.
+            const vanished = (prev || []).filter(
+              x => x.status === 'active'
+                && !pendingArchiveRef.current.has(x.kelaboId)
+                && !incoming.some(y => y.kelaboId === x.kelaboId)
+            )
+            if (vanished.length) {
+              // The archive trails the end by seconds, so look twice: now,
+              // and once more shortly after.
+              const refresh = () => api.listRecords()
+                .then(d => { if (!cancelled) setRecords(Array.isArray(d) ? d : (d?.records || [])) })
+                .catch(() => {})
+              refresh()
+              setTimeout(refresh, 4000)
+            }
+            return [
+              ...incoming,
+              ...(prev || []).filter(
+                x => pendingArchiveRef.current.has(x.kelaboId) && !incoming.some(y => y.kelaboId === x.kelaboId)
+              ),
+            ]
+          })
           setKelabosError(false)
         })
         .catch(() => { if (!cancelled) setKelabosError(true) })
@@ -225,9 +262,32 @@ export function AppShell({ children }) {
       // The poll is 8 seconds away and the row is the thing that was just acted
       // on; leaving it reading "live" is the state the click was meant to change.
       setKelabos(list => (list || []).map(x => (x.kelaboId === m.kelaboId ? { ...x, status: 'ended' } : x)))
+      pendingArchiveRef.current.add(m.kelaboId)
+      setPendingArchive(new Set(pendingArchiveRef.current))
       // No capability map in this list view, so no promise about minutes —
       // the record view says what actually arrived (docs 19 §2).
       toast('Kelabo ended — archiving the record…')
+      // The archive is a gateway-side job that trails the end by seconds.
+      // Watch the record list until the kelabo lands in it, so the row moves
+      // from Live now to Recents on its own instead of waiting for a refresh.
+      let tries = 0
+      const watch = setInterval(async () => {
+        tries += 1
+        let found = false
+        try {
+          const data = await api.listRecords()
+          const list = Array.isArray(data) ? data : (data?.records || [])
+          setRecords(list)
+          // archiveId IS the kelaboId for a fresh archive (gateway archive.js).
+          found = list.some(r => (r.archiveId || r.kelaboId) === m.kelaboId)
+        } catch { /* keep watching — a failed read says nothing about the archive */ }
+        if (found || tries >= 24) {
+          clearInterval(watch)
+          pendingArchiveRef.current.delete(m.kelaboId)
+          setPendingArchive(new Set(pendingArchiveRef.current))
+          if (found) setKelabos(list => (list || []).filter(x => x.kelaboId !== m.kelaboId))
+        }
+      }, 2500)
     } catch (e) {
       toast(e?.code === 'already_ended' ? 'That kelabo had already ended' : 'Could not end that kelabo')
     }
@@ -291,7 +351,7 @@ export function AppShell({ children }) {
   const recents = (records || []).slice(0, 8)
 
   return (
-    <AppDataContext.Provider value={{ kelabos, records, scheduled, kelabosError, recordsError, removeRecord, endLiveKelabo, respondToInvite, cancelScheduled }}>
+    <AppDataContext.Provider value={{ kelabos, records, scheduled, kelabosError, recordsError, pendingArchive, removeRecord, endLiveKelabo, respondToInvite, cancelScheduled }}>
       <div className={'shell' + (collapsed ? ' shell-collapsed' : '')}>
         <div
           className={'sidebar-veil' + (mobileOpen ? ' open' : '')}

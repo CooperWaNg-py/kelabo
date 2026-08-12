@@ -29,7 +29,8 @@ import { ZodError } from "zod";
 import { ensureConfig } from "./config.js";
 import { createDb } from "./db.js";
 import { createSecrets } from "./secrets.js";
-import { createSesSender, createOtp } from "./otp.js";
+import { createOtp } from "./otp.js";
+import { createMailer, mailSettingsFromConfig } from "./mail/index.js";
 import { createSessions } from "./sessions.js";
 import { createOidc } from "./oidc.js";
 import { createMcpOauth } from "./mcpOauth.js";
@@ -953,20 +954,24 @@ export async function handler(event, context) {
     const config = await ensureConfig();
     const db = createDb({ config });
     const secrets = createSecrets({ region: config.region });
-    // Not config.region: mail can be sent from another region deliberately, to
-    // give an environment its own SES sandbox status, quota and reputation.
-    const ses = createSesSender({
-      region: config.ses.region || config.region,
-      configurationSet: config.ses.configurationSet,
+    // Resolved per send rather than captured here, which costs nothing on a
+    // self-hosted deployment (the same object every time) and is what lets a
+    // deployment holding its mail settings elsewhere change provider or
+    // rotate a key without a restart. The key is read only when a provider
+    // needs one: SES authenticates with this Lambda's own IAM role, so an SES
+    // deployment never touches the mail secret and does not have to have one.
+    const mailer = createMailer({
+      resolve: async () =>
+        mailSettingsFromConfig(config, config.mail.provider === "ses" ? "" : await secrets.getMailApiKey(config)),
     });
-    const otp = createOtp({ config, db, ses });
+    const otp = createOtp({ config, db, mailer });
     const sessions = createSessions({ config, db, secrets });
     const oidc = createOidc({ config, secrets });
     const auth = createAuthProvider({ otp, oidc, sessions });
     const mcpOauth = createMcpOauth({ config, db, secrets });
     const internal = createInternal({ config, secrets });
     const kelabos = createKelabos({ config, db, internal, secrets });
-    const scheduling = createScheduling({ config, db, mailer: ses, internal });
+    const scheduling = createScheduling({ config, db, mailer, internal });
     const contacts = createContacts({ config, db });
     const huddle = createHuddle({ config, db, internal, kelabos });
     const join = createJoin({ config, db, secrets });
@@ -974,7 +979,7 @@ export async function handler(event, context) {
     const records = createRecords({ config, db });
     const sttToken = createSttToken({ config, db, secrets });
     const agent = createAgent({ config, db, secrets });
-    defaultApp = createApp({ config, db, secrets, ses, sessions, auth, kelabos, join, joinCodes, records, sttToken, internal, mcpOauth, scheduling, contacts, huddle, agent });
+    defaultApp = createApp({ config, db, secrets, mailer, sessions, auth, kelabos, join, joinCodes, records, sttToken, internal, mcpOauth, scheduling, contacts, huddle, agent });
   }
   return defaultApp(event, context);
 }

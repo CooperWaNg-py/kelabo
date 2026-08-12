@@ -48,6 +48,9 @@ function scheduleError(e) {
     case 'bad_request':
       return e.message || 'Something in the form was not accepted — check the title and time.'
     case 'email_not_verified':
+    case 'email_suppressed':
+    case 'mail_not_configured':
+    case 'mail_failed':
       return 'The kelabo could not be created because invitation email is not set up for this deployment.'
     default:
       if (e?.status >= 500) return 'The server had a problem creating that kelabo. Try again in a moment.'

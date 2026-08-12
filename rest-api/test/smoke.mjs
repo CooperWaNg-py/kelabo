@@ -38,7 +38,7 @@ const config = {
     providers: { deepgram: { model: "nova-3", diarizeModel: "latest", tokenTtlSeconds: 60 } },
   },
   rtc: { defaultMode: "sfu", meshMaxParticipants: 6, video: false },
-  ses: { fromAddress: "otp@test.example.com" },
+  mail: { provider: "ses", fromAddress: "otp@test.example.com", ses: {}, mailersend: {} },
   otp: {
     ttlSeconds: 600,
     maxAttempts: 5,
@@ -68,7 +68,10 @@ const sentEmails = [];
 const sentInvites = [];
 const sentCancellations = [];
 const sentReschedules = [];
-const ses = {
+// Stands in for `createMailer` — the same four methods, no transport. `from` is
+// no longer passed by the callers (the mailer defaults it), so it arrives
+// undefined here and the assertions below are about `to` and the content.
+const mailer = {
   sendOtp: async ({ to, code, from }) => {
     sentEmails.push({ to, code, from });
   },
@@ -180,12 +183,12 @@ const mcpFetch = async (url, init = {}) => {
 };
 
 const db = createDb();
-const otp = createOtp({ config, db, ses });
+const otp = createOtp({ config, db, mailer });
 const sessions = createSessions({ config, db, secrets });
 const oidc = createOidc({ config, secrets, fetchImpl: async () => ({ ok: false }) });
 const auth = createAuthProvider({ otp, oidc, sessions });
 const kelabos = createKelabos({ config, db, internal });
-const scheduling = createScheduling({ config, db, mailer: ses, internal });
+const scheduling = createScheduling({ config, db, mailer, internal });
 const contacts = createContacts({ config, db });
 const huddle = createHuddle({ config, db, internal, kelabos });
 const join = createJoin({ config, db, secrets });
@@ -211,7 +214,7 @@ const mcpOauth = createMcpOauth({ config, db, secrets, fetchImpl: mcpFetch });
 
 const agent = createAgent({ config, db, secrets });
 
-const app = createApp({ config, db, secrets, ses, sessions, auth, kelabos, join, joinCodes, records, sttToken, internal, mcpOauth, scheduling, contacts, huddle, agent, version: "test" });
+const app = createApp({ config, db, secrets, mailer, sessions, auth, kelabos, join, joinCodes, records, sttToken, internal, mcpOauth, scheduling, contacts, huddle, agent, version: "test" });
 
 function cookieValue(res, name) {
   const c = (res.cookies || []).find((s) => s.startsWith(`${name}=`));
@@ -265,7 +268,7 @@ await test("empty allow-list = open registration, tenant from the email's own do
   // The multi-domain mode: no allow-list configured, every org lands in its
   // own tenant. Built from the same modules with only the config differing.
   const { createOtp } = await import("../src/otp.js");
-  const openOtp = createOtp({ config: { ...config, allowedEmailDomain: "" }, db, ses });
+  const openOtp = createOtp({ config: { ...config, allowedEmailDomain: "" }, db, mailer });
   await openOtp.request({ email: "sam@anywhere.io" });
   // pop, not peek: the next test counts sentEmails from empty.
   const sent = sentEmails.pop();
@@ -280,7 +283,11 @@ await test("otp request/verify happy path sets session+refresh cookies", async (
   assert.equal(req.json.ok, true);
   assert.equal(sentEmails.length, 1);
   assert.equal(sentEmails[0].to, "alice@example.com");
-  assert.equal(sentEmails[0].from, "otp@test.example.com");
+  // The sender is the mailer's business, not this route's. Every call site
+  // used to pass `config.ses.fromAddress` by hand, which is one more thing to
+  // forget and a silent provider rejection when someone does — `test/mail.mjs`
+  // asserts the mailer supplies it.
+  assert.equal(sentEmails[0].from, undefined, "a caller is naming the sender again");
   const code = sentEmails[0].code;
   assert.match(code, /^\d{6}$/);
 
@@ -1693,7 +1700,7 @@ function gatedApp({ secretValue = ORIGIN_VALUE, throws = false } = {}) {
         return secretValue;
       },
     },
-    ses, sessions, auth, kelabos, join, joinCodes, records, sttToken,
+    mailer, sessions, auth, kelabos, join, joinCodes, records, sttToken,
     internal, mcpOauth, scheduling, contacts, huddle, agent, version: "test",
   });
 }
@@ -1741,36 +1748,6 @@ await test("origin gate fails CLOSED when the secret cannot be read", async () =
   // takes the API down, which is the correct direction to fail.
   const res = await callApp(gatedApp({ throws: true }), { header: ORIGIN_VALUE });
   assert.equal(res.statusCode, 403);
-});
-
-// The configuration set name is spread into every SendEmailCommand, and SES
-// rejects a send naming a set that does not exist — so "unconfigured" must mean
-// the key is ABSENT, not empty. Getting this wrong loses no events; it stops
-// all mail, including every sign-in code.
-await test("SES configuration set: named when set, absent when not", async () => {
-  const { createSesSender } = await import("../src/otp.js");
-  const sent = [];
-  const stubClient = { send: async (cmd) => { sent.push(cmd.input); return {}; } };
-
-  const withSet = createSesSender({ client: stubClient, configurationSet: "kelabo-test-mail" });
-  await withSet.sendOtp({ to: "a@example.com", from: "otp@example.com", code: "123456" });
-  assert.equal(sent.at(-1).ConfigurationSetName, "kelabo-test-mail");
-  // Raw, not Simple: `Simple` content cannot carry a part, so going back to it
-  // silently drops the inline logo and nothing else notices (see otpMail.mjs).
-  assert.ok(sent.at(-1).Content?.Raw?.Data, "the sign-in mail must be sent as raw MIME");
-  assert.ok(!sent.at(-1).Content?.Simple, "raw and simple content are mutually exclusive");
-
-  for (const unset of [undefined, "", null]) {
-    const without = createSesSender({ client: stubClient, configurationSet: unset });
-    await without.sendInvite({
-      to: "b@example.com", from: "otp@example.com", hostName: "Rico",
-      title: "T", scheduledAt: Date.now(), inviteUrl: "https://x/invite/1",
-    });
-    assert.ok(
-      !("ConfigurationSetName" in sent.at(-1)),
-      `ConfigurationSetName must be absent, not empty, for ${JSON.stringify(unset)}`,
-    );
-  }
 });
 
 await test("originSecretMatches: only an exact match, and never on absence", async () => {

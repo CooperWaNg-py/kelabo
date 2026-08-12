@@ -62,8 +62,11 @@
         }
       },
       "allowIps": [],
+      "mail": {
+        "provider": "ses",
+        "fromAddress": "otp@example.com"
+      },
       "ses": {
-        "fromAddress": "otp@example.com",
         "hostedZone": {
           "name": "example.com",
           "id": "ZXXXXXXXXXXXXX"
@@ -244,7 +247,8 @@
           }
         }
       },
-      "ses": {
+      "mail": {
+        "provider": "mailersend",
         "fromAddress": "otp@example.com"
       },
       "gateway": {

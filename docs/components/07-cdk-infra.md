@@ -77,7 +77,7 @@ home region + `us-east-1` (CloudFront ACM), via `crossRegionReferences: true`.
 | **CertStack (home region)** | ACM certs for Gateway ALB domain | DNS-validated |
 | **CertStack (us-east-1)** | ACM certs for Portal CloudFront | required in us-east-1 |
 | **DynamoDbStack** | 7 tables (kelabos, users, otp, **refresh**, history, mcp, contacts) + S3 archive bucket | see [08-database.md](../08-database.md) |
-| **SesStack / config** | SES identity + from-address; (sandbox in dev) | OTP email |
+| **SesStack / config** | SES identity + from-address; (sandbox in dev). Not synthesized when `mail.provider` is not `ses` | OTP email |
 | **LambdaStack** | REST API Lambda (Node20); IAM (DynamoDB RW incl. refresh, SES send, Secrets read incl. social OIDC); **no `transcribe:*`** | control plane only |
 | **ApiGatewayStack** | HTTP API `/{proxy+}` → Lambda | no JWT authorizer |
 | **GatewayEcsStack** | ALB + Fargate service (`desiredCount:1`, sized from `config.gateway` — **0.5 vCPU / 1 GB** by default, configurable), `/health`, ALB idle 240s, DockerImageAsset from `gateway/`; **the server-agent worker runs in this task** | the one ECS |
@@ -244,9 +244,11 @@ Dev may use inline values in local profiles; prod always references secrets.
 
 - **REST Lambda:** DynamoDB RW (kelabos/users/otp/refresh/mcp/contacts), read
   history + read S3 archive (plus narrow `dynamodb:DeleteItem` on history and
-  `s3:DeleteObject` on archive objects for `/records/purge`), `ses:SendEmail`,
-  Secrets read (deepgram, cookie-key, oidc-*) and Create/Put/Get/Delete/Describe
-  under the `kelabo/<env>/mcp/` prefix (host MCP tokens). No `transcribe:*`.
+  `s3:DeleteObject` on archive objects for `/records/purge`), `ses:SendEmail`
+  **when `mail.provider` is `ses`** and a read grant on `kelabo/<env>/mail`
+  when it is not, Secrets read (deepgram, cookie-key, oidc-*) and
+  Create/Put/Get/Delete/Describe under the `kelabo/<env>/mcp/` prefix (host MCP
+  tokens). No `transcribe:*`.
 - **Gateway task role:** DynamoDB — kelabos RW, history RW (incl.
   `participant-index`), mcp read + narrow `dynamodb:PutItem` (persists rotated
   OAuth tokens; cannot delete user config) + encrypt/decrypt on the mcp table's
@@ -269,6 +271,16 @@ cdk deploy -c env=prod  --all
   invalidation.
 - Gateway and Rig are Docker images (DockerImageAsset / ECR); the agent bridge is
   an npm package (`@kelabome/agents`), not an image.
+- **SES is the default, not the only option.** `mail.provider` selects a
+  transport in `rest-api/src/mail/`; `mailersend` is the other one today. It
+  exists because SES production access is granted case by case and is
+  regularly refused, and a permanently sandboxed account cannot run a
+  deployment. Choosing another provider also turns `ses.createIdentity` off:
+  the SES stack publishes `v=spf1 include:amazonses.com -all`, which names the
+  wrong sender for anyone else and would fail their mail. Switching an
+  existing deployment stops synthesizing that stack but does not delete the
+  deployed one — `cdk destroy kelabo-<env>-ses` is deliberately manual,
+  because it takes DNS records with it.
 - SES must leave sandbox for prod (verified domain + production access); dev/staging
   can use verified addresses. Sandbox status, quota, reputation and the
   bounce/complaint suppression list are all **account+region** scoped and nothing

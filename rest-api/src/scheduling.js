@@ -120,7 +120,6 @@ export function createScheduling({ config, db, mailer, internal }) {
       try {
         await mailer.sendInvite({
           to: email,
-          from: config.ses.fromAddress,
           hostName: displayName || identity,
           title: meta.title,
           scheduledAt: meta.scheduledAt,
@@ -282,7 +281,6 @@ export function createScheduling({ config, db, mailer, internal }) {
       try {
         await mailer.sendCancellation({
           to: inv.email,
-          from: config.ses.fromAddress,
           hostName: meta.hostIdentity,
           title: meta.title,
           scheduledAt: meta.scheduledAt,
@@ -340,7 +338,6 @@ export function createScheduling({ config, db, mailer, internal }) {
         try {
           await mailer.sendReschedule({
             to: inv.email,
-            from: config.ses.fromAddress,
             hostName: meta.hostIdentity,
             title: updates.title || meta.title,
             scheduledAt: body.scheduledAt,

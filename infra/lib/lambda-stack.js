@@ -64,7 +64,15 @@ export class LambdaStack extends Stack {
         KELABO_SES_CONFIG_SET: cfg.ses.configurationSetName,
         KELABO_SECRET_API_ORIGIN: cfg.secrets.apiOrigin,
         KELABO_REQUIRE_ORIGIN_SECRET: cfg.api.requireOriginSecret ? "true" : "false",
-        KELABO_SES_FROM_ADDRESS: cfg.ses.fromAddress,
+        // Which transport in rest-api/src/mail/ carries outbound mail, and the
+        // address it sends from. `fromAddress` is provider-neutral; the
+        // KELABO_SES_* pair below configures the SES transport specifically.
+        KELABO_MAIL_PROVIDER: cfg.mail.provider,
+        KELABO_MAIL_FROM_ADDRESS: cfg.mail.fromAddress,
+        // Only read when the provider needs a key. SES does not — it
+        // authenticates with this function's own role — so an SES deployment
+        // never touches it and the secret need not exist.
+        KELABO_SECRET_MAIL: cfg.secrets.mail,
         // Usually this stack's own region. It differs only when a deployment
         // moved an environment's mail to another region to give it its own
         // sandbox status and reputation, so the SES client cannot just take
@@ -138,13 +146,20 @@ export class LambdaStack extends Stack {
       }),
     );
 
-    this.fn.addToRolePolicy(
-      new iam.PolicyStatement({
-        actions: ["ses:SendEmail", "ses:SendRawEmail"],
-        resources: ["*"],
-        conditions: { StringEquals: { "ses:FromAddress": cfg.ses.fromAddress } },
-      }),
-    );
+    // Only what this deployment's mail provider actually needs. SES gets an
+    // identity-independent send permission fenced by the from-address; every
+    // other provider gets nothing here and reads its API key below instead.
+    // Granting both would leave a function that can still send from the SES
+    // identity long after the deployment stopped meaning to.
+    if (cfg.mail.provider === "ses") {
+      this.fn.addToRolePolicy(
+        new iam.PolicyStatement({
+          actions: ["ses:SendEmail", "ses:SendRawEmail"],
+          resources: ["*"],
+          conditions: { StringEquals: { "ses:FromAddress": cfg.mail.fromAddress } },
+        }),
+      );
+    }
 
     for (const [id, secretName] of Object.entries({
       Stt: cfg.secrets.stt,
@@ -154,6 +169,7 @@ export class LambdaStack extends Stack {
       // Read, not describe: the Lambda compares the presented header against
       // this value on every request that reaches a cold container.
       ApiOrigin: cfg.secrets.apiOrigin,
+      ...(cfg.mail.provider === "ses" ? {} : { Mail: cfg.secrets.mail }),
     })) {
       secretsmanager.Secret.fromSecretNameV2(this, `Secret${id}`, secretName).grantRead(this.fn);
     }

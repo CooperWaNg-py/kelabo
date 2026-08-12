@@ -5,6 +5,15 @@ import { dirname, join } from "node:path";
 const here = dirname(fileURLToPath(import.meta.url));
 
 /**
+ * Outbound-mail transports the REST API can drive (`rest-api/src/mail/`).
+ * Restated here rather than imported because this file is loaded by CDK and by
+ * the Lambda alike and must not reach into either one's source. Keep it in step
+ * with `MAIL_PROVIDERS` there — the list exists so a typo in `mail.provider`
+ * fails at config load, where it can be read, rather than at the first send.
+ */
+const MAIL_PROVIDERS = ["ses", "mailersend"];
+
+/**
  * Load the single source-of-truth config and derive every env-specific value
  * (domains, URLs, table names, bucket, ECR image). No value may be hard-coded
  * elsewhere; secrets are referenced by name only.
@@ -162,8 +171,33 @@ export function loadConfig(env,   configPath = join(here, "kelabo.json")) {
     );
   }
 
+  // Which service actually puts the mail on the wire.
+  //
+  // SES is the default and stays it: nothing to sign up for, no key to hold,
+  // and it is already in the account. What it is not is guaranteed to be
+  // *available* — production access is granted case by case and is regularly
+  // refused, and a permanently sandboxed account can mail only addresses
+  // someone has verified one at a time, which is not a deployment. Since the
+  // way out of that is a different provider rather than different code, the
+  // provider is a config value.
+  const mailProvider = block.mail?.provider || "ses";
+  if (!MAIL_PROVIDERS.includes(mailProvider)) {
+    throw new Error(
+      `kelabo config: env "${env}" sets mail.provider "${mailProvider}"; known providers are ${MAIL_PROVIDERS.join(", ")}`,
+    );
+  }
+
+  // The sending address belongs to the mail, not to SES — every provider needs
+  // one. It reads `ses.fromAddress` when `mail.fromAddress` is absent so a
+  // kelabo.json written before this block still loads and still sends, and the
+  // resolved value is written back onto `ses` below so the two names cannot
+  // drift apart (the Lambda's IAM condition and the SES stack's output are
+  // both derived from it).
+  const mailFromAddress = block.mail?.fromAddress || block.ses?.fromAddress || "";
+
   const ses = {
     ...block.ses,
+    fromAddress: mailFromAddress,
     dmarc,
     spf,
     mailFrom: sesMailFrom,
@@ -172,6 +206,20 @@ export function loadConfig(env,   configPath = join(here, "kelabo.json")) {
     // `||`, not `??`: this file is hand-edited JSON, and an empty string left
     // behind from a template is "unset", not "region named the empty string".
     region: block.ses?.region || block.region,
+    // Whether this environment publishes DKIM/SPF/DMARC and verifies an
+    // identity at all. Already false when another environment owns the shared
+    // identity; false as well when the mail does not go through SES, because
+    // the SPF record that stack publishes (`include:amazonses.com -all`) names
+    // the WRONG sender for another provider and would fail its mail.
+    createIdentity: mailProvider === "ses" && block.ses?.createIdentity !== false,
+  };
+
+  const mail = {
+    provider: mailProvider,
+    fromAddress: mailFromAddress,
+    // Per-provider settings, derived rather than restated in a consumer.
+    ses: { region: ses.region, configurationSet: ses.configurationSetName },
+    mailersend: { ...(block.mail?.mailersend ?? {}) },
   };
 
   // Cloudflare Realtime's API host. Derived here (not written in a consumer) so
@@ -304,6 +352,7 @@ export function loadConfig(env,   configPath = join(here, "kelabo.json")) {
     rtcApiBase,
     rtc,
     ses,
+    mail,
     allowIps,
     allowIpsV4,
     allowIpsV6,
@@ -321,6 +370,12 @@ export function loadConfig(env,   configPath = join(here, "kelabo.json")) {
       // this needs no config edit — only `make origin-secret` to create the
       // value, which is generated, never typed.
       apiOrigin: block.secrets?.apiOrigin ?? `kelabo/${block.endpoint}/api-origin`,
+      // The outbound-mail provider's API key. Named for every environment,
+      // created only where one is needed: SES authenticates with the Lambda's
+      // IAM role and reads nothing here, so an SES deployment can leave this
+      // secret absent and never notice it. Shaped like the STT secret — a key
+      // per provider — so changing provider does not mean re-entering one.
+      mail: block.secrets?.mail ?? `kelabo/${block.endpoint}/mail`,
     },
     baseDomain,
     portalDomain,

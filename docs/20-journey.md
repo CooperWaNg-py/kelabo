@@ -1,0 +1,643 @@
+# 20 — Journey
+
+Status: **design, not built** — 2026-08-22. Precedes the code, in the same
+spirit as doc 18: it says what to build and why. Component docs (01-spa,
+02-rest-api, 03-gateway, 08-database, 09-data-flows, 10-data-contracts) gain
+their own updates once each piece of this actually ships.
+
+Depends on nothing that does not already exist on master. Adds one table,
+one new item type on the existing `kelabos` table, a new REST module, a
+handful of new SPA routes, one new system-prompt section, and a new
+dev-mode MCP tool group. Adds no new auth primitive, no new cookie, no new
+token family — `requireSession` and the existing `tenantId` derivation are
+reused wholesale.
+
+Per doc 19 §4 ("public repo = mechanism, private repo = policy"), this
+document is mechanism only. Plan-based limits on how many journeys,
+kelabos, documents or reports an account may have are policy, and are
+designed separately, additively, on the `saas` branch
+(`docs/saas/design-journey-quotas.md`) — nothing in this document should
+grow a quota field just because a hosted plan wants one.
+
+## 1. Concept
+
+Two people finish a kickoff kelabo having made three decisions. Three weeks
+later they start a follow-up kelabo — a new, unrelated `KELABO#<id>`
+partition in the current data model, with no memory of the first one unless
+a human re-types it. A **Journey** is the container that carries that
+memory forward: a persistent, named object that links related kelabos
+together, so that description, prior decisions, documents and a running
+Q&A history are available — to the people in the room and to the agent
+listening — the moment the second kelabo starts.
+
+- **Cardinality is many-to-many.** A journey can link zero or more kelabos;
+  a kelabo can belong to zero or more journeys. This is the one genuinely
+  new relationship shape in the system — see §2.
+- **A journey is not a folder of files.** It is a small set of
+  purpose-built sub-resources (§4–§9): a versioned free-text description,
+  optional health/progress indicators, on-demand Q&A reports, an optional
+  pinned message board, and pasted text documents — each timelined (§9)
+  and each readable by the agent (§12).
+- **Relationship to `historyEnabled` (docs 05, 14).** A kelabo already has
+  a cross-kelabo context mechanism: a host may opt a kelabo into reading
+  the *host's own* past kelabo minutes (`gateway/src/agent/history.js`).
+  Journey is the same *shape* of idea — inject a prior structured record
+  into the system prompt, framed as past-not-present — but deliberate and
+  curated (anyone can link any kelabo they participated in into a named,
+  shared container) rather than automatic and host-scoped. The two are
+  independent and additive: a kelabo can have `historyEnabled` on, be
+  linked to a journey, both, or neither.
+
+## 2. Where this fits the existing grain
+
+Three facts shape every decision below, the same way doc 18 §1 opens with
+the facts that shaped contacts/presence.
+
+**Nothing in the system today groups kelabos, and nothing needs to change
+to add it.** A kelabo's only "owner-shaped" field is `hostIdentity`, a bare
+email string; there is no `teamId`, no `folderId`, no `seriesId`, nothing a
+Journey would collide with. Every kelabo is, today, a fully isolated
+partition. This is greenfield, not a retrofit.
+
+**Visibility should reuse `tenantId`, not invent a second notion of
+"org."** Doc 18 §1 already established that colleagues are *derived,
+never stored* — "same org" means "same `tenantId`," computed from an email
+domain, with no membership row anywhere (`users.tenant-index`). A public
+journey's visibility rule is the identical derivation, reused wholesale: no
+roster, no invite flow, just a `tenantId` match at read time.
+
+**The existing `since`/`before` pagination split is a precedent, not a
+free choice.** The board is read forward from a cursor (`since`, growing
+tail); the transcript panel is read backward from a cursor (`before`,
+loading further into the past on demand). A journey's timeline is
+unbounded and read newest-first, which is the transcript shape, not the
+board shape — §9.2 follows `before`/`limit`, not `since`/`limit`.
+
+## 3. Lifecycle
+
+### 3.1 Status
+
+```
+        create                 complete (owner)                delete (owner)
+active ─────────► (usable) ────────────────────► completed ─────────────────► gone
+                                        ▲              │
+                                        └── reopen ─────┘ (owner)
+```
+
+No `draft` state, matching kelabo's own "born usable" convention. No
+auto-expiry — deletion is always an explicit act (§14), never a TTL sweep.
+
+**Completion freezes everything, no exception.** Once `completed`: no new
+kelabo link/unlink, no description edit, no status update, no board
+message, no document, no report. The journey is fully read-only until an
+owner reopens it. This is a deliberate, simpler-than-necessary rule — it
+would be easy to carve out "but reports are read-derived, allow those" —
+kept out because a single "completed = frozen, full stop" rule is easier
+to reason about and to explain in the UI than a list of exceptions.
+
+### 3.2 Visibility and the access check
+
+Every journey is `public` or `private`, owner's choice at creation,
+changeable by the owner later.
+
+- **Public** — every identity whose session `tenantId` matches the
+  journey's `tenantId` has full read/write rights. Nothing is stored to
+  grant this.
+- **Private** — the owner maintains an explicit `ACCESSOR#<identity>`
+  roster (§4.1). Being on it grants full rights, with one carve-out: an
+  accessor cannot add or remove other accessors.
+
+Access check order, computed fresh per request (no cached membership flag,
+matching how host/participant checks already work on the `kelabos` table):
+
+1. `identity === journey.ownerIdentity` → full rights, plus owner-only
+   actions.
+2. `journey.visibility === "public" && identity.tenantId ===
+   journey.tenantId` → full rights.
+3. `journey.visibility === "private"` → point-read `ACCESSOR#<identity>` →
+   present ⇒ full rights (minus roster management); absent ⇒ 403.
+4. Else → 403.
+
+Guests never satisfy (2) or (3): a guest identity carries no email domain
+to match a `tenantId`, and a guest is never added as an accessor — nothing
+here needs a special guest rule, it falls out of the identity shape.
+
+### 3.3 Permission matrix
+
+| Action | Public member / Private accessor | Owner |
+|---|---|---|
+| View, search, read timeline | yes | yes |
+| Edit description | yes | yes |
+| Set health/progress (§5) | yes | yes |
+| Add/edit/remove board message | yes | yes |
+| Add/remove document | yes | yes |
+| Link a kelabo (must be host/participant of *that* kelabo) | yes | yes |
+| Unlink a kelabo | yes | yes |
+| Request a report | yes | yes |
+| Manage the accessor roster (private only) | no | yes |
+| Toggle visibility | no | yes |
+| Mark complete / reopen | no | yes |
+| Update avatar | no | yes |
+| Delete journey | no | yes |
+| Transfer ownership | no | yes |
+
+The right column's items are all either irreversible (delete), large
+blast-radius (complete freezes every other member's access to write), or
+identity-defining (visibility, ownership) — kept owner-only even though a
+stricter reading of "full rights" could extend further.
+
+## 4. Data model
+
+### 4.1 New table: `kelabo-<env>-journeys`
+
+One partition per journey, `PK = JOURNEY#<journeyId>`. Same physical
+conventions as `kelabos` — PAY_PER_REQUEST, PITR on. Unlike `kelabos`,
+**no `ttl` attribute is declared** — a journey is long-lived by nature and
+never auto-expires; every removal in this document is an explicit write.
+
+| SK | Item | Fields |
+|---|---|---|
+| `META` | Root | `journeyId, title, visibility, status, ownerIdentity, tenantId, tenantStatus (=tenantId#status), avatarVariant, health?, progress?, currentStatusVersion?, currentDescriptionVersion, counts:{kelaboCount, documentCount, reportCount, boardMessageCount, accessorCount}, createdAt, updatedAt, completedAt?, completedBy?, reopenedAt?` |
+| `DESC#<pad(version,6)>` | Description version (immutable) | `version, markdown, editedBy, editedAt, changeNote?` |
+| `STATUS#<pad(version,6)>` | Health/progress snapshot (immutable) — §5 | `version, health, progress, note?, setBy, setAt, source, reportId?` |
+| `ACCESSOR#<identity>` | Private-journey roster entry | `identity, displayName, avatarVariant, addedBy, addedAt` |
+| `LINK#<kelaboId>` | Kelabo membership (forward) | `kelaboId, titleSnapshot, hostIdentitySnapshot, linkedBy, linkedAt, statusSnapshot` |
+| `REPORT#<pad(at,13)>#<reportId>` | One report, append-only — §6 | `reportId, question, requestedBy, requestedAt, status, generatedAt?, answer, suggestedHealth?, suggestedProgress?, sourceKelaboIds[], error?` |
+| `BOARDMSG#<msgId>` | Board message, current head — §7 | `msgId, content, createdBy, createdAt, updatedBy?, updatedAt?, version, removed, removedBy?, removedAt?` |
+| `BOARDMSG#<msgId>#V#<pad(version,6)>` | Board message version | `msgId, version, content, action, actor, at` |
+| `DOC#<docId>` | Document, current head — §8 | `docId, title, content \| s3Key+excerpt, sizeBytes, addedBy, addedAt, removed, removedBy?, removedAt?` |
+| `CONTRIBUTOR#<identity>` | Per-person rollup — §10 | `identity, displayName, avatarVariant, kelaboJoinCount, reportRequestCount, firstSeenAt, lastActiveAt` |
+| `TL#<pad(at,13)>#<rand6>` | Timeline projection row — §9 | `type, refSk, summary, actor, at` |
+
+Sort-key padding follows the existing convention exactly: `at` values are
+zero-padded to 13 digits before being embedded in a sort key, the same
+width `CONTRIB_KEY_WIDTH` already uses (`rest-api/src/db.js:13-21,20`), for
+the same reason — a numeric-looking prefix must sort correctly as a
+string. The 6-char random suffix on `TL#` rows is a same-millisecond
+tie-breaker only, `Math.random().toString(36)`, matching
+`gateway/src/db.js:16` — not a secret, not an identity.
+
+Every mutating write updates its own item **and** writes one `TL#` row, in
+the same call, so the timeline is a genuine index rather than something
+that can drift out of sync with the six item types it summarizes.
+
+### 4.2 GSIs
+
+| GSI | PK | SK | Purpose |
+|---|---|---|---|
+| `tenant-status-index` | `tenantStatus` | `updatedAt` | "Journeys in my tenant" — public-journey discovery, filtering `visibility` in code after the query, the same "query broad, filter in the handler" idiom `listKelabosByStatusForIdentity` already uses against `kelabos.status-index` |
+| `accessor-index` | `identity` | `addedAt` | "Private journeys I'm an accessor of" — a direct structural copy of `invitee-index` (`infra/lib/dynamodb-stack.js:35-48`, queried at `rest-api/src/db.js:306-316`) |
+
+### 4.3 One new item type on the existing `kelabos` table
+
+`PK = KELABO#<kelaboId>`, `SK = JOURNEY#<journeyId>` →
+`{journeyId, journeyTitleSnapshot, journeyVisibilitySnapshot, linkedAt, linkedBy}`.
+
+```
+   kelabos table                          journeys table
+ ┌───────────────────────┐              ┌───────────────────────┐
+ │ KELABO#<id>           │              │ JOURNEY#<jid>         │
+ │  META                 │              │  META                 │
+ │  UTT# ...             │   mirrored   │  LINK#<id> ───────────┼──► forward
+ │  CONTRIB# ...         │◄─────────────┤                       │
+ │  MINUTES              │  membership  │  DESC#, STATUS#,      │
+ │  JOURNEY#<jid> ───────┼──────────────┼─►REPORT#, BOARDMSG#,  │
+ │                       │   backward   │  DOC#, TL#, ...       │
+ └───────────────────────┘              └───────────────────────┘
+```
+
+This mirror exists so two questions are cheap **without a new GSI and
+without a cross-table scan**:
+
+1. *Does this kelabo belong to any journey?* —
+   `begins_with(SK, "JOURNEY#")` on the kelabo's own partition. This is
+   the purge guard, §14.3.
+2. *Which journeys is this kelabo part of?* — the same query, used to
+   render a "Part of: …" banner wherever kelabo META is already fetched.
+
+Both the `journeys`-table write and this mirror are written in **one
+`TransactWriteItems`** together with a condition that the journey is not
+`completed` and an `ADD kelaboCount 1` on META. DynamoDB transactions may
+span multiple tables within one account/region — this needs no new
+capability, only using an existing one across a second table.
+
+### 4.4 IDs
+
+`journeyId`, `reportId`, `msgId`, `docId` are all `crypto.randomUUID()`,
+matching the existing rule: cryptographic randomness for anything that is
+an identity, `Math.random()` only for the non-secret sort-key
+tie-breaker.
+
+## 5. Status indicators: health and progress
+
+Optional, unset (`null`) until someone sets them — "optional" means
+genuinely absent, not defaulted to `0%` / red.
+
+- **`health`**: `"green" | "yellow" | "red" | null`.
+- **`progress`**: integer `0`–`100`, or `null`.
+
+Each update writes one `STATUS#<version>` snapshot holding both fields
+together (people report health and progress together — "60%, yellow,
+because X" — not as two independently-drifting numbers) plus an optional
+free-text `note`. An update may be partial; an omitted field carries its
+previous value forward into the new snapshot. Either field can be
+explicitly set back to `null`.
+
+Same permission tier as editing the description (§3.3) — content, not a
+structural action — and frozen once the journey is `completed` (§3.1).
+
+**The UI reuses the existing fixed semantic colors, not new ones.**
+`--success` / `--warn` / `--danger` (`kelabo.css:117-122`, dark-mode
+overrides `:130-133`) are already documented as independent of the
+`data-scheme` picker specifically so danger/warn/success never shift
+meaning — green/yellow/red maps onto them directly rather than inventing a
+parallel palette.
+
+A report (§6) may propose `suggestedHealth`/`suggestedProgress` based on
+everything it read, but never writes them directly — an LLM silently
+changing a visible project-health signal is the wrong trust boundary. A
+member applies a suggestion explicitly
+(`POST /journeys/:id/reports/:reportId/apply-status`), which writes a
+normal `STATUS#` version with `source: "ai-suggested"` and the originating
+`reportId`, fully auditable in history exactly like a manual update.
+
+## 6. Reports
+
+`POST /journeys/:id/reports {question}` — a member asks a free-text
+question; the answer is generated once, synchronously, and stored forever
+alongside the question that produced it (never overwritten — contrast
+with kelabo's own `MINUTES` item, which is a single unversioned slot; a
+journey report is append-only by design because the running history of
+what was asked and answered *is* the value).
+
+### 6.1 Why this runs in rest-api, not the Gateway
+
+Kelabo minutes generation lives inside the Gateway ECS task specifically
+because it needs things only that process holds: a warm, per-kelabo
+resident transcript, potential sub-agent web/MCP research with no
+15-minute Lambda cap, and — in dev mode — the live WSS tunnel to a
+developer's own coding agent (ARCHITECTURE.md §15.6a). A journey report
+needs **none** of these: it is a single bounded synthesis over content the
+`journeys`/`kelabos` tables already hold, with no live session, no
+sub-agent dispatch, no tunnel. That makes it a plain control-plane job —
+the shape rest-api's Lambda already handles for everything else in this
+document — not a reason to route a new call through the Gateway.
+
+The one new capability this requires: rest-api needs an LLM client, which
+it does not have today (LLM calls are exclusively
+`gateway/src/agent/llm.js` today). Recommend extracting the
+provider-agnostic call into `contracts/` so neither package duplicates it,
+rather than giving rest-api its own copy.
+
+### 6.2 Context assembly and size discipline
+
+The existing pipeline enforces **no size limit** on what it feeds an LLM
+today — the main-agent thread and the minutes prompt both grow unbounded
+(`runner.js:121-127`'s own comment: "no limit... the entire history, not
+just a rolling window"). A journey report must not repeat that; it brings
+its own explicit budget, modelled on the one place the pipeline already
+does this — `gateway/src/agent/history.js`'s `HISTORY_LIMIT = 8` plus
+per-field truncation:
+
+- Description head, capped.
+- Most recent pinned board messages, capped count and length each.
+- Most recent documents, capped count and length each.
+- Every linked kelabo's stored `MINUTES`, reduced exactly like
+  `history.js` already reduces past kelabos — summary, decisions,
+  actionItems; topics and findings dropped — capped count.
+- Prior journey reports, capped count and length each.
+- The new question, as the trailing instruction.
+
+### 6.3 Untrusted content, explicitly
+
+A journey's description, documents and board messages are free text from
+potentially many contributors, about to be concatenated into one LLM
+prompt. That is exactly the shape transcript injection already defends
+against — captions are wrapped in `<kelabo-transcript untrusted="true">`
+and the persona is told "data, not instructions," not because a
+registered user is assumed hostile but because the *content* did not
+originate from the person asking the question. Journey content needs the
+identical wrapper; being written by a signed-in accessor is not a reason
+to skip it.
+
+## 7. Message board
+
+A small set of pinned, mutable messages — distinct from a kelabo's own
+board (`CONTRIB#` rows, which are fanned-out and never edited). A journey
+message is edited in place, but every edit is kept: the
+`BOARDMSG#<msgId>` item is the current head, `BOARDMSG#<msgId>#V#<version>`
+items are the immutable chain behind it, mirroring `DESC#`/`STATUS#`
+versioning.
+
+Removal is soft: `removed:true` on the head, the version chain up to that
+point stays intact and readable, and **nothing about a removed message can
+be edited afterward** — matching the same rule documents follow (§8.2).
+
+`aiCanPost` (META boolean, default off, owner-controlled) gates whether an
+attached agent may write to the board on its own initiative
+(`kelabo_journey_post`, §12.2) — independent of human write rights. This
+mirrors `historyEnabled`'s own justification for defaulting off: a
+human-curated, always-visible surface being edited unsupervised by an
+agent is a decision an owner has to actually make, not a default.
+
+## 8. Documents
+
+Pasted or typed text (title + markdown body) — not file upload. There is
+no upload capability anywhere in this codebase today (avatars are
+generated, never uploaded, §13); building presigned-upload, size/type
+validation and a new bucket for arbitrary binary attachments is a
+materially larger, separate piece of work than this document covers, and
+nothing here blocks adding it later behind the same `DOC#` item shape.
+
+### 8.1 Inline vs. S3 overflow
+
+Same split the kelabo archive already uses for the 400KB DynamoDB item
+cap: content that fits stays inline on the `DOC#<docId>` item; content
+over the threshold is written to S3 with the item holding a pointer
+(`s3Key`) plus a short excerpt for cheap listing — the identical shape as
+`archives/<host>/<archiveId>.json`, just a different bucket or prefix.
+
+### 8.2 Removal
+
+Soft-delete: `removed:true` + timestamp on the head. "Files can be
+removed, but the record can't be changed" — once removed, that document's
+timeline entry is permanent and its content is excluded from future
+report/agent context assembly; there is no un-remove and no further edit.
+A document someone wants back is re-added as a new one.
+
+## 9. Timeline
+
+### 9.1 The projection row
+
+Every mutation across §4–§8 writes one `TL#<pad(at,13)>#<rand6>` row
+alongside its own item, `type` one of
+`description | status | kelabo_linked | kelabo_unlinked | report |
+board_message | document`. Reading the timeline is one query against this
+prefix, never a fan-out union across six item types.
+
+### 9.2 Pagination
+
+`GET /journeys/:id/timeline?type=&before=&limit=` — backward cursor
+(`before`), matching `/caption/history`'s convention (§2), not the
+board's forward `since`: a journey's timeline is read newest-first and
+grows without bound, the same shape a long-running transcript already
+has, unlike a kelabo's own list endpoints (`/kelabos`, `/records`), which
+return everything unbounded today because a person's own kelabo/record
+count stays small. A journey's timeline has no such ceiling, so it gets
+the one real cursor precedent that already handles unbounded, backward-read
+history.
+
+### 9.3 Type filters
+
+Chips over the same enum as `type` above, rendered as day-divider
+sections (reusing `annotateDays`, `spa/src/time.js:67-81`) and type-coded
+compact cards (reusing the `ContributionCard` shape: an icon + border
+color per type, click-to-expand body).
+
+## 10. Contributor stats
+
+Shown on the journey's overview: creator, and per person, a
+**kelabo-join count** and a **report-request count** — a
+`CONTRIBUTOR#<identity>` rollup row per person, maintained by
+unconditional `ADD` at write time, never by scanning at read time. A
+rollup answers a question asked on every page load; deriving it fresh by
+re-scanning every linked kelabo's history on every load would make the
+cheapest page the most expensive one as a journey grows.
+
+- **`reportRequestCount`** — `ADD 1` on the requester's row at report
+  creation. Counts every request, including ones that later fail — the
+  count is about the act of asking.
+- **`kelaboJoinCount`** — settles when a linked kelabo *ends* (or
+  immediately, if it was already ended at link time): for each of that
+  kelabo's final participant identities, `ADD kelaboJoinCount 1`. A
+  currently-live linked kelabo does not update anyone's count until it
+  ends — this avoids a new write hook on the kelabo-join hot path, and
+  mirrors the existing precedent of `participantCount`/`boardCount`
+  (`gateway/src/archive.js:123-124,319-320`) being snapshotted once, at
+  archive time, rather than tracked live.
+- **Unlinking a kelabo never decrements anything.** The rollup is a
+  cumulative record of contribution to the journey, not a live membership
+  count — the same reasoning that keeps `kelabo_unlinked` a recorded
+  timeline event rather than an erasure of the fact that the link once
+  existed.
+
+## 11. REST API
+
+New `rest-api/src/journeys.js`, same `createApp(deps)` factory convention
+as `kelabos.js`/`records.js`.
+
+| Method | Path | Who | Purpose |
+|---|---|---|---|
+| POST | `/journeys` | session | Create `{title, description?, visibility}` |
+| GET | `/journeys` | session | `{mine, accessible, public}` |
+| GET | `/journeys/:id` | §3.2 | Detail, counts, description head, `myRole` |
+| PATCH | `/journeys/:id` | owner | title / visibility |
+| POST | `/journeys/:id/complete` \| `/reopen` | owner | Status flip |
+| DELETE | `/journeys/:id` | owner | Cascading delete, §14.1 |
+| GET/POST/DELETE | `/journeys/:id/accessors[/:identity]` | member (read) / owner (write) | Private roster |
+| POST | `/journeys/:id/kelabos` | member, host/participant of target | Link `{kelaboId}` |
+| DELETE | `/journeys/:id/kelabos/:kelaboId` | member | Unlink |
+| GET | `/journeys/:id/kelabos` | member | Linked list, live status |
+| POST | `/journeys/:id/description` | member | New version `{markdown, changeNote?}` |
+| GET | `/journeys/:id/description/history` | member | Version list |
+| POST | `/journeys/:id/status` | member | `{health?, progress?, note?}` — §5 |
+| GET | `/journeys/:id/status/history` | member | Version list |
+| GET/POST/PATCH/DELETE | `/journeys/:id/board[/:msgId]` | member | Pinned messages — §7 |
+| GET | `/journeys/:id/board/:msgId/history` | member | Version list |
+| GET/POST/DELETE | `/journeys/:id/documents[/:docId]` | member | §8 |
+| POST | `/journeys/:id/reports` | member | `{question}` → synchronous report — §6 |
+| GET | `/journeys/:id/reports[/:reportId]` | member | List / one |
+| POST | `/journeys/:id/reports/:reportId/apply-status` | member | Apply a suggested health/progress — §5 |
+| GET | `/journeys/:id/timeline?type=&before=&limit=` | §3.2 | §9.2 |
+| GET | `/journeys/search?q=` | session | Title/description/timeline text search, same "open candidates, cache, cap N" shape as `/records/search` |
+
+Touch-ups to existing endpoints:
+
+- `POST /kelabos` / `POST /kelabos/schedule` bodies gain optional
+  `journeyIds: string[]` — "created under a journey."
+- `GET /kelabos/:id` (and `/scheduled`) responses gain
+  `journeys: [{id, title, visibility}]`.
+- `DELETE /records/:archiveId`, **host-purge outcome only**: 409
+  `kelabo_in_journey` while the kelabo's `JOURNEY#` mirror partition is
+  non-empty (§14.3). The participant-only "drop from my list" outcome is
+  untouched, because it never destroys anything a journey depends on.
+
+## 12. Agent / MCP integration
+
+Two independent mechanisms, matching the existing push (`historyEnabled`)
+vs. pull (`kelabo_history` tool) split.
+
+### 12.1 Push — system-prompt injection
+
+New `gateway/src/agent/journeyContext.js`, sibling to `history.js`, called
+from `runner.js`'s `ensureContext()` alongside the existing
+`loadKelaboHistory()` call. For each journey the live kelabo is linked to
+(capped at 3), builds a digest — title, description head, latest pinned
+messages, latest report answer, other linked kelabos reduced the way §6.2
+describes — under its own `JOURNEY_CONTEXT_MAX_CHARS` budget. A new
+`renderJourneyContext()` in `persona.js` appends a `JOURNEY CONTEXT:`
+section after the existing `EARLIER KELABOS:` section
+(`persona.js:42-59`'s `renderHistory`), with the same "record of the past,
+framed as past, name which journey/kelabo a fact came from" language, and
+the untrusted-content wrapper from §6.3.
+
+### 12.2 Pull — dev-mode MCP tools
+
+New tools alongside the existing eight (`kelabo_join`, `kelabo_post`,
+`kelabo_working`, `kelabo_info`, `kelabo_board`, `kelabo_history`,
+`kelabo_minutes`, `kelabo_leave`), served over new KAP frame pairs in
+`gateway/src/tunnel.js` — read paths hit a new `gateway/src/journeys.js`
+with direct DynamoDB access to the `journeys` table, the same dual-access
+pattern `kelabos` already has between `rest-api` and `gateway`.
+
+| Tool | Purpose |
+|---|---|
+| `kelabo_journey_info()` | Title/visibility/status/description head/counts |
+| `kelabo_journey_timeline({type?, before?, limit?})` | §9.2, over the tunnel |
+| `kelabo_journey_board()` | Current pinned messages |
+| `kelabo_journey_report_submit({question, answer, suggestedHealth?, suggestedProgress?})` | The agent's own synthesis, stored directly — no LLM round-trip, exactly like `kelabo_minutes` |
+| `kelabo_journey_post({content, msgId?})` | Write/edit a board message, gated by `aiCanPost` (§7) |
+
+### 12.3 Deliberately not built here
+
+A tool that asks the *server* to generate a report (rather than
+submitting the agent's own answer) is not built in v1. That would need a
+new Gateway→rest-api call direction that exists nowhere else in this
+system today, for a capability the agent can already satisfy itself via
+`kelabo_journey_report_submit`. If a future need justifies the new call
+direction on its own merits, add it then.
+
+## 13. SPA / UI
+
+- **Nav:** new `Journeys` entry in `AppShell.jsx`'s sidebar, beside
+  Kelabos.
+- **`/journeys`:** list, `{mine, accessible, public}` sections, reusing
+  `Records.jsx`'s bucketed-sections-plus-search pattern. Each row: avatar,
+  title, status chip, health dot, progress badge, kelabo count, last
+  activity.
+- **`/journeys/:id`:** header (avatar + re-roll if owner, title, status
+  chip, health/progress, owner + accessor-count), `Tabs`: **Overview**
+  (description, contributor table, status update, action buttons) ·
+  **Timeline** (§9.3) · **Kelabos** (linked list, add/remove) ·
+  **Reports** (list + "Ask a question" modal, suggested-status apply
+  button) · **Board** (§7, per-message history) · **Documents** (§8) ·
+  **Accessors** (private only, owner-managed).
+- **Breadcrumb on existing pages:** `Kelabo.jsx`, `RecordDetail.jsx`,
+  `ScheduledKelabo.jsx` show "Part of: `<journey chips>`" when linked.
+- **Creation-time linking:** `NewKelabo.jsx` / `Schedule.jsx` gain an
+  optional multi-select against the user's journeys.
+- **Global search:** `SearchDialog.jsx` gains a third tab, following the
+  exact seam already built for two (`TABS` array, a third
+  `Promise.allSettled` arm, `api.searchJourneys(q)`).
+- **Avatar:** the existing generated-identicon component, seeded by
+  `journeyId` (`spa/src/components/ui/Avatar.jsx`), re-rolled the same way
+  `Settings.jsx`'s `rollAvatar`/`resetAvatar` already do for a personal
+  avatar — no upload, no new subsystem.
+- No new CSS system: `.page` / `.row` / `.chip` / `.section-title` /
+  `Tabs` / `SkeletonRows` / `.empty`, the existing
+  `--success`/`--warn`/`--danger` tokens for health (§5).
+
+## 14. Deletion and retention
+
+### 14.1 Delete journey (owner)
+
+`Query PK=JOURNEY#<id>` → `BatchWriteItem` delete in 25-item chunks with
+retry on `UnprocessedItems`, dry-run supported — the same shape as
+`deleteKelaboPartition` (`rest-api/src/db.js:589-621`) and
+`/records/purge` (`rest-api/src/records.js:183-223`). For each
+`LINK#<kelaboId>` found, also delete that kelabo's `JOURNEY#<id>` mirror
+row — a kelabo's own META/UTT#/CONTRIB#/MINUTES are never touched by this
+operation. `META` is deleted **last**, the same "pointer row dies last so
+a crash is resumable" rule `/records/purge` already follows
+(`records.js:183-190`).
+
+### 14.2 Unlink one kelabo
+
+Delete both sides of the mirror, decrement `kelaboCount`, write a
+`kelabo_unlinked` timeline row. Contributor rollups are untouched (§10).
+
+### 14.3 Purge guard
+
+`DELETE /records/:archiveId`'s host-purge outcome refuses with 409 while
+any `JOURNEY#` mirror row exists on that kelabo (checked with the same
+query §4.3 describes) — a host must unlink from every journey first. This
+is a direct reading of "when a kelabo is part of a journey, it's not
+allowed to be removed": the removal being blocked is the kelabo *record*,
+not its journey membership, which stays freely removable per §3.3.
+
+### 14.4 No TTL anywhere in this table
+
+Every removal described above is an explicit write. This sidesteps the
+one documented trap on the `kelabos` table itself — TTL expiring `META`
+while `UTT#`/`CONTRIB#`/etc. are silently orphaned with no sweep — by
+never giving this table a TTL attribute to begin with.
+
+## 15. Invariants
+
+The checkable list.
+
+1. A journey's `kelaboCount`, `documentCount`, `reportCount`,
+   `boardMessageCount`, `accessorCount` on META always equal the live
+   count of their respective item type in the partition.
+2. A public journey never has a stored `ACCESSOR#` row that changes what
+   anyone may do — visibility alone decides access for public journeys.
+3. A private journey with an empty accessor roster is visible/writable to
+   its owner only.
+4. `completed` blocks every write listed in §3.3's left column, with no
+   exception, until `reopen`.
+5. A kelabo with at least one `JOURNEY#` mirror row can never be
+   host-purged (§14.3) until every mirror row is gone.
+6. Deleting a journey never deletes, ends, or otherwise mutates any
+   kelabo it was linked to.
+7. A removed document or board message is never returned by the context
+   assembly in §6.2/§12.1, and is never editable again.
+8. `kelaboJoinCount`/`reportRequestCount` never decrease.
+9. Every `TL#` row's `refSk` resolves to an item that either still exists
+   or is a recorded soft-delete — the timeline never references something
+   that vanished without a trace.
+10. A report's `answer` is never mutated after `status` becomes `ready`;
+    correcting one means asking a new question, not editing an old
+    answer.
+
+## 16. Failure modes, deliberately chosen
+
+- **The LLM call in `POST /journeys/:id/reports` fails or times out.** The
+  `REPORT#` row is written `pending` before the call starts and updated to
+  `failed` with an `error` field on failure — never left `pending`
+  forever, and never silently dropped. The requester's
+  `reportRequestCount` is already incremented (§10) — the count is about
+  the act of asking, not the outcome.
+- **A link/unlink races a journey being marked complete.** The
+  `TransactWriteItems` in §4.3 conditions on `status !== "completed"`; the
+  loser of the race gets a clean 409, not a partially-mirrored link.
+- **A kelabo is deleted (host-purged) while somehow still mirrored.**
+  Should not be reachable given §14.3's guard, but if it is (a bug, a
+  manual operation), the journey's `LINK#` row becomes a dangling
+  reference — read paths must treat a missing kelabo as "no longer
+  available," not as an error, the same tolerance §9's timeline already
+  needs for a removed document.
+
+## 17. Out of scope here
+
+Everything in this document ships with **no quota, plan, or entitlement
+check anywhere** — per doc 19 §4, this is mechanism; policy is designed
+separately, additively, on the `saas` branch (private repo) in
+`docs/saas/design-journey-quotas.md`, once this document has been merged
+there. A self-hosted deployment gets the entire feature with no tuning,
+exactly as doc 19 promises for every capability in this system.
+
+Also explicitly not built: real file upload (§8), an agent-triggered
+server-side report (§12.3), and any journey-level wallet/billing scope
+(mentioned only as a future option in the companion saas document).
+
+## 18. Suggested delivery phases
+
+1. **Core** — table, GSIs, CRUD, link/unlink, visibility + accessor
+   roster, permission matrix, purge guard (§3, §4, §11 core rows, §14).
+2. **History & timeline** — description versioning, health/progress (§5),
+   `TL#` projection, timeline endpoint + UI, avatar.
+3. **Reports** — §6, contributor rollups (§10).
+4. **Board & documents** — §7, §8, `aiCanPost`.
+5. **Agent integration** — §12.
+6. **SaaS quotas** — entirely additive, no master changes required; see
+   the companion document.

@@ -13,7 +13,10 @@ const mcpTable = (c) => c.config.tableNames.mcp;
 
 export const kelaboPk = (kelaboId) => `KELABO#${kelaboId}`;
 export const pad = (n, w = 12) => String(Math.max(0, Math.floor(n))).padStart(w, "0");
-const randSeq = () => Math.random().toString(36).slice(2, 8).padEnd(6, "0");
+// Exported for gateway/src/journeys.js's own TL#/CONTRIBUTOR# writes (docs
+// 20 §4.1/§10) — same non-secret same-millisecond tie-breaker, not a second
+// implementation of it.
+export const randSeq = () => Math.random().toString(36).slice(2, 8).padEnd(6, "0");
 
 export async function getMeta(c, kelaboId) {
   const out = await c.db.send(

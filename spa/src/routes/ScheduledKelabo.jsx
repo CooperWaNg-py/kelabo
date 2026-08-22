@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { useNavigate, useParams } from 'react-router-dom'
+import { Link, useNavigate, useParams } from 'react-router-dom'
 import { api } from '../api'
 import { Button } from '../components/ui/Button'
 import { Banner } from '../components/ui/Banner'
@@ -218,6 +218,16 @@ export default function ScheduledKelabo() {
         {ended && <span className="chip chip-ended">ended</span>}
         {cancelled && <span className="chip chip-ended">cancelled</span>}
         {scheduled && <span className="chip chip-accent">scheduled</span>}
+        {(kelabo.journeys || []).map(j => (
+          <Link
+            key={j.id}
+            className="chip chip-accent"
+            to={`/journeys/${j.id}`}
+            title={`Part of the journey "${j.title || 'Untitled journey'}"`}
+          >
+            <Icon name="link" size={12} />{j.title || 'Untitled journey'}
+          </Link>
+        ))}
       </div>
       <p className="page-sub">{whenText(kelabo.scheduledAt, kelabo.durationMinutes)}</p>
 

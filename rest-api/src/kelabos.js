@@ -132,6 +132,18 @@ export function createKelabos({ config, db, internal, secrets }) {
       // "P2P secure" and "agent". A capability nobody can see is one nobody can
       // object to.
       body.historyEnabled = !!meta.historyEnabled;
+      // Which journeys this kelabo belongs to (docs 20 §4.3's mirror,
+      // §11's touch-up) — told to the whole room, same reasoning as
+      // `historyEnabled` two lines up: a journey's context reaches the
+      // live agent (docs 20 §12.1) with no opt-in of its own, on the
+      // premise that linking a kelabo is itself the deliberate, visible
+      // act. The `{id, title, visibility}` shape is the frozen snapshot
+      // taken at link time, not a live re-fetch of the journey's own META.
+      body.journeys = (await db.listKelaboJourneyLinks(kelaboId).catch(() => [])).map((l) => ({
+        id: l.journeyId,
+        title: l.journeyTitleSnapshot || "",
+        visibility: l.journeyVisibilitySnapshot,
+      }));
       // What this deployment can actually run (docs 19 §2/§3), stated up front
       // so the client renders absence instead of discovering it by failing.
       // `on: false` means OFF — the UI shows no trace of the capability;

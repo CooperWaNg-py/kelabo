@@ -114,7 +114,7 @@ function skipReason(result) {
  * itself — a sub-agent's output is the board post.
  */
 export class MainAgent {
-  constructor({ llm, smallModel, subAgentModel, subAgentDeps, maxDispatchPerTurn, hostLanguage, history, log, debug }) {
+  constructor({ llm, smallModel, subAgentModel, subAgentDeps, maxDispatchPerTurn, hostLanguage, history, journeys, log, debug }) {
     this.llm = llm;
     this.smallModel = smallModel;
     this.subAgentModel = subAgentModel;
@@ -137,6 +137,11 @@ export class MainAgent {
     this.system = mainAgentSystemPrompt({
       mcpServers: subAgentDeps?.mcp?.servers ?? [],
       history: history ?? [],
+      // Journey context (docs 20 §12.1) — independent of `history` above:
+      // that is the host's own past kelabos, this is a deliberately-linked
+      // shared container. Same "fixed for the kelabo, goes in the system
+      // prompt not the thread" reasoning as history.
+      journeys: journeys ?? [],
     });
     this.thread = []; // persistent message array (excludes system)
     this.transcriptLen = 0;

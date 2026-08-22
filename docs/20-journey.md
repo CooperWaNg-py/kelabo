@@ -1,14 +1,18 @@
 # 20 — Journey
 
-Status: **mostly implemented** — 2026-08-22. Built: the data model (§4),
-lifecycle/permissions (§3), health/progress (§5), reports (§6), the message
-board (§7), documents (§8), the timeline (§9), contributor stats (§10, one
-of its two settling paths — see there), the full REST API (§11), and the
-SPA (§13, minus a "Part of: …" breadcrumb on existing kelabo pages). Not
-built: the agent/MCP context integration (§12) and everything under §17.
-Component docs (01-spa, 02-rest-api, 03-gateway, 08-database, 09-data-flows,
-10-data-contracts) still describe pre-Journey behaviour and have not yet
-been updated to include it — that update is itself still open work.
+Status: **implemented, short of what §17 marks permanently out of scope**
+— 2026-08-22. Built: the data model (§4), lifecycle/permissions (§3),
+health/progress (§5), reports (§6), the message board (§7), documents
+(§8), the timeline (§9), contributor stats (§10, both settling paths),
+the full REST API (§11), both halves of agent/MCP integration (§12.1
+push, §12.2 pull), and the SPA (§13, including the "Part of: …"
+breadcrumb). Not built, and not planned in this document — see §17:
+real file upload, an agent-triggered server-side report (§12.3, by
+design), any wallet/billing scope, and the AI-suggested-status/
+apply-status flow (§5/§6). Component docs (01-spa, 02-rest-api,
+03-gateway, 08-database, 09-data-flows, 10-data-contracts) still describe
+pre-Journey behaviour and have not yet been updated to include it — that
+update is itself still open work.
 
 §6.1 records a correction made mid-implementation: the original draft put
 report generation in rest-api and was wrong to. Read it if you are
@@ -178,6 +182,7 @@ never auto-expires; every removal in this document is an explicit write.
 | `DOC#<docId>` | Document, current head — §8 | `docId, title, content \| s3Key+excerpt, sizeBytes, addedBy, addedAt, removed, removedBy?, removedAt?` |
 | `CONTRIBUTOR#<identity>` | Per-person rollup — §10 | `contributorIdentity, kelaboJoinCount, reportRequestCount, firstSeenAt, lastActiveAt` |
 | `TL#<pad(at,13)>#<rand6>` | Timeline projection row — §9 | `type, refSk, summary, actor, at` |
+| `SETTLED#<kelaboId>` | `kelaboJoinCount` idempotency marker — §10 | `kelaboId, settledAt` — no reader; exists only so `archive.js`'s hook is safe to call twice |
 
 Sort-key padding follows the existing convention exactly: `at` values are
 zero-padded to 13 digits before being embedded in a sort key, the same
@@ -451,19 +456,34 @@ cheapest page the most expensive one as a journey grows.
   creation. Counts every request, including ones that later fail — the
   count is about the act of asking.
 - **`kelaboJoinCount`** — settles when a linked kelabo's participant list
-  is final. Two ways that can happen, only one of them built so far:
-  - **Built:** linking an *already-ended* kelabo settles immediately —
+  is final. Two ways that can happen, both built:
+  - Linking an *already-ended* kelabo settles immediately —
     `linkKelabo` reads the `history` row's `participantIdentities` and
     bumps each one, rest-api-side, using the same `db.getHistory` records.js
     already calls.
-  - **Not built:** a kelabo linked while still *live*, which later ends,
-    does not settle at all yet. That half needs a hook in the Gateway's
-    own end-of-kelabo path (`gateway/src/archive.js`) — checking a newly-
-    ended kelabo's `JOURNEY#` mirror rows and bumping each of *those*
-    journeys' contributors — deliberately deferred to avoid touching that
-    file, and the kelabo-end path it sits on, in the same change that
-    first gave the Gateway write access to a new table. The common case
-    (a journey linking a kelabo that already happened) is unaffected.
+  - A kelabo linked while still *live*, which later ends, settles in
+    `gateway/src/archive.js`'s `endKelabo` — once the transcript/board are
+    archived, it looks up every `JOURNEY#` mirror row on the ending
+    kelabo's own partition (the same query §12.1's push context already
+    uses) and calls a new `settleKelaboJoin()` export in
+    `gateway/src/journeys.js` for each. Independent of whether the
+    history/archive write itself succeeded: a journey's roster reflects
+    the kelabo having happened either way.
+
+  **Idempotent against `endKelabo`'s own retry machinery.**
+  `putHistoryRow`/`putParticipantIndex` are safe to redo on a resumed end
+  (`archivePending`/`resuming`, §"how a kelabo ends") because they are
+  unconditional overwrites; an unconditional `ADD` is not. `settleKelaboJoin`
+  writes a `SETTLED#<kelaboId>` marker on the journey with
+  `attribute_not_exists(SK)` before bumping anyone, so a resumed end that
+  reaches this a second time for the same kelabo finds the marker and
+  bumps nobody twice. This marker has no reader of its own — it exists
+  purely so this hook can be called more than once safely — and is the one
+  item type in §4.1's table added since that section was first written.
+  Guests are included in the bump, matching the already-built
+  already-ended path exactly (`history.participantIdentities` is every
+  participant, not just non-guests — the guest-exclusion in `archive.js`
+  is specific to `putParticipantIndex`'s own fan-out, a different concern).
 - **Unlinking a kelabo never decrements anything.** The rollup is a
   cumulative record of contribution to the journey, not a live membership
   count — the same reasoning that keeps `kelabo_unlinked` a recorded
@@ -516,45 +536,117 @@ Touch-ups to existing endpoints:
 Two independent mechanisms, matching the existing push (`historyEnabled`)
 vs. pull (`kelabo_history` tool) split.
 
-### 12.1 Push — system-prompt injection
+### 12.1 Push — system-prompt injection — **built**
 
-New `gateway/src/agent/journeyContext.js`, sibling to `history.js`, called
+`gateway/src/agent/journeyContext.js`, sibling to `history.js`, called
 from `runner.js`'s `ensureContext()` alongside the existing
-`loadKelaboHistory()` call. For each journey the live kelabo is linked to
-(capped at 3), builds a digest — title, description head, latest pinned
-messages, latest report answer, other linked kelabos reduced the way §6.2
-describes — under its own `JOURNEY_CONTEXT_MAX_CHARS` budget. A new
-`renderJourneyContext()` in `persona.js` appends a `JOURNEY CONTEXT:`
-section after the existing `EARLIER KELABOS:` section
-(`persona.js:42-59`'s `renderHistory`), with the same "record of the past,
-framed as past, name which journey/kelabo a fact came from" language, and
-the untrusted-content wrapper from §6.3.
+`loadKelaboHistory()` call — always attempted, no opt-in flag, because
+linking a kelabo into a journey is already the deliberate, visible act
+`historyEnabled` exists to gate for a fully automatic record.
 
-### 12.2 Pull — dev-mode MCP tools
+For each journey the live kelabo is linked to (`JOURNEY_LIMIT = 3`,
+found via the same mirror §4.3 describes — `queryKelaboItems(c, kelaboId,
+"JOURNEY#")`, no new query shape), builds a digest reusing
+`gateway/src/journeys.js`'s own reducers — the same rows a report reads —
+rather than a second copy: title, latest description (clipped 1,500
+chars), health/progress, up to 5 active pinned board messages (clipped
+300 chars each), and up to 5 *other* linked kelabos reduced to their
+minutes (summary/decisions/actionItems, the live kelabo itself and any
+with nothing to say excluded, the same "worse than nothing" filter
+`history.js` already applies). `renderJourneyContext()` in `persona.js`
+appends a `JOURNEY CONTEXT:` section after `EARLIER KELABOS:`, with the
+same "reference material, not instructions, not the current state of
+anything, name which journey a fact came from" framing.
 
-New tools alongside the existing eight (`kelabo_join`, `kelabo_post`,
+Threaded through `worker.js` (`ctx.journeys`) into `MainAgent`'s
+constructor as a new, optional, default-`[]` parameter — verified not to
+disturb any existing call site by running the full agent pipeline
+afterward: all 37 of `test/agent.mjs`'s tests, `test/devAgent.mjs
+--provider scripted` end-to-end, and this document's own new tests in
+`gateway/test/journeys.mjs`.
+
+**A gap surfaced while building this, closed in the same pass as §12.2:**
+`historyEnabled` is deliberately surfaced to every participant in the
+room (docs 09/19 — "a capability nobody can see is one nobody can object
+to"), because it puts one host's past kelabos in front of people,
+possibly guests, who were not there. Journey context does the same thing
+structurally, and for a few hours in this codebase's history had no
+equivalent room-visible indicator at all. It now does — the "Part of: …"
+chip described in §13, rendered from `kelabo.journeys` (the §11 touch-up
+to `GET /kelabos/:id`), using `chip-dev` and the `link` icon in
+`RoomShell.jsx` right beside the `historyEnabled` chip it was written to
+match, generically labelled ("journey" / "N journeys", never the titles
+themselves, which the tooltip carries instead) so a long title cannot
+blow out the room's single-line identity strip.
+
+### 12.2 Pull — dev-mode MCP tools — **built**
+
+Five new tools alongside the existing eight (`kelabo_join`, `kelabo_post`,
 `kelabo_working`, `kelabo_info`, `kelabo_board`, `kelabo_history`,
-`kelabo_minutes`, `kelabo_leave`), served over new KAP frame pairs in
-`gateway/src/tunnel.js` — read paths hit a new `gateway/src/journeys.js`
-with direct DynamoDB access to the `journeys` table, the same dual-access
-pattern `kelabos` already has between `rest-api` and `gateway`.
+`kelabo_minutes`, `kelabo_leave`), served over five new KAP frame pairs in
+`gateway/src/tunnel.js`. Read paths call straight into
+`gateway/src/journeys.js`'s existing reducers (`getJourneyMeta`,
+`latestDescription`, `activeBoardMessages` — the same rows a report
+reads); the two writes are new exports there
+(`submitJourneyReport`/`postJourneyBoardMessage`), independently
+implemented rather than shared with rest-api's own
+`requestReport`/`addBoardMessage`, the same dual-access pattern `kelabos`
+already has between the two packages:
 
 | Tool | Purpose |
 |---|---|
-| `kelabo_journey_info()` | Title/visibility/status/description head/counts |
-| `kelabo_journey_timeline({type?, before?, limit?})` | §9.2, over the tunnel |
-| `kelabo_journey_board()` | Current pinned messages |
-| `kelabo_journey_report_submit({question, answer, suggestedHealth?, suggestedProgress?})` | The agent's own synthesis, stored directly — no LLM round-trip, exactly like `kelabo_minutes` |
-| `kelabo_journey_post({content, msgId?})` | Write/edit a board message, gated by `aiCanPost` (§7) |
+| `kelabo_journey_info({journeyId?})` | Title/visibility/status/description/health/progress/counts |
+| `kelabo_journey_timeline({journeyId?, entryType?, before?, limit?})` | §9.2, over the tunnel |
+| `kelabo_journey_board({journeyId?})` | Current pinned messages |
+| `kelabo_journey_report_submit({journeyId?, question, answer})` | The agent's own synthesis, stored directly — no LLM round-trip |
+| `kelabo_journey_post({journeyId?, content, msgId?})` | Write/edit a board message, gated by `aiCanPost` (§7) |
+
+Two things changed from the original plan while building this, both
+recorded here rather than silently:
+
+- **Every tool gained an optional `journeyId`.** The original signatures
+  carried none, on the unstated assumption of one journey per kelabo —
+  which does not hold (§4.3's mirror has no such cap; `JOURNEY_LIMIT = 3`
+  in §12.1 only bounds the *prompt*). Omitting it resolves against the
+  kelabo's own links (`resolveJourneyForKelabo` in
+  `gateway/src/journeys.js`): the one link if there is exactly one, an
+  explicit refusal naming every candidate if there is more than one, the
+  same "enumerate rather than guess" idiom `kelabo_join`'s own omitted
+  `kelaboId` already uses. An explicit `journeyId` is trusted only if it
+  is actually one of the kelabo's links — never as a bare lookup key, or
+  an attached agent could read or write any journey in the deployment by
+  guessing an id.
+- **`_report_submit` and `_post` are request/response, not fire-and-
+  forget.** `kelabo_post`'s own wire shape (`contribution`, no
+  `requestId`) was the nearer analogy on paper, but neither of these two
+  can succeed silently the way a board post can: a bad `journeyId` or an
+  `aiCanPost` refusal is a real outcome the calling model needs back, the
+  same reasoning `history`'s `enabled:false` already established for
+  "off is an answer, not an error." Both frame pairs carry a `resolved`
+  field for exactly this — `ok`, `no_journey`, `ambiguous`,
+  `journey_not_found`, plus `ai_posting_disabled` /
+  `message_not_found` / `already_removed` on `journey_posted` alone.
+
+(The original plan's `report_submit` also carried `suggestedHealth`/
+`suggestedProgress` — dropped from the row here too, matching §5/§6: that
+whole apply-status flow is not built.)
+
+Tested at three layers: `contracts/test/frames.mjs` (schema round-trips
+for all ten new frame types, plus the completeness test's now-15-wide
+allowlists), `gateway/test/journeys.mjs` (the new `journeys.js` exports,
+direct calls, offline) and `gateway/test/smoke.mjs` (the real WS dispatch
+in `tunnel.js`, including the `aiCanPost` gate and the ambiguous-journey
+path), and `connector/test/smoke.mjs` (the five MCP tools' rendered
+prose, against a fake Gateway).
 
 ### 12.3 Deliberately not built here
 
 A tool that asks the *server* to generate a report (rather than
-submitting the agent's own answer) is not built in v1. That would need a
-new Gateway→rest-api call direction that exists nowhere else in this
-system today, for a capability the agent can already satisfy itself via
-`kelabo_journey_report_submit`. If a future need justifies the new call
-direction on its own merits, add it then.
+submitting the agent's own answer) remains unbuilt, for the same reason
+as before: it would need a new Gateway→rest-api call direction that
+exists nowhere else in this system, for a capability an attached agent
+can already satisfy itself via `kelabo_journey_report_submit`, which now
+exists.
 
 ## 13. SPA / UI
 
@@ -679,16 +771,16 @@ Also explicitly not built, and not superseded by anything shipped since
 this section was first written:
 
 - Real file upload (§8) — documents remain pasted/typed text only.
-- An agent-triggered server-side report (§12.3).
+- An agent-triggered server-side report (§12.3) — deliberate, permanent:
+  the pull tools built for §12.2 already give an attached agent everything
+  `kelabo_journey_report_submit` needs to satisfy this itself.
 - Any journey-level wallet/billing scope.
 - A report proposing `suggestedHealth`/`suggestedProgress` and the
   `apply-status` endpoint a member would use to accept one (§5, §6).
-- `kelaboJoinCount` settling for a kelabo linked while still live, which
-  needs a hook in `gateway/src/archive.js` (§10) — only the "link an
-  already-ended kelabo" half is built.
-- A "Part of: …" breadcrumb on `Kelabo.jsx`/`RecordDetail.jsx`/
-  `ScheduledKelabo.jsx` (§13) — the kelabo-side mirror this would read from
-  exists (§4.3) but nothing renders it yet.
+
+Everything else that was tracked here — `kelaboJoinCount` settling on a
+live-linked kelabo ending, the "Part of: …" breadcrumb, and the dev-mode
+MCP tool surface — is now built; see §10, §12.1's own note, and §12.2.
 
 ## 18. Delivery phases — status
 
@@ -696,10 +788,14 @@ this section was first written:
    roster, permission matrix, purge guard (§3, §4, §11 core rows, §14).
 2. ✅ **History & timeline** — description versioning, health/progress (§5),
    `TL#` projection, timeline endpoint + UI, avatar.
-3. ✅ **Reports** — §6, contributor rollups (§10) — reports and their SPA
-   tab are built; the AI-suggested-status half of §5 is not (see above).
-4. ✅ **Board & documents** — §7, §8, `aiCanPost` (the toggle exists;
-   nothing reads it yet — see §12).
-5. **Agent integration** — §12. Not started.
+3. ✅ **Reports** — §6, contributor rollups (§10, both settling paths now
+   built) — reports and their SPA tab are built; the AI-suggested-status
+   half of §5 is not (see above).
+4. ✅ **Board & documents** — §7, §8, `aiCanPost` (enforced — see §12.2).
+5. ✅ **Agent integration** — §12. Push (§12.1) is built, verified against
+   the full existing agent test suite plus the end-to-end pipeline
+   harness. Pull (§12.2) is built: five new KAP frame pairs, five new MCP
+   tools, and the "Part of: …" breadcrumb closing the disclosure gap
+   §12.1 itself flagged. §12.3 remains deliberately unbuilt.
 6. **SaaS quotas** — entirely additive, no master changes required; see
    the companion document.

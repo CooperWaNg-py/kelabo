@@ -425,6 +425,20 @@ export function RoomShell({
                 <Icon name="book-open" size={12} />past kelabos
               </span>
             )}
+            {/* Same reasoning as the chip above, for a different source: a
+                journey's description, pinned notes and other linked kelabos
+                reach the assistant with no opt-in of its own — linking this
+                kelabo into a journey was already the deliberate act. Named
+                generically ("journey"/"N journeys"), not by title, so a long
+                title cannot blow out this strip — the tooltip carries them. */}
+            {Array.isArray(kelabo?.journeys) && kelabo.journeys.length > 0 && (
+              <span
+                className="chip chip-dev"
+                title={`Part of ${kelabo.journeys.length === 1 ? 'a journey' : kelabo.journeys.length + ' journeys'}: ${kelabo.journeys.map(j => j.title || 'Untitled journey').join(', ')}. The assistant may draw on that journey's description, pinned notes and other linked kelabos when it answers.`}
+              >
+                <Icon name="link" size={12} />{kelabo.journeys.length === 1 ? 'journey' : `${kelabo.journeys.length} journeys`}
+              </span>
+            )}
             {agentPresent && (
               <span
                 className="chip chip-dev"

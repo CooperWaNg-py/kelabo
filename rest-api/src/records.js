@@ -162,6 +162,16 @@ export function createRecords({ config, db, s3 }) {
         console.warn(JSON.stringify({ level: "warn", msg: "archive s3 fetch failed", archiveId, error: String(e) }));
       }
     }
+    // A kelabo's `JOURNEY#` mirror (docs 20 §4.3) outlives its own ending —
+    // only a purge deletes it (§14.3's guard is exactly this fact) — so a
+    // record can still say which journeys it is part of. Same `{id, title,
+    // visibility}` shape as GET /kelabos/:id, and the same `row.kelaboId ||
+    // archiveId` resolution `purgeOne` above already uses for this id.
+    const journeys = (await db.listKelaboJourneyLinks(row.kelaboId || archiveId).catch(() => [])).map((l) => ({
+      id: l.journeyId,
+      title: l.journeyTitleSnapshot || "",
+      visibility: l.journeyVisibilitySnapshot,
+    }));
     return {
       archiveId,
       title: row.titleGenerated ? row.title : (archive?.title ?? row.title),
@@ -173,6 +183,7 @@ export function createRecords({ config, db, s3 }) {
       transcript: archive?.transcript ?? [],
       board: archive?.board ?? [],
       ...(archive?.minutes ? { minutes: archive.minutes } : {}),
+      journeys,
     };
   }
 

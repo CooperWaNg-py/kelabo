@@ -4,6 +4,7 @@ import {
   updateMeta,
   queryUtt,
   queryContrib,
+  queryKelaboItems,
   putHistoryRow,
   putParticipantIndex,
   deleteHostActive,
@@ -12,6 +13,7 @@ import {
   getMinutes,
 } from "./db.js";
 import { parseMinutesJson } from "./agent/serverAgentRunner.js";
+import { settleKelaboJoin } from "./journeys.js";
 
 export async function endKelabo(c, kelaboId, { retry = false } = {}) {
   const meta = await getMeta(c, kelaboId);
@@ -149,6 +151,24 @@ export async function endKelabo(c, kelaboId, { retry = false } = {}) {
     await deleteHostActive(c, meta.hostIdentity);
   } catch (err) {
     c.logError("meta_end_update_failed", err, { kelaboId });
+  }
+
+  // Settle kelaboJoinCount for every journey this kelabo is linked to (docs
+  // 20 §10 — closing the half deferred when linking-an-already-ended-kelabo
+  // was first built). Independent of whether the history write above
+  // succeeded: a journey's roster reflects this kelabo having happened
+  // either way, and `settleKelaboJoin` is itself safe to call more than once
+  // (see its own comment) so this cannot double-count on a retried end.
+  try {
+    const links = await queryKelaboItems(c, kelaboId, "JOURNEY#");
+    const participantIdentities = participants.map((p) => p.identity);
+    for (const link of links) {
+      await settleKelaboJoin(c, link.journeyId, kelaboId, participantIdentities).catch((err) =>
+        c.logError("journey_join_settle_failed", err, { kelaboId, journeyId: link.journeyId })
+      );
+    }
+  } catch (err) {
+    c.logError("journey_link_lookup_failed", err, { kelaboId });
   }
 
   // Drop the call roster before closing the streams: `ended` ends every SSE

@@ -184,9 +184,16 @@ export function createScheduling({ config, db, mailer, internal }) {
     const invites = await db.listInvites(kelaboId);
     const isHost = meta.hostIdentity === identity;
     if (!isHost && !invites.some((i) => i.inviteKey === identity)) throw err(403, "forbidden");
+    // Docs 20 §4.3/§11 touch-up — same shape and reasoning as GET /kelabos/:id.
+    const journeys = (await db.listKelaboJourneyLinks(kelaboId).catch(() => [])).map((l) => ({
+      id: l.journeyId,
+      title: l.journeyTitleSnapshot || "",
+      visibility: l.journeyVisibilitySnapshot,
+    }));
     return {
       ...toScheduledSummary(meta, invites),
       isHost,
+      journeys,
       invites: await Promise.all(
         invites.map(async (i) => ({
           email: i.email,

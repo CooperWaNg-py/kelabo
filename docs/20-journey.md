@@ -1,9 +1,19 @@
 # 20 — Journey
 
-Status: **design, not built** — 2026-08-22. Precedes the code, in the same
-spirit as doc 18: it says what to build and why. Component docs (01-spa,
-02-rest-api, 03-gateway, 08-database, 09-data-flows, 10-data-contracts) gain
-their own updates once each piece of this actually ships.
+Status: **mostly implemented** — 2026-08-22. Built: the data model (§4),
+lifecycle/permissions (§3), health/progress (§5), reports (§6), the message
+board (§7), documents (§8), the timeline (§9), contributor stats (§10, one
+of its two settling paths — see there), the full REST API (§11), and the
+SPA (§13, minus a "Part of: …" breadcrumb on existing kelabo pages). Not
+built: the agent/MCP context integration (§12) and everything under §17.
+Component docs (01-spa, 02-rest-api, 03-gateway, 08-database, 09-data-flows,
+10-data-contracts) still describe pre-Journey behaviour and have not yet
+been updated to include it — that update is itself still open work.
+
+§6.1 records a correction made mid-implementation: the original draft put
+report generation in rest-api and was wrong to. Read it if you are
+tempted to route a new job through rest-api that calls the LLM — the
+reasoning there is the general lesson, not just this one case's fix.
 
 Depends on nothing that does not already exist on master. Adds one table,
 one new item type on the existing `kelabos` table, a new REST module, a
@@ -162,11 +172,11 @@ never auto-expires; every removal in this document is an explicit write.
 | `STATUS#<pad(version,6)>` | Health/progress snapshot (immutable) — §5 | `version, health, progress, note?, setBy, setAt, source, reportId?` |
 | `ACCESSOR#<identity>` | Private-journey roster entry | `identity, displayName, avatarVariant, addedBy, addedAt` |
 | `LINK#<kelaboId>` | Kelabo membership (forward) | `kelaboId, titleSnapshot, hostIdentitySnapshot, linkedBy, linkedAt, statusSnapshot` |
-| `REPORT#<pad(at,13)>#<reportId>` | One report, append-only — §6 | `reportId, question, requestedBy, requestedAt, status, generatedAt?, answer, suggestedHealth?, suggestedProgress?, sourceKelaboIds[], error?` |
+| `REPORT#<reportId>` | One report, append-only — §6 | `reportId, question, requestedBy, requestedAt, status(pending\|ready\|failed), answer?, generatedAt?, error?` |
 | `BOARDMSG#<msgId>` | Board message, current head — §7 | `msgId, content, createdBy, createdAt, updatedBy?, updatedAt?, version, removed, removedBy?, removedAt?` |
 | `BOARDMSG#<msgId>#V#<pad(version,6)>` | Board message version | `msgId, version, content, action, actor, at` |
 | `DOC#<docId>` | Document, current head — §8 | `docId, title, content \| s3Key+excerpt, sizeBytes, addedBy, addedAt, removed, removedBy?, removedAt?` |
-| `CONTRIBUTOR#<identity>` | Per-person rollup — §10 | `identity, displayName, avatarVariant, kelaboJoinCount, reportRequestCount, firstSeenAt, lastActiveAt` |
+| `CONTRIBUTOR#<identity>` | Per-person rollup — §10 | `contributorIdentity, kelaboJoinCount, reportRequestCount, firstSeenAt, lastActiveAt` |
 | `TL#<pad(at,13)>#<rand6>` | Timeline projection row — §9 | `type, refSk, summary, actor, at` |
 
 Sort-key padding follows the existing convention exactly: `at` values are
@@ -253,13 +263,13 @@ overrides `:130-133`) are already documented as independent of the
 meaning — green/yellow/red maps onto them directly rather than inventing a
 parallel palette.
 
-A report (§6) may propose `suggestedHealth`/`suggestedProgress` based on
-everything it read, but never writes them directly — an LLM silently
-changing a visible project-health signal is the wrong trust boundary. A
-member applies a suggestion explicitly
-(`POST /journeys/:id/reports/:reportId/apply-status`), which writes a
-normal `STATUS#` version with `source: "ai-suggested"` and the originating
-`reportId`, fully auditable in history exactly like a manual update.
+**Not built in this pass:** a report proposing `suggestedHealth`/
+`suggestedProgress` and a member applying it via
+`POST /journeys/:id/reports/:reportId/apply-status`. The reasoning for why
+it should stay a proposal a human applies, never something the LLM writes
+directly, is unchanged from the original design — an LLM silently changing
+a visible project-health signal is the wrong trust boundary — this is
+scope not yet built, not a decision reversed.
 
 ## 6. Reports
 
@@ -270,24 +280,48 @@ with kelabo's own `MINUTES` item, which is a single unversioned slot; a
 journey report is append-only by design because the running history of
 what was asked and answered *is* the value).
 
-### 6.1 Why this runs in rest-api, not the Gateway
+### 6.1 Why this runs in the Gateway after all — a correction made while building it
 
-Kelabo minutes generation lives inside the Gateway ECS task specifically
-because it needs things only that process holds: a warm, per-kelabo
-resident transcript, potential sub-agent web/MCP research with no
-15-minute Lambda cap, and — in dev mode — the live WSS tunnel to a
-developer's own coding agent (ARCHITECTURE.md §15.6a). A journey report
-needs **none** of these: it is a single bounded synthesis over content the
-`journeys`/`kelabos` tables already hold, with no live session, no
-sub-agent dispatch, no tunnel. That makes it a plain control-plane job —
-the shape rest-api's Lambda already handles for everything else in this
-document — not a reason to route a new call through the Gateway.
+The first draft of this section argued the opposite: that a journey report
+needs none of what makes kelabo minutes generation Gateway-resident (a
+warm resident transcript, sub-agent dispatch, the dev-tunnel), so it should
+run as a plain control-plane job in rest-api's Lambda. That reasoning about
+*what the job needs* is still correct — but it missed a harder constraint
+discovered while implementing it: **the LLM credential itself is not
+readable from rest-api, by design.** `infra/lib/lambda-stack.js` grants the
+REST API's role only `secretsmanager:DescribeSecret` on the LLM secret —
+enough to answer "is the assistant configured at all" for the capability
+map (docs 19 §3) — never `GetSecretValue`. The comment there is explicit:
+*"those values stay gateway-owned."* Only `infra/lib/gateway-ecs-stack.js`
+grants the Gateway's task role `GetSecretValue` on it.
 
-The one new capability this requires: rest-api needs an LLM client, which
-it does not have today (LLM calls are exclusively
-`gateway/src/agent/llm.js` today). Recommend extracting the
-provider-agnostic call into `contracts/` so neither package duplicates it,
-rather than giving rest-api its own copy.
+Giving rest-api its own readable copy of the same credential would work
+mechanically, but it would be re-opening a boundary this codebase drew on
+purpose — the LLM key's blast radius is deliberately confined to one
+component. So generation still happens in the Gateway, reusing
+`gateway/src/agent/llm.js` directly (no `contracts/` extraction needed: it
+already has zero internal dependencies, and both the existing agent code
+and this new code live in the same package, so there is nothing to share
+across a package boundary in the first place). The call reaches it through
+the **existing** rest-api → Gateway internal-request direction —
+`POST /internal/journeys/:id/report`, alongside the `end`/`minutes`/
+`cancel`/`reschedule` actions already dispatched that way
+(`gateway/src/server.js`) — not a new direction invented for this.
+
+Concretely: `POST /journeys/:id/reports` (rest-api) creates the pending
+row, counts the ask (§10), and *awaits* `internal.requestJourneyReport`
+the same way `requestMinutes` is awaited; the Gateway's handler
+(`gateway/src/journeys.js`, `generateJourneyReport`) reads the journey's
+own context directly from the `journeys` table (new read+write grant on
+`gateway-ecs-stack.js`, alongside its existing `kelabos`/`history` access),
+calls the LLM, and writes the finished row back — `ready` with an answer,
+or `failed` with a reason, always one or the other, never left `pending`
+forever. rest-api's own response carries only `{reportId, status}`; the
+client re-fetches the finished row via `GET`, the same "a mutating call
+returns a summary, a follow-up GET returns the resource" shape every other
+create endpoint in this document already uses. If rest-api cannot reach
+the Gateway at all, it marks the row `failed: gateway_unreachable` itself
+— the one failure mode the Gateway's own handler can never observe.
 
 ### 6.2 Context assembly and size discipline
 
@@ -295,18 +329,27 @@ The existing pipeline enforces **no size limit** on what it feeds an LLM
 today — the main-agent thread and the minutes prompt both grow unbounded
 (`runner.js:121-127`'s own comment: "no limit... the entire history, not
 just a rolling window"). A journey report must not repeat that; it brings
-its own explicit budget, modelled on the one place the pipeline already
-does this — `gateway/src/agent/history.js`'s `HISTORY_LIMIT = 8` plus
-per-field truncation:
+its own explicit budget in `gateway/src/journeys.js`'s `buildContext()`,
+modelled on the one place the pipeline already does this —
+`gateway/src/agent/history.js`'s `HISTORY_LIMIT = 8` plus per-field
+truncation — using the same reduction `history.js` already applies to a
+past kelabo's minutes (summary, decisions, actionItems; topics and
+findings dropped):
 
-- Description head, capped.
-- Most recent pinned board messages, capped count and length each.
-- Most recent documents, capped count and length each.
-- Every linked kelabo's stored `MINUTES`, reduced exactly like
-  `history.js` already reduces past kelabos — summary, decisions,
-  actionItems; topics and findings dropped — capped count.
-- Prior journey reports, capped count and length each.
-- The new question, as the trailing instruction.
+- Description: latest version only, capped at 4,000 characters.
+- Active (non-removed) pinned board messages: newest 10, 500 characters each.
+- Active (non-removed) documents: newest 5, 3,000 characters each.
+- Linked kelabos, newest 8 (`LINKED_KELABO_LIMIT`, matching `HISTORY_LIMIT`):
+  each reduced to its stored `MINUTES` — summary, decisions, actionItems —
+  capped at 1,500 characters combined.
+- Prior *ready* reports on the same journey: newest 3, question capped at
+  200 characters, answer at 1,000.
+- The new question itself, capped at 2,000 characters, as the trailing
+  instruction.
+
+A removed board message or document is excluded structurally — the query
+only ever looks at active items — not filtered after the fact, so there is
+no code path where a removed one could leak into a prompt by omission.
 
 ### 6.3 Untrusted content, explicitly
 
@@ -407,14 +450,20 @@ cheapest page the most expensive one as a journey grows.
 - **`reportRequestCount`** — `ADD 1` on the requester's row at report
   creation. Counts every request, including ones that later fail — the
   count is about the act of asking.
-- **`kelaboJoinCount`** — settles when a linked kelabo *ends* (or
-  immediately, if it was already ended at link time): for each of that
-  kelabo's final participant identities, `ADD kelaboJoinCount 1`. A
-  currently-live linked kelabo does not update anyone's count until it
-  ends — this avoids a new write hook on the kelabo-join hot path, and
-  mirrors the existing precedent of `participantCount`/`boardCount`
-  (`gateway/src/archive.js:123-124,319-320`) being snapshotted once, at
-  archive time, rather than tracked live.
+- **`kelaboJoinCount`** — settles when a linked kelabo's participant list
+  is final. Two ways that can happen, only one of them built so far:
+  - **Built:** linking an *already-ended* kelabo settles immediately —
+    `linkKelabo` reads the `history` row's `participantIdentities` and
+    bumps each one, rest-api-side, using the same `db.getHistory` records.js
+    already calls.
+  - **Not built:** a kelabo linked while still *live*, which later ends,
+    does not settle at all yet. That half needs a hook in the Gateway's
+    own end-of-kelabo path (`gateway/src/archive.js`) — checking a newly-
+    ended kelabo's `JOURNEY#` mirror rows and bumping each of *those*
+    journeys' contributors — deliberately deferred to avoid touching that
+    file, and the kelabo-end path it sits on, in the same change that
+    first gave the Gateway write access to a new table. The common case
+    (a journey linking a kelabo that already happened) is unaffected.
 - **Unlinking a kelabo never decrements anything.** The rollup is a
   cumulative record of contribution to the journey, not a live membership
   count — the same reasoning that keeps `kelabo_unlinked` a recorded
@@ -626,18 +675,31 @@ separately, additively, on the `saas` branch (private repo) in
 there. A self-hosted deployment gets the entire feature with no tuning,
 exactly as doc 19 promises for every capability in this system.
 
-Also explicitly not built: real file upload (§8), an agent-triggered
-server-side report (§12.3), and any journey-level wallet/billing scope
-(mentioned only as a future option in the companion saas document).
+Also explicitly not built, and not superseded by anything shipped since
+this section was first written:
 
-## 18. Suggested delivery phases
+- Real file upload (§8) — documents remain pasted/typed text only.
+- An agent-triggered server-side report (§12.3).
+- Any journey-level wallet/billing scope.
+- A report proposing `suggestedHealth`/`suggestedProgress` and the
+  `apply-status` endpoint a member would use to accept one (§5, §6).
+- `kelaboJoinCount` settling for a kelabo linked while still live, which
+  needs a hook in `gateway/src/archive.js` (§10) — only the "link an
+  already-ended kelabo" half is built.
+- A "Part of: …" breadcrumb on `Kelabo.jsx`/`RecordDetail.jsx`/
+  `ScheduledKelabo.jsx` (§13) — the kelabo-side mirror this would read from
+  exists (§4.3) but nothing renders it yet.
 
-1. **Core** — table, GSIs, CRUD, link/unlink, visibility + accessor
+## 18. Delivery phases — status
+
+1. ✅ **Core** — table, GSIs, CRUD, link/unlink, visibility + accessor
    roster, permission matrix, purge guard (§3, §4, §11 core rows, §14).
-2. **History & timeline** — description versioning, health/progress (§5),
+2. ✅ **History & timeline** — description versioning, health/progress (§5),
    `TL#` projection, timeline endpoint + UI, avatar.
-3. **Reports** — §6, contributor rollups (§10).
-4. **Board & documents** — §7, §8, `aiCanPost`.
-5. **Agent integration** — §12.
+3. ✅ **Reports** — §6, contributor rollups (§10) — reports and their SPA
+   tab are built; the AI-suggested-status half of §5 is not (see above).
+4. ✅ **Board & documents** — §7, §8, `aiCanPost` (the toggle exists;
+   nothing reads it yet — see §12).
+5. **Agent integration** — §12. Not started.
 6. **SaaS quotas** — entirely additive, no master changes required; see
    the companion document.

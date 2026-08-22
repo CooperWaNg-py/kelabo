@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { RTC_MODES } from "./constants.js";
+import { RTC_MODES, JOURNEY_VISIBILITIES } from "./constants.js";
 
 export const utteranceSchema = z.object({
   kelaboId: z.string().min(1),
@@ -258,6 +258,11 @@ export const createKelaboBodySchema = z.object({
   // a decision a host has to actually make, and a default that quietly said yes
   // would be making it for them every time.
   historyEnabled: z.boolean().optional(),
+  // Link into one or more existing journeys at creation time (docs 20 §11).
+  // No membership check is needed here beyond zod: the caller is about to
+  // become this kelabo's host, which already satisfies journeys.linkKelabo's
+  // own "host or participant of the target" requirement.
+  journeyIds: z.array(z.string().min(1).max(64)).max(10).optional(),
 });
 
 // A scheduled kelabo is the same kelabo in an earlier state, not a different
@@ -646,4 +651,58 @@ export const sttSessionSchema = z.object({
   token: z.string().min(1),
   expiresInSeconds: z.number().int().positive(),
   params: z.record(z.unknown()),
+});
+
+// --- Journey (docs 20) -------------------------------------------------------
+//
+// A persistent container linking related kelabos so description, decisions
+// and documents carry from one meeting to the next, for people and the
+// agent. Full design: docs/20-journey.md.
+
+export const createJourneyBodySchema = z.object({
+  title: z.string().min(1).max(80),
+  // The free-text description's first version. Optional: a journey may be
+  // created empty and described later.
+  description: z.string().max(20000).optional(),
+  visibility: z.enum(JOURNEY_VISIBILITIES).default("private"),
+});
+
+// Every field optional; the handler rejects an empty body with
+// `nothing_to_change`, which zod cannot express on its own — the same
+// contract rescheduleKelaboBodySchema already uses. `avatarVariant` is the
+// identicon re-roll, same shape as the personal one in userSettingsSchema —
+// a client-chosen salt, owner-only to set (docs 20 §13).
+export const patchJourneyBodySchema = z.object({
+  title: z.string().min(1).max(80).optional(),
+  visibility: z.enum(JOURNEY_VISIBILITIES).optional(),
+  avatarVariant: z.number().int().min(0).max(999999).optional(),
+});
+
+// POST /journeys/:id/status — health/progress (docs 20 §5), a combined
+// snapshot rather than two independently-versioned fields: people report
+// them together ("60%, yellow, because X"). Every field optional; the
+// handler rejects a body with none of the three present. `null` explicitly
+// clears a field back to "unset" — genuinely absent, not defaulted.
+export const journeyStatusBodySchema = z.object({
+  health: z.enum(["green", "yellow", "red"]).nullable().optional(),
+  progress: z.number().int().min(0).max(100).nullable().optional(),
+  note: z.string().max(500).optional(),
+});
+
+// POST /journeys/:id/description — a new, immutable version. `changeNote` is
+// the human's own one-line "why", shown beside the version in history.
+export const journeyDescriptionBodySchema = z.object({
+  markdown: z.string().min(1).max(20000),
+  changeNote: z.string().max(200).optional(),
+});
+
+// POST /journeys/:id/accessors — owner-only, private journeys only.
+export const journeyAccessorBodySchema = z.object({
+  identity: z.string().email().max(254),
+});
+
+// POST /journeys/:id/kelabos — the caller must already be host or
+// participant of the kelabo being linked (checked server-side, not here).
+export const journeyLinkKelaboBodySchema = z.object({
+  kelaboId: z.string().min(1).max(128),
 });

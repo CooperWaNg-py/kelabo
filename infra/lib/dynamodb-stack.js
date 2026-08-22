@@ -125,7 +125,35 @@ export class DynamoDbStack extends Stack {
       timeToLiveAttribute: "ttl",
     });
 
-    this.tables = { kelabos, history, users, otp, refresh, mcp, contacts };
+    // Journey (docs 20). One partition per journey, `PK = JOURNEY#<id>`,
+    // holding META, a DESC# version chain, ACCESSOR# (private-journey
+    // roster), and LINK# (kelabo membership) items by SK prefix. No `ttl` —
+    // a journey never auto-expires; every removal in docs 20 is an explicit
+    // write, unlike the orphaned-child trap TTL creates on `kelabos`.
+    const journeys = table("JourneysTable", names.journeys, {
+      partitionKey: { name: "PK", type: S },
+      sortKey: { name: "SK", type: S },
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+    });
+    // Sparse on `tenantStatus`, which only META carries — "journeys in my
+    // tenant" (docs 20 §4.2), the same trick kelabos.status-index plays.
+    journeys.addGlobalSecondaryIndex({
+      indexName: "tenant-status-index",
+      partitionKey: { name: "tenantStatus", type: S },
+      sortKey: { name: "updatedAt", type: N },
+      projectionType: dynamodb.ProjectionType.ALL,
+    });
+    // Sparse on `accessorIdentity`, which only an ACCESSOR# item carries —
+    // "private journeys I'm an accessor of", a structural copy of kelabos'
+    // invitee-index.
+    journeys.addGlobalSecondaryIndex({
+      indexName: "accessor-index",
+      partitionKey: { name: "accessorIdentity", type: S },
+      sortKey: { name: "addedAt", type: N },
+      projectionType: dynamodb.ProjectionType.ALL,
+    });
+
+    this.tables = { kelabos, history, users, otp, refresh, mcp, contacts, journeys };
 
     this.archiveBucket = new s3.Bucket(this, "ArchiveBucket", {
       bucketName: cfg.archiveBucket.toLowerCase().replace(/[^a-z0-9.-]/g, "-"),

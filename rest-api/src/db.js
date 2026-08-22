@@ -20,6 +20,11 @@ import {
 const CONTRIB_KEY_WIDTH = 13;
 const pad = (n, width = CONTRIB_KEY_WIDTH) => String(Math.max(0, Math.floor(n))).padStart(width, "0");
 
+// Same-millisecond tie-breaker for a timeline row's sort key (docs 20 §9.1) —
+// not a secret, not an identity, exactly like the CONTRIB# suffix the Gateway
+// writes (`gateway/src/db.js`'s `Math.random().toString(36)`).
+const randSuffix = () => Math.random().toString(36).slice(2, 8);
+
 export function createDb({ config, client } = {}) {
   const doc =
     client ||
@@ -392,6 +397,413 @@ export function createDb({ config, client } = {}) {
       })
     );
     return (res.Items || []).filter((r) => r.state === "accepted").map((r) => r.peer);
+  }
+
+  // --- Journeys (docs 20) ---------------------------------------------------
+  //
+  // One partition per journey, `PK = JOURNEY#<id>`. META, a DESC# version
+  // chain, ACCESSOR# (private-journey roster) and LINK# (kelabo membership)
+  // items share it. A journey's own forward LINK# is mirrored onto the
+  // KELABO's own partition as a `JOURNEY#<id>` item — written in the same
+  // transaction as the forward link — so "does this kelabo belong to any
+  // journey" is a query on the kelabo's own partition: no new GSI, no
+  // cross-table scan (docs 20 §4.3).
+
+  // Description versions are their own, narrower sort-key width: six digits
+  // is ample for how many edits one journey's description will ever have,
+  // and keeping it distinct from CONTRIB_KEY_WIDTH documents that the two
+  // are unrelated contracts that happen to both zero-pad a counter.
+  const DESC_KEY_WIDTH = 6;
+  const padVersion = (n) => String(Math.max(0, Math.floor(n))).padStart(DESC_KEY_WIDTH, "0");
+
+  async function createJourney(meta) {
+    await doc.send(
+      new PutCommand({
+        TableName: T.journeys,
+        Item: { PK: `JOURNEY#${meta.journeyId}`, SK: "META", ...meta },
+        ConditionExpression: "attribute_not_exists(PK)",
+      })
+    );
+  }
+
+  async function getJourneyMeta(journeyId) {
+    const res = await doc.send(
+      new GetCommand({ TableName: T.journeys, Key: { PK: `JOURNEY#${journeyId}`, SK: "META" } })
+    );
+    return res.Item || null;
+  }
+
+  async function updateJourneyMeta(journeyId, updates) {
+    const names = {};
+    const values = {};
+    const sets = [];
+    const removes = [];
+    for (const [k, v] of Object.entries(updates)) {
+      if (v === null) {
+        removes.push(`#${k}`);
+        names[`#${k}`] = k;
+      } else {
+        sets.push(`#${k} = :${k}`);
+        names[`#${k}`] = k;
+        values[`:${k}`] = v;
+      }
+    }
+    const expr = [sets.length ? `SET ${sets.join(", ")}` : "", removes.length ? `REMOVE ${removes.join(", ")}` : ""]
+      .filter(Boolean)
+      .join(" ");
+    await doc.send(
+      new UpdateCommand({
+        TableName: T.journeys,
+        Key: { PK: `JOURNEY#${journeyId}`, SK: "META" },
+        UpdateExpression: expr,
+        ExpressionAttributeNames: names,
+        ...(Object.keys(values).length ? { ExpressionAttributeValues: values } : {}),
+      })
+    );
+  }
+
+  // Owner-only structural transitions, conditional on the status they expect —
+  // the same shape as startScheduledKelabo/cancelScheduledKelabo above, so a
+  // double-click or a race resolves to a clean condition failure rather than a
+  // double transition.
+  async function completeJourney({ journeyId, tenantId, completedAt, completedBy }) {
+    await doc.send(
+      new UpdateCommand({
+        TableName: T.journeys,
+        Key: { PK: `JOURNEY#${journeyId}`, SK: "META" },
+        UpdateExpression:
+          "SET #status = :completed, tenantStatus = :ts, completedAt = :now, completedBy = :by, updatedAt = :now",
+        ConditionExpression: "#status = :active",
+        ExpressionAttributeNames: { "#status": "status" },
+        ExpressionAttributeValues: {
+          ":completed": "completed",
+          ":active": "active",
+          ":ts": `${tenantId}#completed`,
+          ":now": completedAt,
+          ":by": completedBy,
+        },
+      })
+    );
+  }
+
+  async function reopenJourney({ journeyId, tenantId, reopenedAt }) {
+    await doc.send(
+      new UpdateCommand({
+        TableName: T.journeys,
+        Key: { PK: `JOURNEY#${journeyId}`, SK: "META" },
+        UpdateExpression: "SET #status = :active, tenantStatus = :ts, reopenedAt = :now, updatedAt = :now",
+        ConditionExpression: "#status = :completed",
+        ExpressionAttributeNames: { "#status": "status" },
+        ExpressionAttributeValues: {
+          ":active": "active",
+          ":completed": "completed",
+          ":ts": `${tenantId}#active`,
+          ":now": reopenedAt,
+        },
+      })
+    );
+  }
+
+  /** Every ACTIVE-or-COMPLETED journey at one tenant, by status — the same
+   *  sparse-on-`tenantStatus` trick `listKelabosByStatus` plays. */
+  async function listJourneysByTenantStatus(tenantId, status) {
+    const res = await doc.send(
+      new QueryCommand({
+        TableName: T.journeys,
+        IndexName: "tenant-status-index",
+        KeyConditionExpression: "tenantStatus = :ts",
+        ScanIndexForward: false,
+        ExpressionAttributeValues: { ":ts": `${tenantId}#${status}` },
+      })
+    );
+    return res.Items || [];
+  }
+
+  /** Every PRIVATE journey `identity` is an explicit accessor of, across every
+   *  tenant — the `accessor-index` GSI, sparse on `accessorIdentity`. */
+  async function listAccessorJourneys(identity) {
+    const res = await doc.send(
+      new QueryCommand({
+        TableName: T.journeys,
+        IndexName: "accessor-index",
+        KeyConditionExpression: "accessorIdentity = :i",
+        ExpressionAttributeValues: { ":i": identity },
+      })
+    );
+    return res.Items || [];
+  }
+
+  async function putJourneyDescriptionVersion(journeyId, version) {
+    await doc.send(
+      new PutCommand({
+        TableName: T.journeys,
+        Item: { PK: `JOURNEY#${journeyId}`, SK: `DESC#${padVersion(version.version)}`, ...version },
+      })
+    );
+  }
+
+  async function listJourneyDescriptionVersions(journeyId) {
+    const res = await doc.send(
+      new QueryCommand({
+        TableName: T.journeys,
+        KeyConditionExpression: "PK = :pk AND begins_with(SK, :sk)",
+        ExpressionAttributeValues: { ":pk": `JOURNEY#${journeyId}`, ":sk": "DESC#" },
+        ScanIndexForward: false,
+      })
+    );
+    return res.Items || [];
+  }
+
+  // Health/progress snapshots (docs 20 §5) — same version-chain shape as
+  // description, just a different SK prefix and width.
+  async function putJourneyStatusVersion(journeyId, version) {
+    await doc.send(
+      new PutCommand({
+        TableName: T.journeys,
+        Item: { PK: `JOURNEY#${journeyId}`, SK: `STATUS#${padVersion(version.version)}`, ...version },
+      })
+    );
+  }
+
+  async function listJourneyStatusVersions(journeyId) {
+    const res = await doc.send(
+      new QueryCommand({
+        TableName: T.journeys,
+        KeyConditionExpression: "PK = :pk AND begins_with(SK, :sk)",
+        ExpressionAttributeValues: { ":pk": `JOURNEY#${journeyId}`, ":sk": "STATUS#" },
+        ScanIndexForward: false,
+      })
+    );
+    return res.Items || [];
+  }
+
+  // --- journey accessors (private-journey roster) ---------------------------
+
+  async function putAccessor(journeyId, accessor) {
+    await doc.send(
+      new PutCommand({
+        TableName: T.journeys,
+        Item: {
+          PK: `JOURNEY#${journeyId}`,
+          SK: `ACCESSOR#${accessor.identity}`,
+          // The GSI partition key attribute — only an ACCESSOR# item ever
+          // carries it, which is what makes accessor-index sparse.
+          accessorIdentity: accessor.identity,
+          ...accessor,
+        },
+      })
+    );
+  }
+
+  async function getAccessor(journeyId, identity) {
+    const res = await doc.send(
+      new GetCommand({ TableName: T.journeys, Key: { PK: `JOURNEY#${journeyId}`, SK: `ACCESSOR#${identity}` } })
+    );
+    return res.Item || null;
+  }
+
+  async function removeAccessor(journeyId, identity) {
+    await doc.send(
+      new DeleteCommand({ TableName: T.journeys, Key: { PK: `JOURNEY#${journeyId}`, SK: `ACCESSOR#${identity}` } })
+    );
+  }
+
+  async function listAccessors(journeyId) {
+    const res = await doc.send(
+      new QueryCommand({
+        TableName: T.journeys,
+        KeyConditionExpression: "PK = :pk AND begins_with(SK, :sk)",
+        ExpressionAttributeValues: { ":pk": `JOURNEY#${journeyId}`, ":sk": "ACCESSOR#" },
+      })
+    );
+    return res.Items || [];
+  }
+
+  // --- kelabo <-> journey membership -----------------------------------------
+  //
+  // Many-to-many: linking writes the forward LINK# item in the journey's own
+  // partition AND mirrors it onto the kelabo's own partition, in one
+  // transaction spanning both tables. DynamoDB transactions may include items
+  // from more than one table within an account/region — this is the only
+  // place that fact is used.
+
+  async function linkKelaboToJourney({ journeyId, kelaboId, link, mirror }) {
+    await doc.send(
+      new TransactWriteCommand({
+        TransactItems: [
+          {
+            Put: {
+              TableName: T.journeys,
+              Item: { PK: `JOURNEY#${journeyId}`, SK: `LINK#${kelaboId}`, ...link },
+              ConditionExpression: "attribute_not_exists(SK)",
+            },
+          },
+          {
+            Update: {
+              TableName: T.journeys,
+              Key: { PK: `JOURNEY#${journeyId}`, SK: "META" },
+              UpdateExpression: "SET kelaboCount = if_not_exists(kelaboCount, :zero) + :one, updatedAt = :now",
+              ConditionExpression: "#status = :active",
+              ExpressionAttributeNames: { "#status": "status" },
+              ExpressionAttributeValues: { ":zero": 0, ":one": 1, ":now": link.linkedAt, ":active": "active" },
+            },
+          },
+          {
+            Put: {
+              TableName: T.kelabos,
+              Item: { PK: `KELABO#${kelaboId}`, SK: `JOURNEY#${journeyId}`, ...mirror },
+              ConditionExpression: "attribute_not_exists(SK)",
+            },
+          },
+        ],
+      })
+    );
+  }
+
+  async function unlinkKelaboFromJourney({ journeyId, kelaboId, now }) {
+    await doc.send(
+      new TransactWriteCommand({
+        TransactItems: [
+          { Delete: { TableName: T.journeys, Key: { PK: `JOURNEY#${journeyId}`, SK: `LINK#${kelaboId}` } } },
+          {
+            Update: {
+              TableName: T.journeys,
+              Key: { PK: `JOURNEY#${journeyId}`, SK: "META" },
+              UpdateExpression: "SET kelaboCount = if_not_exists(kelaboCount, :one) - :one, updatedAt = :now",
+              ExpressionAttributeValues: { ":one": 1, ":now": now },
+            },
+          },
+          { Delete: { TableName: T.kelabos, Key: { PK: `KELABO#${kelaboId}`, SK: `JOURNEY#${journeyId}` } } },
+        ],
+      })
+    );
+  }
+
+  async function getJourneyLink(journeyId, kelaboId) {
+    const res = await doc.send(
+      new GetCommand({ TableName: T.journeys, Key: { PK: `JOURNEY#${journeyId}`, SK: `LINK#${kelaboId}` } })
+    );
+    return res.Item || null;
+  }
+
+  async function listJourneyLinks(journeyId) {
+    const res = await doc.send(
+      new QueryCommand({
+        TableName: T.journeys,
+        KeyConditionExpression: "PK = :pk AND begins_with(SK, :sk)",
+        ExpressionAttributeValues: { ":pk": `JOURNEY#${journeyId}`, ":sk": "LINK#" },
+      })
+    );
+    return res.Items || [];
+  }
+
+  /** Every journey this kelabo is linked to — the mirror on its own
+   *  partition (docs 20 §4.3). Answers "does this kelabo belong to any
+   *  journey" for the purge guard, and renders a "Part of: …" banner. */
+  async function listKelaboJourneyLinks(kelaboId) {
+    const res = await doc.send(
+      new QueryCommand({
+        TableName: T.kelabos,
+        KeyConditionExpression: "PK = :pk AND begins_with(SK, :sk)",
+        ExpressionAttributeValues: { ":pk": `KELABO#${kelaboId}`, ":sk": "JOURNEY#" },
+      })
+    );
+    return res.Items || [];
+  }
+
+  /** One kelabo's mirror of a journey link, deleted on its own — used only
+   *  when the whole journey is deleted (the kelabo itself is never touched,
+   *  docs 20 §14.1). Ordinary unlink goes through unlinkKelaboFromJourney. */
+  async function deleteKelaboJourneyMirror(kelaboId, journeyId) {
+    await doc.send(
+      new DeleteCommand({ TableName: T.kelabos, Key: { PK: `KELABO#${kelaboId}`, SK: `JOURNEY#${journeyId}` } })
+    );
+  }
+
+  /**
+   * Delete every non-META item under PK=JOURNEY#<id> (docs 20 §14.1). META is
+   * deliberately excluded and deleted separately, last, by deleteJourneyMeta —
+   * the same "pointer row dies last so a crash is resumable" rule
+   * /records/purge already follows.
+   * @returns {Promise<number>} items deleted
+   */
+  async function deleteJourneyChildren(journeyId) {
+    let deleted = 0;
+    let ExclusiveStartKey;
+    do {
+      const res = await doc.send(
+        new QueryCommand({
+          TableName: T.journeys,
+          KeyConditionExpression: "PK = :pk",
+          FilterExpression: "SK <> :meta",
+          ExpressionAttributeValues: { ":pk": `JOURNEY#${journeyId}`, ":meta": "META" },
+          ProjectionExpression: "PK, SK",
+          ExclusiveStartKey,
+        })
+      );
+      const items = res.Items || [];
+      for (let i = 0; i < items.length; i += 25) {
+        const chunk = items.slice(i, i + 25);
+        let unprocessed = {
+          [T.journeys]: chunk.map((it) => ({ DeleteRequest: { Key: { PK: it.PK, SK: it.SK } } })),
+        };
+        for (let attempt = 0; attempt < 5 && unprocessed[T.journeys]?.length; attempt++) {
+          const out = await doc.send(new BatchWriteCommand({ RequestItems: unprocessed }));
+          unprocessed = out.UnprocessedItems || {};
+        }
+        if (unprocessed[T.journeys]?.length) {
+          throw new Error(`journey ${journeyId}: ${unprocessed[T.journeys].length} items could not be deleted`);
+        }
+        deleted += chunk.length;
+      }
+      ExclusiveStartKey = res.LastEvaluatedKey;
+    } while (ExclusiveStartKey);
+    return deleted;
+  }
+
+  async function deleteJourneyMeta(journeyId) {
+    await doc.send(new DeleteCommand({ TableName: T.journeys, Key: { PK: `JOURNEY#${journeyId}`, SK: "META" } }));
+  }
+
+  /**
+   * One timeline row (docs 20 §9.1), written alongside whatever it
+   * summarizes so the timeline is a genuine index, never a second source of
+   * truth that can drift from the items it describes.
+   */
+  async function putJourneyTimelineEntry(journeyId, entry) {
+    const at = entry.at ?? Date.now();
+    await doc.send(
+      new PutCommand({
+        TableName: T.journeys,
+        Item: { PK: `JOURNEY#${journeyId}`, SK: `TL#${pad(at)}#${randSuffix()}`, ...entry, at },
+      })
+    );
+  }
+
+  /**
+   * Backward cursor (docs 20 §9.2) — `before` excludes everything at or
+   * after that timestamp, the same "SK < prefix" shape `/caption/history`
+   * uses, chosen over the board's forward `since` because a journey
+   * timeline is unbounded and read newest-first. `type` filters in the
+   * query, not after — cheap because entries are already few per journey.
+   */
+  async function listJourneyTimeline(journeyId, { type, before, limit }) {
+    const keyCond = before ? "PK = :pk AND SK < :sk" : "PK = :pk AND begins_with(SK, :sk)";
+    const values = before
+      ? { ":pk": `JOURNEY#${journeyId}`, ":sk": `TL#${pad(before)}` }
+      : { ":pk": `JOURNEY#${journeyId}`, ":sk": "TL#" };
+    const res = await doc.send(
+      new QueryCommand({
+        TableName: T.journeys,
+        KeyConditionExpression: keyCond,
+        ...(type
+          ? { FilterExpression: "#type = :type", ExpressionAttributeNames: { "#type": "type" }, ExpressionAttributeValues: { ...values, ":type": type } }
+          : { ExpressionAttributeValues: values }),
+        ScanIndexForward: false,
+        Limit: limit,
+      })
+    );
+    return res.Items || [];
   }
 
   async function queryContributions(kelaboId, { since, limit }) {
@@ -920,5 +1332,30 @@ export function createDb({ config, client } = {}) {
     deleteMcpToken,
     getMcpClient,
     putMcpClient,
+    createJourney,
+    getJourneyMeta,
+    updateJourneyMeta,
+    completeJourney,
+    reopenJourney,
+    listJourneysByTenantStatus,
+    listAccessorJourneys,
+    putJourneyDescriptionVersion,
+    listJourneyDescriptionVersions,
+    putJourneyStatusVersion,
+    listJourneyStatusVersions,
+    putJourneyTimelineEntry,
+    listJourneyTimeline,
+    putAccessor,
+    getAccessor,
+    removeAccessor,
+    listAccessors,
+    linkKelaboToJourney,
+    unlinkKelaboFromJourney,
+    getJourneyLink,
+    listJourneyLinks,
+    listKelaboJourneyLinks,
+    deleteKelaboJourneyMirror,
+    deleteJourneyChildren,
+    deleteJourneyMeta,
   };
 }

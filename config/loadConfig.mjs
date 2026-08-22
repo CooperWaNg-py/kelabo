@@ -74,6 +74,7 @@ export function loadConfig(env,   configPath = join(here, "kelabo.json")) {
     history: `kelabo-${block.endpoint}-history`,
     mcp: `kelabo-${block.endpoint}-mcp`,
     contacts: `kelabo-${block.endpoint}-contacts`,
+    journeys: `kelabo-${block.endpoint}-journeys`,
   };
 
   // Close the whole deployment to everything but a list of source addresses —

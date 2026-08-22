@@ -93,6 +93,7 @@ function fromEnv() {
       history: env.KELABO_TABLE_HISTORY,
       mcp: env.KELABO_TABLE_MCP,
       contacts: env.KELABO_TABLE_CONTACTS,
+      journeys: env.KELABO_TABLE_JOURNEYS,
     },
     contacts: { external: env.KELABO_CONTACTS_EXTERNAL === "true" },
     archiveBucket: env.KELABO_ARCHIVE_BUCKET,

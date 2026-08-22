@@ -46,6 +46,7 @@ export class LambdaStack extends Stack {
         KELABO_TABLE_REFRESH: names.refresh,
         KELABO_TABLE_MCP: names.mcp,
         KELABO_TABLE_CONTACTS: names.contacts,
+        KELABO_TABLE_JOURNEYS: names.journeys,
         KELABO_ARCHIVE_BUCKET: cfg.archiveBucket,
         KELABO_ARCHIVE_KEY_PREFIX: cfg.archiveKeyPrefix,
         KELABO_SECRET_STT: cfg.secrets.stt,
@@ -116,6 +117,7 @@ export class LambdaStack extends Stack {
     tables.history.grantReadData(this.fn);
     tables.mcp.grantReadWriteData(this.fn);
     tables.contacts.grantReadWriteData(this.fn);
+    tables.journeys.grantReadWriteData(this.fn);
     archiveBucket.grantRead(this.fn);
 
     // Retention purge (POST /records/purge). Deliberately DeleteItem/DeleteObject

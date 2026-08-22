@@ -192,6 +192,14 @@ export function createRecords({ config, db, s3 }) {
     const archiveId = row.archiveId;
     const kelaboId = row.kelaboId || archiveId;
 
+    // A kelabo linked into a journey survives its host's purge (docs 20
+    // §14.3) — the host must unlink it from every journey first. This only
+    // ever runs on the host-purge path (the caller has already confirmed
+    // `isHost`); a participant dropping their own copy never reaches here
+    // and is never blocked by it.
+    const journeyLinks = await db.listKelaboJourneyLinks(kelaboId).catch(() => []);
+    if (journeyLinks.length) throw err(409, "kelabo_in_journey");
+
     if (row.s3Key) {
       // A missing object is a success for our purposes — the goal is "gone".
       await deleteArchiveObject(row.s3Key).catch((e) => {

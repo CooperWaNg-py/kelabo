@@ -71,6 +71,34 @@ export function createDb({ config, client } = {}) {
     return res.Items || [];
   }
 
+  /**
+   * Every kelabo `identity` can reach at `status`, from both halves of "who
+   * can see this": their own tenant's index (the common case — colleagues
+   * share visibility by tenant alone) and, separately, any kelabo hosted at a
+   * DIFFERENT tenant where `identity` specifically holds an INVITE# row of
+   * this status. Returned as two arrays rather than merged, because they are
+   * not the same visibility rule — a caller applies its own policy to
+   * `sameTenant` (e.g. "not unlisted, or host, or already joined") and a
+   * cross-tenant kelabo is visible for the narrower reason that put it in
+   * `crossTenant` at all: a specific invite, nothing broader.
+   */
+  async function listKelabosByStatusForIdentity(identity, status) {
+    const tenantId = identity.split("@")[1]?.toLowerCase();
+    const [sameTenant, myInvites] = await Promise.all([
+      listKelabosByStatus(tenantId, status),
+      listInvitesByIdentity(identity),
+    ]);
+    const known = new Set(sameTenant.map((m) => m.kelaboId));
+    const otherIds = [
+      ...new Set(
+        myInvites.map((i) => String(i.PK).slice("KELABO#".length)).filter((id) => id && !known.has(id))
+      ),
+    ];
+    const otherMetas = await Promise.all(otherIds.map((id) => getKelaboMeta(id)));
+    const crossTenant = otherMetas.filter((m) => m && m.status === status);
+    return { sameTenant, crossTenant };
+  }
+
   async function updateKelaboMeta(kelaboId, updates) {
     const names = {};
     const values = {};
@@ -263,6 +291,25 @@ export function createDb({ config, client } = {}) {
         TableName: T.kelabos,
         KeyConditionExpression: "PK = :pk AND begins_with(SK, :sk)",
         ExpressionAttributeValues: { ":pk": `KELABO#${kelaboId}`, ":sk": "INVITE#" },
+      })
+    );
+    return res.Items || [];
+  }
+
+  /**
+   * Every INVITE# row naming `identity`, across every kelabo — the
+   * `invitee-index` GSI, sparse on `inviteKey`. This is the query
+   * `listInvites` cannot do: that one lists everybody invited to ONE kelabo
+   * you already know the id of; this lists every kelabo ONE person was
+   * invited to, including ones hosted at a tenant they do not belong to.
+   */
+  async function listInvitesByIdentity(identity) {
+    const res = await doc.send(
+      new QueryCommand({
+        TableName: T.kelabos,
+        IndexName: "invitee-index",
+        KeyConditionExpression: "inviteKey = :k",
+        ExpressionAttributeValues: { ":k": identity },
       })
     );
     return res.Items || [];
@@ -819,6 +866,7 @@ export function createDb({ config, client } = {}) {
     getInvite,
     removeInvite,
     listInvites,
+    listInvitesByIdentity,
     listUsersByTenant,
     listFavourites,
     getFavourite,
@@ -827,6 +875,7 @@ export function createDb({ config, client } = {}) {
     listAcceptedContacts,
     deleteHostGuard,
     listKelabosByStatus,
+    listKelabosByStatusForIdentity,
     updateKelaboMeta,
     appendParticipant,
     queryContributions,

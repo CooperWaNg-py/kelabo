@@ -32,6 +32,20 @@ export class DynamoDbStack extends Stack {
       sortKey: { name: "startedAt", type: N },
       projectionType: dynamodb.ProjectionType.ALL,
     });
+    // Sparse on `inviteKey`, which only an INVITE# item ever carries (the same
+    // trick status-index plays on tenantStatus, which only META carries) — so
+    // this indexes exactly the rows that name who was invited, nothing else.
+    // What it is for: a kelabo's tenantStatus names its HOST's tenant, never an
+    // invitee's, so status-index alone can never surface a kelabo to someone
+    // invited across a domain boundary — this is the other half of "who can
+    // see this kelabo", queried by the invitee's own identity instead of by
+    // tenant (docs 18 §2.8).
+    kelabos.addGlobalSecondaryIndex({
+      indexName: "invitee-index",
+      partitionKey: { name: "inviteKey", type: S },
+      sortKey: { name: "invitedAt", type: N },
+      projectionType: dynamodb.ProjectionType.ALL,
+    });
 
     const history = table("HistoryTable", names.history, {
       partitionKey: { name: "archiveId", type: S },

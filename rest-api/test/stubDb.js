@@ -101,6 +101,17 @@ export function createDb() {
         (i) => i.PK === `KELABO#${kelaboId}` && String(i.SK).startsWith("INVITE#")
       );
     },
+    // Mirrors `invitee-index`, sparse on `inviteKey` for the same reason
+    // `listKelabosByStatus` below models `status-index` as sparse on
+    // `tenantStatus`: only an INVITE# item ever carries either attribute.
+    async listInvitesByIdentity(identity) {
+      return [...kelabos.values()].filter(
+        (i) =>
+          String(i.SK).startsWith("INVITE#") &&
+          i.inviteKey === identity &&
+          typeof i.invitedAt === "number"
+      );
+    },
     // Mirrors the users table's `tenant-index`: registered users at one
     // domain, by address.
     async listUsersByTenant(tenantId, prefix, limit = 8) {
@@ -148,6 +159,26 @@ export function createDb() {
           // The sparse-index rule, enforced rather than assumed.
           typeof i.startedAt === "number"
       );
+    },
+    // Mirrors src/db.js's composition of the same two GSIs: same-tenant by
+    // status-index, plus any kelabo elsewhere where identity holds an
+    // INVITE# row, via invitee-index.
+    async listKelabosByStatusForIdentity(identity, status) {
+      const tenantId = identity.split("@")[1]?.toLowerCase();
+      const sameTenant = [...kelabos.values()].filter(
+        (i) => i.SK === "META" && i.tenantStatus === `${tenantId}#${status}` && typeof i.startedAt === "number"
+      );
+      const known = new Set(sameTenant.map((m) => m.kelaboId));
+      const myInvites = [...kelabos.values()].filter(
+        (i) => String(i.SK).startsWith("INVITE#") && i.inviteKey === identity && typeof i.invitedAt === "number"
+      );
+      const otherIds = [
+        ...new Set(myInvites.map((i) => String(i.PK).slice("KELABO#".length)).filter((id) => id && !known.has(id))),
+      ];
+      const crossTenant = otherIds
+        .map((id) => kelabos.get(mkey(`KELABO#${id}`, "META")))
+        .filter((m) => m && m.status === status);
+      return { sameTenant, crossTenant };
     },
     async updateKelaboMeta(kelaboId, updates) {
       const k = mkey(`KELABO#${kelaboId}`, "META");

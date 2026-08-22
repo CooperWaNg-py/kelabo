@@ -150,9 +150,12 @@ export function createScheduling({ config, db, mailer, internal }) {
   }
 
   async function listScheduled({ identity }) {
-    const items = await db.listKelabosByStatus(tenantOf(identity), "scheduled");
     // Everything at the tenant is visible in the index; a host's own list is
-    // what the rail shows, and being invited to one is what puts it in yours.
+    // what the rail shows, and being invited to one is what puts it in yours
+    // — including an invite from a kelabo hosted at someone else's tenant
+    // entirely, which sameTenant's index can never reach (docs 18 §2.8).
+    const { sameTenant, crossTenant } = await db.listKelabosByStatusForIdentity(identity, "scheduled");
+    const items = [...sameTenant, ...crossTenant];
     const withInvites = await Promise.all(
       items.map(async (m) => {
         const invites = await db.listInvites(m.kelaboId);

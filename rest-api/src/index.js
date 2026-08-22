@@ -451,7 +451,7 @@ export function createApp(deps) {
         if (!payload) throw err(401, "unauthenticated");
         return {
           status: 200,
-          body: await agent.joinableKelabos({ identity: payload.sub, tenantId: payload.tenant }),
+          body: await agent.joinableKelabos({ identity: payload.sub }),
         };
       },
     },

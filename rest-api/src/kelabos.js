@@ -75,18 +75,23 @@ export function createKelabos({ config, db, internal, secrets }) {
   }
 
   async function listKelabos({ identity }) {
-    const tenantId = identity.split("@")[1].toLowerCase();
-    const items = await db.listKelabosByStatus(tenantId, "active");
+    const { sameTenant, crossTenant } = await db.listKelabosByStatusForIdentity(identity, "active");
     // An unlisted kelabo (a private call) exists only for the people in it:
     // the host and anyone who has joined. Everyone else's list simply does not
-    // contain it — the join link is the sole way in.
-    const visible = items.filter(
+    // contain it — the join link is the sole way in. This is the tenant-wide
+    // default, so it only applies within the tenant that default belongs to.
+    const sameTenantVisible = sameTenant.filter(
       (m) =>
         !m.unlisted ||
         m.hostIdentity === identity ||
         (m.participants || []).some((p) => p.identity === identity)
     );
-    const active = visible.map(toSummary);
+    // A kelabo hosted at another tenant is never tenant-wide visible to begin
+    // with — there is no "not unlisted" default across a domain boundary.
+    // Being in `crossTenant` at all already means a specific INVITE# row
+    // named this identity, which is the stronger, narrower grant and is not
+    // lessened by `unlisted` (docs 18 §2.8).
+    const active = [...sameTenantVisible, ...crossTenant].map(toSummary);
     const mine = active.filter((m) => m.hostIdentity === identity);
     return { active, mine };
   }

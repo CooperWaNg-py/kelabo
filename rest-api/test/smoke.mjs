@@ -1657,6 +1657,85 @@ await test("POST /kelabos/:id/invitees — refused once live, refused once cance
   assert.equal(onCancelled.json.error, "kelabo_cancelled");
 });
 
+// --- cross-tenant invite visibility (docs 18 §2.8) --------------------------
+//
+// A kelabo's tenantStatus names its HOST's tenant — status-index, which every
+// list above reads, can therefore never surface a kelabo to someone invited
+// from a different domain: no query on the invitee's own tenant reaches a
+// row indexed under someone else's. invitee-index is the other half,
+// identity-keyed rather than tenant-keyed, so a colleague-only default
+// cannot silently exclude the one person a specific INVITE# row names.
+
+// Via sessions.establishSession directly, not the HTTP OTP flow: this file's
+// `config.allowedEmailDomain` is "example.com" (line 23), which the real OTP
+// gate would refuse these addresses under — a fixture detail of this test
+// file, unrelated to what cross-tenant visibility is about. `sessions` is the
+// same module the OTP flow itself calls once a code is verified.
+async function sessionFor(email) {
+  const session = await sessions.establishSession(email);
+  return {
+    kelabo_session: cookieValue({ cookies: session.cookies }, "kelabo_session"),
+    kelabo_refresh: cookieValue({ cookies: session.cookies }, "kelabo_refresh"),
+  };
+}
+
+await test("GET /kelabos/scheduled — an invitee at a different domain than the host still sees it", async () => {
+  const outsideCookies = await sessionFor("outside@other-domain.example");
+  const id = await scheduleFresh({ invitees: ["outside@other-domain.example"] });
+
+  // Accept, exactly the route the emailed link's page uses.
+  const rsvp = await call("POST", `/kelabos/${id}/rsvp`, { body: { response: "accepted" }, cookies: outsideCookies });
+  assert.equal(rsvp.statusCode, 200);
+
+  const mine = await call("GET", "/kelabos/scheduled", { cookies: outsideCookies });
+  assert.equal(mine.statusCode, 200);
+  const found = mine.json.scheduled.find((m) => m.kelaboId === id);
+  assert.ok(found, "the outside invitee's own list does not contain the kelabo they accepted");
+  assert.equal(found.isHost, false);
+  assert.equal(found.myResponse, "accepted");
+
+  // The host's own list is unaffected by any of this.
+  const hostList = await call("GET", "/kelabos/scheduled", { cookies: sessionCookies });
+  assert.ok(hostList.json.scheduled.some((m) => m.kelaboId === id));
+});
+
+await test("GET /kelabos/scheduled — someone at another domain who was never invited still sees nothing", async () => {
+  const strangerCookies = await sessionFor("stranger@another-domain.example");
+  const id = await scheduleFresh();
+  const list = await call("GET", "/kelabos/scheduled", { cookies: strangerCookies });
+  assert.equal(list.json.scheduled.some((m) => m.kelaboId === id), false);
+});
+
+await test("GET /kelabos — a cross-tenant invitee (rung into a live kelabo) sees it before joining", async () => {
+  const outsideCookies = await sessionFor("rung@elsewhere.example");
+  const res = await call("POST", "/kelabos", { body: { title: "Standup" }, cookies: sessionCookies });
+  const id = res.json.kelaboId;
+  // The same write huddle.ringInto makes for an outside target — one
+  // INVITE# row, before they have joined or become a participant.
+  await db.putInvite(id, {
+    inviteKey: "rung@elsewhere.example",
+    email: "rung@elsewhere.example",
+    isGuest: false,
+    response: "pending",
+    invitedAt: Date.now(),
+  });
+
+  const list = await call("GET", "/kelabos", { cookies: outsideCookies });
+  assert.equal(list.statusCode, 200);
+  assert.ok(list.json.active.some((m) => m.kelaboId === id), "the rung outsider's own list does not contain it");
+  assert.equal(list.json.mine.some((m) => m.kelaboId === id), false, "it is not theirs to have started");
+
+  await db.updateKelaboMeta(id, { status: "ended", tenantStatus: null });
+  await db.deleteHostGuard("host@example.com");
+});
+
+await test("GET /agent/kelabos — the same cross-tenant reach, for the agent bridge", async () => {
+  const id = await scheduleFresh({ invitees: ["agentside@far-domain.example"] });
+  const { kelabos: joinable } = await agent.joinableKelabos({ identity: "agentside@far-domain.example" });
+  assert.ok(joinable.some((k) => k.kelaboId === id), "the agent bridge's own list does not reach a cross-tenant invite");
+  await db.updateKelaboMeta(id, { status: "ended", tenantStatus: null });
+});
+
 // --- agent bridge pairing (docs 16 §6) -------------------------------------
 
 let agentToken = null;

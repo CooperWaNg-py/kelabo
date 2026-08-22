@@ -205,6 +205,43 @@ would otherwise fire a per-peer "left" fan-out into a room with no subscribers.
 - `typedefs.js`: `KelaboCreated.status` is already stale (cannot express
   `scheduled`) — widen to the real union and add `"cancelled"`.
 
+### 2.8 Cross-tenant invitees — the other half of "who can see this"
+
+Every kelabo list in this document — `listScheduled`, `listKelabos`,
+`joinableKelabos` (the agent bridge) — was, until now, a query against
+`status-index`, keyed on **`tenantStatus`**: `<hostTenant>#<status>`. That
+finds everything at the caller's own tenant, which covers the ordinary case
+(a host invites a colleague) by construction, and does not mention invitees
+at all — colleagues at one tenant are simply, tenant-wide, each other's
+audience.
+
+It does not cover the other ordinary case: a host inviting someone at a
+*different* domain — a contractor, a partner, a friend on open registration.
+That invitee's own tenant is not the host's, so `status-index` cannot reach
+the kelabo from their side no matter what they query — the kelabo was never
+indexed under their tenant, and no `#<status>` query for their own tenant
+will ever be indexed there either. The invitee gets the email, replies, and
+the host sees the reply; the invitee's own home page never shows it again.
+Reachable only by re-opening the original link, indefinitely — not a race,
+not eventual consistency, structurally absent.
+
+**The fix:** a second GSI, `invitee-index`, sparse on `inviteKey` — the same
+sparse-index trick `status-index` itself plays on `tenantStatus`, since only
+an `INVITE#` item carries either attribute. `db.listKelabosByStatusForIdentity`
+composes both: `status-index` for the caller's own tenant, `invitee-index` for
+every kelabo hosted anywhere else that has an `INVITE#` row naming the
+caller — returned as two separate arrays, not merged, because they carry
+different visibility rules. `listScheduled` and `joinableKelabos` already
+gate on "host or invited" uniformly, tenant or not, so widening their
+candidate set is the whole change. `listKelabos` does not — a non-`unlisted`
+kelabo is visible tenant-wide by default — and that default has no cross-
+tenant analogue: a kelabo hosted elsewhere is visible only because a specific
+`INVITE#` row names the caller, never because it merely isn't `unlisted`.
+
+No backfill: a new GSI is populated from every existing item that already
+carries the attribute, automatically, so an invite written before the index
+existed is reachable the moment the index finishes building.
+
 ---
 
 ## 3. Reschedule a scheduled kelabo

@@ -548,6 +548,59 @@ export function createDb() {
         (i) => i.PK === `JOURNEY#${journeyId}` && String(i.SK).startsWith("ACCESSOR#")
       );
     },
+    // --- message board (docs 20 §7) — heads and #V# versions share the
+    // BOARDMSG# prefix, told apart by whether the SK contains "#V#",
+    // mirroring src/db.js exactly.
+    async createBoardMessageHead(journeyId, head) {
+      const k = mkey(`JOURNEY#${journeyId}`, `BOARDMSG#${head.msgId}`);
+      if (journeys.has(k)) throw conditionFailed();
+      journeys.set(k, { PK: `JOURNEY#${journeyId}`, SK: `BOARDMSG#${head.msgId}`, ...head });
+    },
+    async putBoardMessageHead(journeyId, head) {
+      journeys.set(mkey(`JOURNEY#${journeyId}`, `BOARDMSG#${head.msgId}`), {
+        PK: `JOURNEY#${journeyId}`,
+        SK: `BOARDMSG#${head.msgId}`,
+        ...head,
+      });
+    },
+    async getBoardMessageHead(journeyId, msgId) {
+      return journeys.get(mkey(`JOURNEY#${journeyId}`, `BOARDMSG#${msgId}`)) || null;
+    },
+    async listBoardMessageHeads(journeyId) {
+      return [...journeys.values()].filter(
+        (i) => i.PK === `JOURNEY#${journeyId}` && String(i.SK).startsWith("BOARDMSG#") && !String(i.SK).includes("#V#")
+      );
+    },
+    async putBoardMessageVersion(journeyId, version) {
+      const sk = `BOARDMSG#${version.msgId}#V#${padVersion(version.version)}`;
+      journeys.set(mkey(`JOURNEY#${journeyId}`, sk), { PK: `JOURNEY#${journeyId}`, SK: sk, ...version });
+    },
+    async listBoardMessageVersions(journeyId, msgId) {
+      return [...journeys.values()]
+        .filter((i) => i.PK === `JOURNEY#${journeyId}` && String(i.SK).startsWith(`BOARDMSG#${msgId}#V#`))
+        .sort((a, b) => (a.SK < b.SK ? 1 : -1));
+    },
+    // --- documents (docs 20 §8) — one item per document, never versioned.
+    async createDocument(journeyId, item) {
+      const k = mkey(`JOURNEY#${journeyId}`, `DOC#${item.docId}`);
+      if (journeys.has(k)) throw conditionFailed();
+      journeys.set(k, { PK: `JOURNEY#${journeyId}`, SK: `DOC#${item.docId}`, ...item });
+    },
+    async putDocument(journeyId, item) {
+      journeys.set(mkey(`JOURNEY#${journeyId}`, `DOC#${item.docId}`), {
+        PK: `JOURNEY#${journeyId}`,
+        SK: `DOC#${item.docId}`,
+        ...item,
+      });
+    },
+    async getDocument(journeyId, docId) {
+      return journeys.get(mkey(`JOURNEY#${journeyId}`, `DOC#${docId}`)) || null;
+    },
+    async listDocuments(journeyId) {
+      return [...journeys.values()].filter(
+        (i) => i.PK === `JOURNEY#${journeyId}` && String(i.SK).startsWith("DOC#")
+      );
+    },
     // Models the real TransactWriteCommand as a check-then-write, which is
     // safe here because the stub is single-threaded: both conditions
     // (LINK# absent, journey active) are checked before anything is written,
@@ -606,6 +659,43 @@ export function createDb() {
     },
     async deleteJourneyMeta(journeyId) {
       journeys.delete(mkey(`JOURNEY#${journeyId}`, "META"));
+    },
+    async putJourneyReport(journeyId, report) {
+      journeys.set(mkey(`JOURNEY#${journeyId}`, `REPORT#${report.reportId}`), {
+        PK: `JOURNEY#${journeyId}`,
+        SK: `REPORT#${report.reportId}`,
+        ...report,
+      });
+    },
+    async getJourneyReport(journeyId, reportId) {
+      return journeys.get(mkey(`JOURNEY#${journeyId}`, `REPORT#${reportId}`)) || null;
+    },
+    async listJourneyReports(journeyId) {
+      return [...journeys.values()].filter(
+        (i) => i.PK === `JOURNEY#${journeyId}` && String(i.SK).startsWith("REPORT#")
+      );
+    },
+    async markJourneyReportFailed(journeyId, reportId, error) {
+      const item = journeys.get(mkey(`JOURNEY#${journeyId}`, `REPORT#${reportId}`));
+      if (item) Object.assign(item, { status: "failed", error });
+    },
+    async bumpContributor(journeyId, identity, field) {
+      const k = mkey(`JOURNEY#${journeyId}`, `CONTRIBUTOR#${identity}`);
+      const now = Date.now();
+      const item = journeys.get(k) || {
+        PK: `JOURNEY#${journeyId}`,
+        SK: `CONTRIBUTOR#${identity}`,
+        contributorIdentity: identity,
+        firstSeenAt: now,
+      };
+      item[field] = (item[field] || 0) + 1;
+      item.lastActiveAt = now;
+      journeys.set(k, item);
+    },
+    async listContributors(journeyId) {
+      return [...journeys.values()].filter(
+        (i) => i.PK === `JOURNEY#${journeyId}` && String(i.SK).startsWith("CONTRIBUTOR#")
+      );
     },
     // Test-only seams for arranging journey state.
     __journeySize() {

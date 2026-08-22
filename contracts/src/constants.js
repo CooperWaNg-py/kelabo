@@ -142,6 +142,10 @@ export const ERROR_CODES = [
   "not_private",
   "kelabo_in_journey",
   "not_kelabo_member",
+  "board_message_not_found",
+  "document_not_found",
+  "already_removed",
+  "report_not_found",
 ];
 
 // Journey visibility (docs 20 §3.2): `public` grants full rights to every

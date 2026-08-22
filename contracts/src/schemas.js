@@ -676,6 +676,12 @@ export const patchJourneyBodySchema = z.object({
   title: z.string().min(1).max(80).optional(),
   visibility: z.enum(JOURNEY_VISIBILITIES).optional(),
   avatarVariant: z.number().int().min(0).max(999999).optional(),
+  // Owner-only gate on whether an attached agent may post to the board on
+  // its own initiative (docs 20 §7) — independent of human write rights.
+  // Default off, same reasoning as historyEnabled: a human-curated,
+  // always-visible surface being edited unsupervised is a decision an
+  // owner has to actually make.
+  aiCanPost: z.boolean().optional(),
 });
 
 // POST /journeys/:id/status — health/progress (docs 20 §5), a combined
@@ -705,4 +711,29 @@ export const journeyAccessorBodySchema = z.object({
 // participant of the kelabo being linked (checked server-side, not here).
 export const journeyLinkKelaboBodySchema = z.object({
   kelaboId: z.string().min(1).max(128),
+});
+
+// POST /journeys/:id/reports — a free-text question, answered by synthesis
+// over the journey's own content (docs 20 §6). Generation happens in the
+// Gateway (the LLM credential is gateway-owned); this only validates the ask.
+export const journeyReportBodySchema = z.object({
+  question: z.string().min(1).max(2000),
+});
+
+// POST /journeys/:id/board, PATCH .../board/:msgId — a pinned message,
+// mutable in place with every edit kept (docs 20 §7). Same body shape for
+// create and edit.
+export const journeyBoardMessageBodySchema = z.object({
+  content: z.string().min(1).max(4000),
+});
+
+// POST /journeys/:id/documents — pasted/typed text, not file upload (docs
+// 20 §8). 200,000 chars is comfortably inside the 400KB DynamoDB item cap
+// with the rest of the item's fields; content over that has nowhere to go
+// yet — S3 overflow (the same split the kelabo archive already uses) is
+// not built in this pass, so a document that large is refused rather than
+// silently truncated.
+export const journeyDocumentBodySchema = z.object({
+  title: z.string().min(1).max(160),
+  content: z.string().min(1).max(200_000),
 });

@@ -105,6 +105,10 @@ export class GatewayEcsStack extends Stack {
           // to scope presence fan-out (docs 18 §5). It must never mutate a link.
           KELABO_TABLE_CONTACTS: names.contacts,
           KELABO_CONTACTS_EXTERNAL: String(cfg.contacts.external),
+          // Read: journey context for a report. Write: the report result and
+          // (docs 20 §10) the contributor rollup counters — the only table
+          // besides its own kelabos/history the Gateway needs read+write on.
+          KELABO_TABLE_JOURNEYS: names.journeys,
           KELABO_ARCHIVE_BUCKET: cfg.archiveBucket,
           KELABO_ARCHIVE_KEY_PREFIX: cfg.archiveKeyPrefix,
           KELABO_SECRET_COOKIE_KEY: cfg.secrets.cookieSigningKey,
@@ -219,6 +223,10 @@ export class GatewayEcsStack extends Stack {
     // Presence fan-out reads a subscriber's accepted external peers (docs 18
     // §5). Read only — links are created and destroyed by the REST API alone.
     tables.contacts.grantReadData(taskRole);
+    // Journey reports (docs 20 §6): reads a journey's description/board/
+    // documents/linked-kelabo-minutes to build the prompt, writes the
+    // finished report back onto the same item rest-api created.
+    tables.journeys.grantReadWriteData(taskRole);
     // The gateway is the only component that sees a 401 from an MCP server, so
     // it owns the OAuth refresh grant and must persist the rotated tokens.
     // Deliberately PutItem only — not grantReadWriteData — so a compromised

@@ -51,5 +51,13 @@ export function createInternal({ config, secrets, fetchImpl = fetch }) {
     ringCancel: (kelaboId, identity) => post(`/internal/kelabos/${kelaboId}/ring/cancel`, identity),
     ringAnswer: (kelaboId, identity, { response }) =>
       post(`/internal/kelabos/${kelaboId}/ring/answer`, identity, { response }),
+    // Journey report generation (docs 20 §6) — the Gateway holds the LLM
+    // credential, so the actual synthesis happens there; this call is
+    // awaited the same way requestMinutes is, and the row it wrote is what
+    // the client re-fetches afterward, not this response.
+    requestJourneyReport: async (journeyId, { reportId, question }, identity) => {
+      const res = await post(`/internal/journeys/${journeyId}/report`, identity, { reportId, question });
+      return res.json().catch(() => ({ reportId, status: "failed", error: "bad_gateway_response" }));
+    },
   };
 }

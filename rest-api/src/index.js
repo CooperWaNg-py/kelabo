@@ -30,6 +30,9 @@ import {
   journeyAccessorBodySchema,
   journeyLinkKelaboBodySchema,
   journeyStatusBodySchema,
+  journeyBoardMessageBodySchema,
+  journeyDocumentBodySchema,
+  journeyReportBodySchema,
 } from "@kelabo/contracts";
 import { timingSafeEqual } from "node:crypto";
 import { ZodError } from "zod";
@@ -1088,6 +1091,191 @@ export function createApp(deps) {
         };
       },
     },
+    // Message board (docs 20 §7) — distinct from a kelabo's own board;
+    // mutable in place, every edit kept, member-writable, frozen once
+    // completed.
+    {
+      method: "POST",
+      pattern: "/journeys/:id/board",
+      handle: async (req) => {
+        const session = await requireSession(req);
+        const body = journeyBoardMessageBodySchema.parse(req.body || {});
+        return {
+          status: 200,
+          body: await journeys.addBoardMessage({ journeyId: req.params.id, identity: session.identity, body }),
+        };
+      },
+    },
+    {
+      method: "GET",
+      pattern: "/journeys/:id/board",
+      handle: async (req) => {
+        const session = await requireSession(req);
+        return {
+          status: 200,
+          body: await journeys.listBoardMessages({ journeyId: req.params.id, identity: session.identity }),
+        };
+      },
+    },
+    {
+      method: "PATCH",
+      pattern: "/journeys/:id/board/:msgId",
+      handle: async (req) => {
+        const session = await requireSession(req);
+        const body = journeyBoardMessageBodySchema.parse(req.body || {});
+        return {
+          status: 200,
+          body: await journeys.editBoardMessage({
+            journeyId: req.params.id,
+            identity: session.identity,
+            msgId: req.params.msgId,
+            body,
+          }),
+        };
+      },
+    },
+    {
+      method: "DELETE",
+      pattern: "/journeys/:id/board/:msgId",
+      handle: async (req) => {
+        const session = await requireSession(req);
+        return {
+          status: 200,
+          body: await journeys.removeBoardMessage({
+            journeyId: req.params.id,
+            identity: session.identity,
+            msgId: req.params.msgId,
+          }),
+        };
+      },
+    },
+    {
+      method: "GET",
+      pattern: "/journeys/:id/board/:msgId/history",
+      handle: async (req) => {
+        const session = await requireSession(req);
+        return {
+          status: 200,
+          body: await journeys.getBoardMessageHistory({
+            journeyId: req.params.id,
+            identity: session.identity,
+            msgId: req.params.msgId,
+          }),
+        };
+      },
+    },
+    // Documents (docs 20 §8) — pasted/typed text, member-writable, added
+    // once, only ever soft-removed (no edit).
+    {
+      method: "POST",
+      pattern: "/journeys/:id/documents",
+      handle: async (req) => {
+        const session = await requireSession(req);
+        const body = journeyDocumentBodySchema.parse(req.body || {});
+        return {
+          status: 200,
+          body: await journeys.addDocument({ journeyId: req.params.id, identity: session.identity, body }),
+        };
+      },
+    },
+    {
+      method: "GET",
+      pattern: "/journeys/:id/documents",
+      handle: async (req) => {
+        const session = await requireSession(req);
+        return {
+          status: 200,
+          body: await journeys.listDocuments({ journeyId: req.params.id, identity: session.identity }),
+        };
+      },
+    },
+    {
+      method: "GET",
+      pattern: "/journeys/:id/documents/:docId",
+      handle: async (req) => {
+        const session = await requireSession(req);
+        return {
+          status: 200,
+          body: await journeys.getDocument({
+            journeyId: req.params.id,
+            identity: session.identity,
+            docId: req.params.docId,
+          }),
+        };
+      },
+    },
+    {
+      method: "DELETE",
+      pattern: "/journeys/:id/documents/:docId",
+      handle: async (req) => {
+        const session = await requireSession(req);
+        return {
+          status: 200,
+          body: await journeys.removeDocument({
+            journeyId: req.params.id,
+            identity: session.identity,
+            docId: req.params.docId,
+          }),
+        };
+      },
+    },
+    // Reports (docs 20 §6) — generation happens in the Gateway, which holds
+    // the LLM credential; POST awaits that call the same way requestMinutes
+    // does, but returns only `{reportId, status}` — the client re-fetches
+    // the finished row via GET, the same "mutating call returns a summary"
+    // convention every other create endpoint here already follows.
+    {
+      method: "POST",
+      pattern: "/journeys/:id/reports",
+      handle: async (req) => {
+        const session = await requireSession(req);
+        const body = journeyReportBodySchema.parse(req.body || {});
+        return {
+          status: 200,
+          body: await journeys.requestReport({ journeyId: req.params.id, identity: session.identity, body }),
+        };
+      },
+    },
+    {
+      method: "GET",
+      pattern: "/journeys/:id/reports",
+      handle: async (req) => {
+        const session = await requireSession(req);
+        return {
+          status: 200,
+          body: await journeys.listReports({ journeyId: req.params.id, identity: session.identity }),
+        };
+      },
+    },
+    {
+      method: "GET",
+      pattern: "/journeys/:id/reports/:reportId",
+      handle: async (req) => {
+        const session = await requireSession(req);
+        return {
+          status: 200,
+          body: await journeys.getReport({
+            journeyId: req.params.id,
+            identity: session.identity,
+            reportId: req.params.reportId,
+          }),
+        };
+      },
+    },
+    // Contributors (docs 20 §10) — a rollup, not a live query; recoverable
+    // from the source rows (kelabo links + report requests) if it ever
+    // needed rebuilding, never itself authoritative.
+    {
+      method: "GET",
+      pattern: "/journeys/:id/contributors",
+      handle: async (req) => {
+        const session = await requireSession(req);
+        return {
+          status: 200,
+          body: await journeys.listContributors({ journeyId: req.params.id, identity: session.identity }),
+        };
+      },
+    },
     {
       method: "POST",
       pattern: "/kelabos/:id/stt-token",
@@ -1255,7 +1443,7 @@ export async function handler(event, context) {
     const join = createJoin({ config, db, secrets });
     const joinCodes = createJoinCodes({ config, db });
     const records = createRecords({ config, db });
-    const journeys = createJourneys({ config, db });
+    const journeys = createJourneys({ config, db, internal });
     const sttToken = createSttToken({ config, db, secrets });
     const agent = createAgent({ config, db, secrets });
     defaultApp = createApp({ config, db, secrets, mailer, sessions, auth, kelabos, join, joinCodes, records, sttToken, internal, mcpOauth, scheduling, contacts, huddle, agent, journeys });

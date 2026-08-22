@@ -32,7 +32,32 @@ const secrets = { getCookieKey: async () => "test-signing-key" };
 
 const db = createDb();
 const sessions = createSessions({ config, db, secrets });
-const journeys = createJourneys({ config, db });
+
+// The Gateway side of report generation (docs 20 §6) is tested on its own,
+// offline, in gateway/test/journeys.mjs — here it is a stub the test can
+// script to succeed or fail, proving rest-api's own half: creating the
+// pending row, counting the ask, and handling an unreachable Gateway.
+const internalCalls = [];
+const internal = {
+  gatewayUnreachable: false,
+  requestJourneyReport: async (journeyId, { reportId, question }, identity) => {
+    internalCalls.push({ journeyId, reportId, question, identity });
+    if (internal.gatewayUnreachable) throw new Error("fetch failed");
+    // Stands in for the Gateway's own generateJourneyReport writing the
+    // finished row directly — see gateway/test/journeys.mjs for that half.
+    await db.putJourneyReport(journeyId, {
+      reportId,
+      question,
+      requestedBy: identity,
+      requestedAt: Date.now(),
+      status: "ready",
+      answer: `Fake answer to: ${question}`,
+      generatedAt: Date.now(),
+    });
+  },
+};
+
+const journeys = createJourneys({ config, db, internal });
 const s3Objects = {};
 const records = createRecords({
   config,
@@ -323,11 +348,14 @@ await test("description: append-only versions, current version advances, history
 
 // --- delete: cascades journey-owned resources, kelabos survive --------------
 
-await test("deleteJourney: owner-only, cascades DESC#/ACCESSOR#/LINK#, unmirrors every linked kelabo, and never touches the kelabo itself", async () => {
+await test("deleteJourney: owner-only, cascades DESC#/ACCESSOR#/LINK#/BOARDMSG#/DOC#, unmirrors every linked kelabo, and never touches the kelabo itself", async () => {
   const j = await journeys.createJourney({ identity: OWNER, body: { title: "T", visibility: "private", description: "d" } });
   await journeys.addAccessor({ journeyId: j.journeyId, identity: OWNER, body: { identity: COLLEAGUE } });
   await seedKelabo({ kelaboId: "k4", host: OWNER });
   await journeys.linkKelabo({ journeyId: j.journeyId, identity: OWNER, kelaboId: "k4" });
+  await journeys.addBoardMessage({ journeyId: j.journeyId, identity: OWNER, body: { content: "pinned note" } });
+  const doc4 = await journeys.addDocument({ journeyId: j.journeyId, identity: OWNER, body: { title: "spec", content: "text" } });
+  assert.equal(db.__journeySize() > 0, true);
 
   await assert.rejects(
     journeys.deleteJourney({ journeyId: j.journeyId, identity: COLLEAGUE }),
@@ -344,6 +372,12 @@ await test("deleteJourney: owner-only, cascades DESC#/ACCESSOR#/LINK#, unmirrors
   );
   assert.equal((await db.listKelaboJourneyLinks("k4")).length, 0, "kelabo's mirror is gone");
   assert.ok(await db.getKelaboMeta("k4"), "the kelabo itself still exists — deleting a journey never deletes a kelabo");
+  // Nothing of the journey's own partition survives — description, roster,
+  // link, board message and document alike, not just META.
+  assert.equal(await db.getJourneyMeta(j.journeyId), null);
+  assert.equal((await db.listAccessors(j.journeyId)).length, 0);
+  assert.equal((await db.listBoardMessageHeads(j.journeyId)).length, 0);
+  assert.equal((await db.getDocument(j.journeyId, doc4.docId)), null);
 });
 
 // --- purge guard: a kelabo linked into a journey cannot be host-purged ------
@@ -509,6 +543,189 @@ await test("timeline: backward pagination — `before` returns strictly older en
   );
 });
 
+// --- message board -----------------------------------------------------------
+
+await test("board: add/edit/remove, versioned, member-writable, removed message stays visible but frozen", async () => {
+  const j = await journeys.createJourney({ identity: OWNER, body: { title: "T", visibility: "public" } });
+  const added = await journeys.addBoardMessage({ journeyId: j.journeyId, identity: COLLEAGUE, body: { content: "Kickoff notes" } });
+  assert.equal(added.version, 1);
+
+  const edited = await journeys.editBoardMessage({ journeyId: j.journeyId, identity: OWNER, msgId: added.msgId, body: { content: "Kickoff notes (updated)" } });
+  assert.equal(edited.version, 2);
+
+  const listed = await journeys.listBoardMessages({ journeyId: j.journeyId, identity: OWNER });
+  assert.equal(listed.messages.length, 1);
+  assert.equal(listed.messages[0].content, "Kickoff notes (updated)");
+  assert.equal(listed.messages[0].version, 2);
+  assert.equal((await journeys.getJourney({ journeyId: j.journeyId, identity: OWNER })).boardMessageCount, 1);
+
+  await journeys.removeBoardMessage({ journeyId: j.journeyId, identity: COLLEAGUE, msgId: added.msgId });
+  const afterRemove = await journeys.listBoardMessages({ journeyId: j.journeyId, identity: OWNER });
+  assert.equal(afterRemove.messages.length, 1, "removed message stays visible, marked removed");
+  assert.equal(afterRemove.messages[0].removed, true);
+  assert.equal((await journeys.getJourney({ journeyId: j.journeyId, identity: OWNER })).boardMessageCount, 0, "the active count drops");
+
+  // Frozen once removed: no further edit.
+  await assert.rejects(
+    journeys.editBoardMessage({ journeyId: j.journeyId, identity: OWNER, msgId: added.msgId, body: { content: "nope" } }),
+    (e) => e.status === 409 && e.code === "already_removed",
+  );
+  // Removing again is idempotent, not an error.
+  const again = await journeys.removeBoardMessage({ journeyId: j.journeyId, identity: OWNER, msgId: added.msgId });
+  assert.equal(again.removed, true);
+
+  const history = await journeys.getBoardMessageHistory({ journeyId: j.journeyId, identity: OWNER, msgId: added.msgId });
+  assert.equal(history.versions.length, 3, "created, edited, removed");
+  assert.deepEqual(history.versions.map((v) => v.action), ["removed", "edited", "created"]);
+});
+
+await test("board: a stranger cannot read or write it; frozen once the journey is completed", async () => {
+  const j = await journeys.createJourney({ identity: OWNER, body: { title: "T", visibility: "private" } });
+  await assert.rejects(
+    journeys.addBoardMessage({ journeyId: j.journeyId, identity: COLLEAGUE, body: { content: "x" } }),
+    (e) => e.status === 403,
+  );
+  await journeys.completeJourney({ journeyId: j.journeyId, identity: OWNER });
+  await assert.rejects(
+    journeys.addBoardMessage({ journeyId: j.journeyId, identity: OWNER, body: { content: "x" } }),
+    (e) => e.status === 409 && e.code === "journey_completed",
+  );
+});
+
+// --- documents -----------------------------------------------------------------
+
+await test("documents: add/remove, member-writable, no edit exists, removed document stays visible but content unreachable via a fresh get", async () => {
+  const j = await journeys.createJourney({ identity: OWNER, body: { title: "T", visibility: "public" } });
+  const added = await journeys.addDocument({ journeyId: j.journeyId, identity: COLLEAGUE, body: { title: "Spec v1", content: "the actual spec text" } });
+  assert.ok(added.docId);
+
+  const got = await journeys.getDocument({ journeyId: j.journeyId, identity: OWNER, docId: added.docId });
+  assert.equal(got.title, "Spec v1");
+  assert.equal(got.sizeBytes, Buffer.byteLength("the actual spec text", "utf8"));
+
+  const listed = await journeys.listDocuments({ journeyId: j.journeyId, identity: OWNER });
+  assert.equal(listed.documents.length, 1);
+  assert.equal((await journeys.getJourney({ journeyId: j.journeyId, identity: OWNER })).documentCount, 1);
+
+  await journeys.removeDocument({ journeyId: j.journeyId, identity: OWNER, docId: added.docId });
+  const afterRemove = await journeys.getDocument({ journeyId: j.journeyId, identity: OWNER, docId: added.docId });
+  assert.equal(afterRemove.removed, true, "the record itself is never erased");
+  assert.equal(afterRemove.content, "the actual spec text", "content is retained, just flagged — this is a soft delete, not a wipe");
+  assert.equal((await journeys.getJourney({ journeyId: j.journeyId, identity: OWNER })).documentCount, 0);
+
+  // Idempotent re-removal.
+  const again = await journeys.removeDocument({ journeyId: j.journeyId, identity: OWNER, docId: added.docId });
+  assert.equal(again.removed, true);
+});
+
+await test("documents: unknown id is 404; a stranger cannot add one", async () => {
+  const j = await journeys.createJourney({ identity: OWNER, body: { title: "T", visibility: "private" } });
+  await assert.rejects(
+    journeys.getDocument({ journeyId: j.journeyId, identity: OWNER, docId: "nope" }),
+    (e) => e.status === 404 && e.code === "document_not_found",
+  );
+  await assert.rejects(
+    journeys.addDocument({ journeyId: j.journeyId, identity: COLLEAGUE, body: { title: "t", content: "c" } }),
+    (e) => e.status === 403,
+  );
+});
+
+// --- aiCanPost (owner-only gate, no enforcement point yet) --------------------
+
+await test("aiCanPost: owner-only to toggle, off by default", async () => {
+  const j = await journeys.createJourney({ identity: OWNER, body: { title: "T", visibility: "public" } });
+  assert.equal((await journeys.getJourney({ journeyId: j.journeyId, identity: OWNER })).aiCanPost, false);
+  await assert.rejects(
+    journeys.patchJourney({ journeyId: j.journeyId, identity: COLLEAGUE, body: { aiCanPost: true } }),
+    (e) => e.status === 403,
+  );
+  const updated = await journeys.patchJourney({ journeyId: j.journeyId, identity: OWNER, body: { aiCanPost: true } });
+  assert.equal(updated.aiCanPost, true);
+});
+
+// --- reports (docs 20 §6) -----------------------------------------------------
+
+await test("requestReport: creates a pending row immediately, then reads back what the Gateway wrote", async () => {
+  const j = await journeys.createJourney({ identity: OWNER, body: { title: "T", visibility: "public" } });
+  const req = await journeys.requestReport({ journeyId: j.journeyId, identity: COLLEAGUE, body: { question: "Where are we on the redesign?" } });
+  assert.equal(req.status, "pending");
+  assert.ok(req.reportId);
+
+  const call = internalCalls.find((c) => c.reportId === req.reportId);
+  assert.ok(call, "rest-api awaited the internal call to the Gateway");
+  assert.equal(call.question, "Where are we on the redesign?");
+
+  const got = await journeys.getReport({ journeyId: j.journeyId, identity: OWNER, reportId: req.reportId });
+  assert.equal(got.status, "ready", "the stub Gateway already wrote the finished row by the time requestReport returns");
+  assert.ok(got.answer.includes("Where are we on the redesign?"));
+
+  const listed = await journeys.listReports({ journeyId: j.journeyId, identity: OWNER });
+  assert.equal(listed.reports.length, 1);
+
+  assert.equal((await journeys.getJourney({ journeyId: j.journeyId, identity: OWNER })).reportCount, 1);
+});
+
+await test("requestReport: an unreachable Gateway leaves the report failed, not stuck pending forever", async () => {
+  const j = await journeys.createJourney({ identity: OWNER, body: { title: "T", visibility: "public" } });
+  internal.gatewayUnreachable = true;
+  try {
+    const req = await journeys.requestReport({ journeyId: j.journeyId, identity: OWNER, body: { question: "q" } });
+    const got = await journeys.getReport({ journeyId: j.journeyId, identity: OWNER, reportId: req.reportId });
+    assert.equal(got.status, "failed");
+    assert.equal(got.error, "gateway_unreachable");
+  } finally {
+    internal.gatewayUnreachable = false;
+  }
+});
+
+await test("reports: a stranger cannot request or read one; unknown id is 404", async () => {
+  const j = await journeys.createJourney({ identity: OWNER, body: { title: "T", visibility: "private" } });
+  await assert.rejects(
+    journeys.requestReport({ journeyId: j.journeyId, identity: COLLEAGUE, body: { question: "q" } }),
+    (e) => e.status === 403,
+  );
+  await assert.rejects(
+    journeys.getReport({ journeyId: j.journeyId, identity: OWNER, reportId: "nope" }),
+    (e) => e.status === 404 && e.code === "report_not_found",
+  );
+});
+
+// --- contributor stats (docs 20 §10) -------------------------------------------
+
+await test("contributors: reportRequestCount bumps on every ask, including ones the Gateway will fail", async () => {
+  const j = await journeys.createJourney({ identity: OWNER, body: { title: "T", visibility: "public" } });
+  await journeys.requestReport({ journeyId: j.journeyId, identity: COLLEAGUE, body: { question: "q1" } });
+  await journeys.requestReport({ journeyId: j.journeyId, identity: COLLEAGUE, body: { question: "q2" } });
+  const { contributors } = await journeys.listContributors({ journeyId: j.journeyId, identity: OWNER });
+  const mine = contributors.find((c) => c.contributorIdentity === COLLEAGUE);
+  assert.equal(mine.reportRequestCount, 2);
+});
+
+await test("contributors: kelaboJoinCount settles immediately when linking an already-ended kelabo", async () => {
+  const j = await journeys.createJourney({ identity: OWNER, body: { title: "T", visibility: "public" } });
+  await seedKelabo({ kelaboId: "k-ended", host: OWNER, status: "ended" });
+  db.__putHistory({
+    archiveId: "k-ended",
+    kelaboId: "k-ended",
+    host: OWNER,
+    endedAt: Date.now(),
+    participantIdentities: [OWNER, COLLEAGUE],
+  });
+  await journeys.linkKelabo({ journeyId: j.journeyId, identity: OWNER, kelaboId: "k-ended" });
+
+  const { contributors } = await journeys.listContributors({ journeyId: j.journeyId, identity: OWNER });
+  assert.equal(contributors.find((c) => c.contributorIdentity === OWNER).kelaboJoinCount, 1);
+  assert.equal(contributors.find((c) => c.contributorIdentity === COLLEAGUE).kelaboJoinCount, 1);
+});
+
+await test("contributors: linking a still-live kelabo does not (yet) settle kelaboJoinCount", async () => {
+  const j = await journeys.createJourney({ identity: OWNER, body: { title: "T", visibility: "public" } });
+  await seedKelabo({ kelaboId: "k-live", host: OWNER, status: "active" });
+  await journeys.linkKelabo({ journeyId: j.journeyId, identity: OWNER, kelaboId: "k-live" });
+  const { contributors } = await journeys.listContributors({ journeyId: j.journeyId, identity: OWNER });
+  assert.equal(contributors.length, 0, "documented gap: settles only at kelabo-end, not built in this pass");
+});
+
 // --- a handful of true HTTP-level checks, to prove index.js wiring ----------
 
 await test("HTTP: POST /journeys requires a session", async () => {
@@ -549,6 +766,44 @@ await test("HTTP: status update + history + timeline round-trip through the real
   assert.equal(timeline.statusCode, 200);
   assert.equal(timeline.json.entries.length, 1);
   assert.equal(timeline.json.entries[0].type, "status");
+});
+
+await test("HTTP: board message and document round-trip through the real route table", async () => {
+  const cookies = await sessionFor("frank@example.com");
+  const created = await call("POST", "/journeys", { body: { title: "Board+docs via HTTP", visibility: "public" }, cookies });
+  const id = created.json.journeyId;
+
+  const msg = await call("POST", `/journeys/${id}/board`, { body: { content: "hello" }, cookies });
+  assert.equal(msg.statusCode, 200);
+  const edited = await call("PATCH", `/journeys/${id}/board/${msg.json.msgId}`, { body: { content: "hello, edited" }, cookies });
+  assert.equal(edited.statusCode, 200);
+  assert.equal(edited.json.version, 2);
+  const removed = await call("DELETE", `/journeys/${id}/board/${msg.json.msgId}`, { cookies });
+  assert.equal(removed.statusCode, 200);
+
+  const doc = await call("POST", `/journeys/${id}/documents`, { body: { title: "d", content: "text" }, cookies });
+  assert.equal(doc.statusCode, 200);
+  const gotDoc = await call("GET", `/journeys/${id}/documents/${doc.json.docId}`, { cookies });
+  assert.equal(gotDoc.statusCode, 200);
+  assert.equal(gotDoc.json.title, "d");
+});
+
+await test("HTTP: report request + contributors round-trip through the real route table", async () => {
+  const cookies = await sessionFor("gina@example.com");
+  const created = await call("POST", "/journeys", { body: { title: "Reports via HTTP", visibility: "public" }, cookies });
+  const id = created.json.journeyId;
+
+  const req = await call("POST", `/journeys/${id}/reports`, { body: { question: "Any blockers?" }, cookies });
+  assert.equal(req.statusCode, 200);
+  assert.equal(req.json.status, "pending");
+
+  const got = await call("GET", `/journeys/${id}/reports/${req.json.reportId}`, { cookies });
+  assert.equal(got.statusCode, 200);
+  assert.equal(got.json.status, "ready");
+
+  const contributors = await call("GET", `/journeys/${id}/contributors`, { cookies });
+  assert.equal(contributors.statusCode, 200);
+  assert.equal(contributors.json.contributors[0].reportRequestCount, 1);
 });
 
 console.log(`\n${passed} passed`);

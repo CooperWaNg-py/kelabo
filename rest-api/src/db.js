@@ -619,6 +619,127 @@ export function createDb({ config, client } = {}) {
     return res.Items || [];
   }
 
+  // --- message board (docs 20 §7) --------------------------------------------
+  //
+  // Two item kinds, both prefixed `BOARDMSG#`, told apart by whether the SK
+  // contains `#V#`: `BOARDMSG#<msgId>` is the current, mutable head;
+  // `BOARDMSG#<msgId>#V#<version>` is one immutable snapshot behind it.
+  // Listing heads therefore queries the shared prefix and filters the
+  // version rows out in code — same "query broad, filter in the handler"
+  // idiom `listKelabosByStatusForIdentity` already uses, and cheap here
+  // because a pinned board stays small.
+
+  async function createBoardMessageHead(journeyId, head) {
+    await doc.send(
+      new PutCommand({
+        TableName: T.journeys,
+        Item: { PK: `JOURNEY#${journeyId}`, SK: `BOARDMSG#${head.msgId}`, ...head },
+        ConditionExpression: "attribute_not_exists(SK)",
+      })
+    );
+  }
+
+  /** Unconditional overwrite of the head — used for edits and removal,
+   *  where the caller already holds the current item and is rewriting it
+   *  whole, the same `putInvite` pattern uses. */
+  async function putBoardMessageHead(journeyId, head) {
+    await doc.send(
+      new PutCommand({
+        TableName: T.journeys,
+        Item: { PK: `JOURNEY#${journeyId}`, SK: `BOARDMSG#${head.msgId}`, ...head },
+      })
+    );
+  }
+
+  async function getBoardMessageHead(journeyId, msgId) {
+    const res = await doc.send(
+      new GetCommand({ TableName: T.journeys, Key: { PK: `JOURNEY#${journeyId}`, SK: `BOARDMSG#${msgId}` } })
+    );
+    return res.Item || null;
+  }
+
+  async function listBoardMessageHeads(journeyId) {
+    const res = await doc.send(
+      new QueryCommand({
+        TableName: T.journeys,
+        KeyConditionExpression: "PK = :pk AND begins_with(SK, :sk)",
+        ExpressionAttributeValues: { ":pk": `JOURNEY#${journeyId}`, ":sk": "BOARDMSG#" },
+      })
+    );
+    return (res.Items || []).filter((i) => !String(i.SK).includes("#V#"));
+  }
+
+  async function putBoardMessageVersion(journeyId, version) {
+    await doc.send(
+      new PutCommand({
+        TableName: T.journeys,
+        Item: {
+          PK: `JOURNEY#${journeyId}`,
+          SK: `BOARDMSG#${version.msgId}#V#${padVersion(version.version)}`,
+          ...version,
+        },
+      })
+    );
+  }
+
+  /** Unambiguous even sharing the `BOARDMSG#` prefix with the head: the
+   *  head's SK never contains `#V#`, so this begins_with cannot match it. */
+  async function listBoardMessageVersions(journeyId, msgId) {
+    const res = await doc.send(
+      new QueryCommand({
+        TableName: T.journeys,
+        KeyConditionExpression: "PK = :pk AND begins_with(SK, :sk)",
+        ExpressionAttributeValues: { ":pk": `JOURNEY#${journeyId}`, ":sk": `BOARDMSG#${msgId}#V#` },
+        ScanIndexForward: false,
+      })
+    );
+    return res.Items || [];
+  }
+
+  // --- documents (docs 20 §8) -------------------------------------------------
+  //
+  // One item per document, `DOC#<docId>`. No version chain — a document is
+  // added once and only ever soft-removed, never edited (docs 20 §8: "no
+  // further edit"), so there is nothing to version.
+
+  async function createDocument(journeyId, item) {
+    await doc.send(
+      new PutCommand({
+        TableName: T.journeys,
+        Item: { PK: `JOURNEY#${journeyId}`, SK: `DOC#${item.docId}`, ...item },
+        ConditionExpression: "attribute_not_exists(SK)",
+      })
+    );
+  }
+
+  /** Unconditional overwrite — used only for the soft-delete flip. */
+  async function putDocument(journeyId, item) {
+    await doc.send(
+      new PutCommand({
+        TableName: T.journeys,
+        Item: { PK: `JOURNEY#${journeyId}`, SK: `DOC#${item.docId}`, ...item },
+      })
+    );
+  }
+
+  async function getDocument(journeyId, docId) {
+    const res = await doc.send(
+      new GetCommand({ TableName: T.journeys, Key: { PK: `JOURNEY#${journeyId}`, SK: `DOC#${docId}` } })
+    );
+    return res.Item || null;
+  }
+
+  async function listDocuments(journeyId) {
+    const res = await doc.send(
+      new QueryCommand({
+        TableName: T.journeys,
+        KeyConditionExpression: "PK = :pk AND begins_with(SK, :sk)",
+        ExpressionAttributeValues: { ":pk": `JOURNEY#${journeyId}`, ":sk": "DOC#" },
+      })
+    );
+    return res.Items || [];
+  }
+
   // --- kelabo <-> journey membership -----------------------------------------
   //
   // Many-to-many: linking writes the forward LINK# item in the journey's own
@@ -763,6 +884,91 @@ export function createDb({ config, client } = {}) {
 
   async function deleteJourneyMeta(journeyId) {
     await doc.send(new DeleteCommand({ TableName: T.journeys, Key: { PK: `JOURNEY#${journeyId}`, SK: "META" } }));
+  }
+
+  // --- reports (docs 20 §6) ---------------------------------------------------
+  //
+  // `REPORT#<reportId>` — no timestamp in the sort key, unlike CONTRIB#/TL#:
+  // reports are a small, unpaginated collection per journey (no cursor is
+  // ever needed), and a bare reportId lets a report be fetched directly by
+  // id, which a timestamp-prefixed key would not.
+
+  async function putJourneyReport(journeyId, report) {
+    await doc.send(
+      new PutCommand({
+        TableName: T.journeys,
+        Item: { PK: `JOURNEY#${journeyId}`, SK: `REPORT#${report.reportId}`, ...report },
+      })
+    );
+  }
+
+  async function getJourneyReport(journeyId, reportId) {
+    const res = await doc.send(
+      new GetCommand({ TableName: T.journeys, Key: { PK: `JOURNEY#${journeyId}`, SK: `REPORT#${reportId}` } })
+    );
+    return res.Item || null;
+  }
+
+  async function listJourneyReports(journeyId) {
+    const res = await doc.send(
+      new QueryCommand({
+        TableName: T.journeys,
+        KeyConditionExpression: "PK = :pk AND begins_with(SK, :sk)",
+        ExpressionAttributeValues: { ":pk": `JOURNEY#${journeyId}`, ":sk": "REPORT#" },
+      })
+    );
+    return res.Items || [];
+  }
+
+  /** Only ever called when the Gateway could not be reached at all — the
+   *  Gateway itself marks a report failed for every other reason, straight
+   *  from `generateJourneyReport`. */
+  async function markJourneyReportFailed(journeyId, reportId, error) {
+    await doc.send(
+      new UpdateCommand({
+        TableName: T.journeys,
+        Key: { PK: `JOURNEY#${journeyId}`, SK: `REPORT#${reportId}` },
+        UpdateExpression: "SET #status = :failed, #error = :error",
+        ConditionExpression: "attribute_exists(PK)",
+        ExpressionAttributeNames: { "#status": "status", "#error": "error" },
+        ExpressionAttributeValues: { ":failed": "failed", ":error": error },
+      })
+    ).catch(() => {});
+  }
+
+  // --- contributor rollups (docs 20 §10) --------------------------------------
+  //
+  // The same unconditional-ADD idiom every other usage counter in this system
+  // already uses: a fresh identity's first bump creates the row implicitly,
+  // so there is no separate "add this person" step. Cumulative, never
+  // decremented — a rollup of contribution to the journey, not a live
+  // membership count.
+
+  async function bumpContributor(journeyId, identity, field) {
+    const now = Date.now();
+    await doc.send(
+      new UpdateCommand({
+        TableName: T.journeys,
+        Key: { PK: `JOURNEY#${journeyId}`, SK: `CONTRIBUTOR#${identity}` },
+        UpdateExpression:
+          `SET contributorIdentity = if_not_exists(contributorIdentity, :identity), ` +
+          `firstSeenAt = if_not_exists(firstSeenAt, :now), lastActiveAt = :now, ` +
+          `#field = if_not_exists(#field, :zero) + :one`,
+        ExpressionAttributeNames: { "#field": field },
+        ExpressionAttributeValues: { ":identity": identity, ":now": now, ":zero": 0, ":one": 1 },
+      })
+    );
+  }
+
+  async function listContributors(journeyId) {
+    const res = await doc.send(
+      new QueryCommand({
+        TableName: T.journeys,
+        KeyConditionExpression: "PK = :pk AND begins_with(SK, :sk)",
+        ExpressionAttributeValues: { ":pk": `JOURNEY#${journeyId}`, ":sk": "CONTRIBUTOR#" },
+      })
+    );
+    return res.Items || [];
   }
 
   /**
@@ -1349,6 +1555,16 @@ export function createDb({ config, client } = {}) {
     getAccessor,
     removeAccessor,
     listAccessors,
+    createBoardMessageHead,
+    putBoardMessageHead,
+    getBoardMessageHead,
+    listBoardMessageHeads,
+    putBoardMessageVersion,
+    listBoardMessageVersions,
+    createDocument,
+    putDocument,
+    getDocument,
+    listDocuments,
     linkKelaboToJourney,
     unlinkKelaboFromJourney,
     getJourneyLink,
@@ -1357,5 +1573,11 @@ export function createDb({ config, client } = {}) {
     deleteKelaboJourneyMirror,
     deleteJourneyChildren,
     deleteJourneyMeta,
+    putJourneyReport,
+    getJourneyReport,
+    listJourneyReports,
+    markJourneyReportFailed,
+    bumpContributor,
+    listContributors,
   };
 }

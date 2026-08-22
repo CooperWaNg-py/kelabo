@@ -15,7 +15,7 @@ import { err } from "./errors.js";
  * grants the same rights minus managing that roster, which — like delete,
  * visibility and complete/reopen — stays owner-only (docs 20 §3.3).
  */
-export function createJourneys({ config, db }) {
+export function createJourneys({ config, db, internal }) {
   const tenantOf = (identity) => identity.split("@")[1].toLowerCase();
 
   // A conditional write that lost its guard surfaces either as a bare
@@ -38,9 +38,12 @@ export function createJourneys({ config, db }) {
       // Optional (docs 20 §5): absent means genuinely unset, not 0%/red.
       health: meta.health ?? null,
       progress: meta.progress ?? null,
+      // Owner-only gate on unsupervised agent board posts (docs 20 §7).
+      aiCanPost: !!meta.aiCanPost,
       kelaboCount: meta.kelaboCount || 0,
       documentCount: meta.documentCount || 0,
       reportCount: meta.reportCount || 0,
+      boardMessageCount: meta.boardMessageCount || 0,
       accessorCount: meta.accessorCount || 0,
       createdAt: meta.createdAt,
       updatedAt: meta.updatedAt,
@@ -151,6 +154,7 @@ export function createJourneys({ config, db }) {
     if (typeof body.title === "string" && body.title.trim()) updates.title = body.title.trim();
     if (JOURNEY_VISIBILITIES.includes(body.visibility)) updates.visibility = body.visibility;
     if (typeof body.avatarVariant === "number") updates.avatarVariant = body.avatarVariant;
+    if (typeof body.aiCanPost === "boolean") updates.aiCanPost = body.aiCanPost;
     if (Object.keys(updates).length === 0) throw err(400, "nothing_to_change");
     updates.updatedAt = Date.now();
     await db.updateJourneyMeta(journeyId, updates);
@@ -305,6 +309,19 @@ export function createJourneys({ config, db }) {
       at: now,
       detail: { kelaboId },
     });
+    // Contributor stats (docs 20 §10) settle immediately for a kelabo that
+    // has already ended — its participant list is final. A kelabo linked
+    // while still live settles when it ends instead (not built in this
+    // pass: that half needs a hook in the Gateway's own end-of-kelabo path,
+    // gateway/src/archive.js, which this change deliberately does not
+    // touch — the common case of linking a kelabo that already happened is
+    // covered either way).
+    if (kelaboMeta.status === "ended") {
+      const history = await db.getHistory(kelaboId).catch(() => null);
+      for (const p of history?.participantIdentities || []) {
+        await db.bumpContributor(journeyId, p, "kelaboJoinCount").catch(() => {});
+      }
+    }
     return { journeyId, kelaboId, linked: true };
   }
 
@@ -441,6 +458,191 @@ export function createJourneys({ config, db }) {
     return { entries, ...(nextBefore !== undefined ? { nextBefore } : {}) };
   }
 
+  // --- message board (docs 20 §7) ---------------------------------------------
+  //
+  // Distinct from a kelabo's own board (CONTRIB# rows, fanned out and never
+  // edited): a journey message is edited in place, but every edit is kept —
+  // the BOARDMSG#<msgId> item is the current head, the #V# chain behind it
+  // is immutable. Member-writable, frozen once completed, same as
+  // description and status.
+
+  async function addBoardMessage({ journeyId, identity, body }) {
+    const meta = await requireJourney(journeyId);
+    await requireMember(meta, identity);
+    requireActive(meta);
+    const msgId = randomUUID();
+    const now = Date.now();
+    const content = body.content.trim();
+    await db.createBoardMessageHead(journeyId, {
+      msgId,
+      content,
+      createdBy: identity,
+      createdAt: now,
+      version: 1,
+      removed: false,
+    });
+    await db.putBoardMessageVersion(journeyId, { msgId, version: 1, content, action: "created", actor: identity, at: now });
+    await db.updateJourneyMeta(journeyId, { boardMessageCount: (meta.boardMessageCount || 0) + 1, updatedAt: now });
+    await db.putJourneyTimelineEntry(journeyId, {
+      type: "board_message",
+      summary: "Board message added",
+      actor: identity,
+      at: now,
+      detail: { msgId, action: "created" },
+    });
+    return { journeyId, msgId, version: 1 };
+  }
+
+  async function editBoardMessage({ journeyId, identity, msgId, body }) {
+    const meta = await requireJourney(journeyId);
+    await requireMember(meta, identity);
+    requireActive(meta);
+    const head = await db.getBoardMessageHead(journeyId, msgId);
+    if (!head) throw err(404, "board_message_not_found");
+    if (head.removed) throw err(409, "already_removed");
+    const version = head.version + 1;
+    const now = Date.now();
+    const content = body.content.trim();
+    await db.putBoardMessageHead(journeyId, { ...head, content, version, updatedBy: identity, updatedAt: now });
+    await db.putBoardMessageVersion(journeyId, { msgId, version, content, action: "edited", actor: identity, at: now });
+    await db.putJourneyTimelineEntry(journeyId, {
+      type: "board_message",
+      summary: "Board message edited",
+      actor: identity,
+      at: now,
+      detail: { msgId, action: "edited" },
+    });
+    return { journeyId, msgId, version };
+  }
+
+  async function removeBoardMessage({ journeyId, identity, msgId }) {
+    const meta = await requireJourney(journeyId);
+    await requireMember(meta, identity);
+    requireActive(meta);
+    const head = await db.getBoardMessageHead(journeyId, msgId);
+    if (!head) throw err(404, "board_message_not_found");
+    // Idempotent: removing an already-removed message lands on the same
+    // state rather than an error, and must not post a second timeline entry.
+    if (head.removed) return { journeyId, msgId, removed: true };
+    const version = head.version + 1;
+    const now = Date.now();
+    await db.putBoardMessageHead(journeyId, { ...head, removed: true, removedBy: identity, removedAt: now, version });
+    await db.putBoardMessageVersion(journeyId, { msgId, version, content: head.content, action: "removed", actor: identity, at: now });
+    await db.updateJourneyMeta(journeyId, {
+      boardMessageCount: Math.max(0, (meta.boardMessageCount || 0) - 1),
+      updatedAt: now,
+    });
+    await db.putJourneyTimelineEntry(journeyId, {
+      type: "board_message",
+      summary: "Board message removed",
+      actor: identity,
+      at: now,
+      detail: { msgId, action: "removed" },
+    });
+    return { journeyId, msgId, removed: true };
+  }
+
+  /** Every message, removed ones included — a removed message stays
+   *  visible (struck through by the caller) rather than vanishing; only
+   *  `boardMessageCount` on META reflects the current, active count. */
+  async function listBoardMessages({ journeyId, identity }) {
+    const meta = await requireJourney(journeyId);
+    await requireMember(meta, identity);
+    const heads = await db.listBoardMessageHeads(journeyId);
+    return {
+      messages: heads
+        .sort((a, b) => b.createdAt - a.createdAt)
+        .map(({ PK, SK, ...m }) => m),
+    };
+  }
+
+  async function getBoardMessageHistory({ journeyId, identity, msgId }) {
+    const meta = await requireJourney(journeyId);
+    await requireMember(meta, identity);
+    const versions = await db.listBoardMessageVersions(journeyId, msgId);
+    return { versions: versions.map(({ PK, SK, ...v }) => v) };
+  }
+
+  // --- documents (docs 20 §8) --------------------------------------------------
+  //
+  // Pasted or typed text, not file upload — there is no upload capability
+  // anywhere in this codebase (docs 20 §8). Added once, never edited; only
+  // soft-removed, per "files can be removed, but the record can't be
+  // changed."
+
+  async function addDocument({ journeyId, identity, body }) {
+    const meta = await requireJourney(journeyId);
+    await requireMember(meta, identity);
+    requireActive(meta);
+    const docId = randomUUID();
+    const now = Date.now();
+    const content = body.content;
+    const item = {
+      docId,
+      title: body.title.trim(),
+      content,
+      sizeBytes: Buffer.byteLength(content, "utf8"),
+      addedBy: identity,
+      addedAt: now,
+      removed: false,
+    };
+    await db.createDocument(journeyId, item);
+    await db.updateJourneyMeta(journeyId, { documentCount: (meta.documentCount || 0) + 1, updatedAt: now });
+    await db.putJourneyTimelineEntry(journeyId, {
+      type: "document",
+      summary: `Document added: ${item.title}`,
+      actor: identity,
+      at: now,
+      detail: { docId },
+    });
+    return { journeyId, docId };
+  }
+
+  async function removeDocument({ journeyId, identity, docId }) {
+    const meta = await requireJourney(journeyId);
+    await requireMember(meta, identity);
+    requireActive(meta);
+    const document = await db.getDocument(journeyId, docId);
+    if (!document) throw err(404, "document_not_found");
+    if (document.removed) return { journeyId, docId, removed: true }; // idempotent
+    const now = Date.now();
+    await db.putDocument(journeyId, { ...document, removed: true, removedBy: identity, removedAt: now });
+    await db.updateJourneyMeta(journeyId, {
+      documentCount: Math.max(0, (meta.documentCount || 0) - 1),
+      updatedAt: now,
+    });
+    await db.putJourneyTimelineEntry(journeyId, {
+      type: "document",
+      summary: `Document removed: ${document.title}`,
+      actor: identity,
+      at: now,
+      detail: { docId },
+    });
+    return { journeyId, docId, removed: true };
+  }
+
+  /** Every document, removed ones included — same visibility rule as the
+   *  message board (§7): `documentCount` on META is the active-only count. */
+  async function listDocuments({ journeyId, identity }) {
+    const meta = await requireJourney(journeyId);
+    await requireMember(meta, identity);
+    const docs = await db.listDocuments(journeyId);
+    return {
+      documents: docs
+        .sort((a, b) => b.addedAt - a.addedAt)
+        .map(({ PK, SK, ...d }) => d),
+    };
+  }
+
+  async function getDocument({ journeyId, identity, docId }) {
+    const meta = await requireJourney(journeyId);
+    await requireMember(meta, identity);
+    const document = await db.getDocument(journeyId, docId);
+    if (!document) throw err(404, "document_not_found");
+    const { PK, SK, ...rest } = document;
+    return rest;
+  }
+
   async function updateDescription({ journeyId, identity, body }) {
     const meta = await requireJourney(journeyId);
     await requireMember(meta, identity);
@@ -459,6 +661,84 @@ export function createJourneys({ config, db }) {
     await requireMember(meta, identity);
     const versions = await db.listJourneyDescriptionVersions(journeyId);
     return { versions: versions.map(({ PK, SK, ...v }) => v) };
+  }
+
+  // --- reports (docs 20 §6) ----------------------------------------------------
+  //
+  // Generation happens in the Gateway, which holds the LLM credential
+  // (rest-api's role only has DescribeSecret on it); this creates the
+  // pending row, records the ask, and awaits the Gateway's internal call
+  // the same way requestMinutes already does. The client re-fetches the
+  // finished row afterward rather than trusting this response's body,
+  // matching how a kelabo's own minutes are read back separately too.
+
+  async function requestReport({ journeyId, identity, body }) {
+    const meta = await requireJourney(journeyId);
+    await requireMember(meta, identity);
+    requireActive(meta);
+    const reportId = randomUUID();
+    const now = Date.now();
+    const question = body.question.trim();
+    await db.putJourneyReport(journeyId, {
+      reportId,
+      question,
+      requestedBy: identity,
+      requestedAt: now,
+      status: "pending",
+    });
+    await db.updateJourneyMeta(journeyId, { reportCount: (meta.reportCount || 0) + 1, updatedAt: now });
+    await db.putJourneyTimelineEntry(journeyId, {
+      type: "report",
+      summary: `Report requested: ${question.slice(0, 80)}`,
+      actor: identity,
+      at: now,
+      detail: { reportId },
+    });
+    // Counts the act of asking, including a request that later fails.
+    await db.bumpContributor(journeyId, identity, "reportRequestCount").catch(() => {});
+    try {
+      await internal.requestJourneyReport(journeyId, { reportId, question }, identity);
+    } catch (e) {
+      // The Gateway itself marks a report failed for every reason it can
+      // observe (docs 20 §16); this only covers the one it cannot — never
+      // having been reachable at all, the same distinction endKelabo's
+      // `archivePending` already draws.
+      await db.markJourneyReportFailed(journeyId, reportId, "gateway_unreachable");
+    }
+    return { journeyId, reportId, status: "pending" };
+  }
+
+  async function listReports({ journeyId, identity }) {
+    const meta = await requireJourney(journeyId);
+    await requireMember(meta, identity);
+    const reports = await db.listJourneyReports(journeyId);
+    return {
+      reports: reports
+        .sort((a, b) => b.requestedAt - a.requestedAt)
+        .map(({ PK, SK, ...r }) => r),
+    };
+  }
+
+  async function getReport({ journeyId, identity, reportId }) {
+    const meta = await requireJourney(journeyId);
+    await requireMember(meta, identity);
+    const report = await db.getJourneyReport(journeyId, reportId);
+    if (!report) throw err(404, "report_not_found");
+    const { PK, SK, ...rest } = report;
+    return rest;
+  }
+
+  // --- contributors (docs 20 §10) ----------------------------------------------
+
+  async function listContributors({ journeyId, identity }) {
+    const meta = await requireJourney(journeyId);
+    await requireMember(meta, identity);
+    const rows = await db.listContributors(journeyId);
+    return {
+      contributors: rows
+        .map(({ PK, SK, ...c }) => c)
+        .sort((a, b) => (b.kelaboJoinCount || 0) - (a.kelaboJoinCount || 0)),
+    };
   }
 
   return {
@@ -480,5 +760,18 @@ export function createJourneys({ config, db }) {
     updateStatus,
     getStatusHistory,
     getTimeline,
+    addBoardMessage,
+    editBoardMessage,
+    removeBoardMessage,
+    listBoardMessages,
+    getBoardMessageHistory,
+    addDocument,
+    removeDocument,
+    listDocuments,
+    getDocument,
+    requestReport,
+    listReports,
+    getReport,
+    listContributors,
   };
 }

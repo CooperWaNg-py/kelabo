@@ -67,6 +67,8 @@ export const api = {
     apiRequest(`/kelabos/${id}/cancel`, { method: 'POST', body: reason ? { reason } : {} }),
   rescheduleKelabo: (id, body) =>
     apiRequest(`/kelabos/${id}/reschedule`, { method: 'POST', body }),
+  updateInvitees: (id, invitees) =>
+    apiRequest(`/kelabos/${id}/invitees`, { method: 'POST', body: { invitees } }),
   // Deliberately reachable without a session: the invitation link is meant to
   // work for people who have no account.
   getInvitation: id => apiRequest(`/kelabos/${id}/invitation`),

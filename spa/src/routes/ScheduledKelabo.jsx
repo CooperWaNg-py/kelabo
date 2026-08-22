@@ -7,6 +7,7 @@ import { Icon } from '../components/ui/Icon'
 import { Avatar } from '../components/ui/Avatar'
 import { SkeletonRows } from '../components/ui/Skeleton'
 import { DateTimePicker } from '../components/DateTimePicker'
+import { EmailPicker } from '../components/EmailPicker'
 import { useToast } from '../components/Toaster'
 import { useConfirm } from '../components/ConfirmDialog'
 import { useAuth, displayName } from '../auth'
@@ -52,6 +53,11 @@ export default function ScheduledKelabo() {
   const [rDuration, setRDuration] = useState(30)
   const [rTitle, setRTitle] = useState('')
   const [rNote, setRNote] = useState('')
+  // Invitees form state — a separate panel from Reschedule, same reasoning
+  // as the two being separate routes server-side: changing who is coming and
+  // changing when it is are different questions with different blast radius.
+  const [editingInvitees, setEditingInvitees] = useState(false)
+  const [invitees, setInvitees] = useState([])
 
   // Polled, not fetched once: this is where the starting-soon prompt (notes #9)
   // sends everyone, so an invitee is often sitting on this page at the moment
@@ -157,6 +163,34 @@ export default function ScheduledKelabo() {
     }
   }
 
+  const openInvitees = () => {
+    // Who the host actually typed an address for — not the host's own
+    // auto-RSVP row and not a guest who only ever gave a name from the link,
+    // neither of which this panel can touch (scheduling.js §3.5).
+    setInvitees((kelabo.invites || []).filter(i => i.email && !i.isGuest && !i.isHost).map(i => i.email))
+    setEditingInvitees(true)
+  }
+
+  const saveInvitees = async () => {
+    setBusy(true)
+    try {
+      const res = await api.updateInvitees(id, invitees)
+      const parts = []
+      if (res.added?.length) parts.push(`invited ${res.added.length}`)
+      if (res.removed?.length) parts.push(`removed ${res.removed.length}`)
+      if (res.failed?.length) parts.push(`${res.failed.length} could not be emailed`)
+      toast(parts.length ? parts.join(', ') : 'Invitees updated')
+      const fresh = await api.getScheduled(id)
+      setKelabo(fresh)
+      setEditingInvitees(false)
+    } catch (e) {
+      if (e?.code === 'nothing_to_change') { setEditingInvitees(false) }
+      else toast('Could not update invitees — try again')
+    } finally {
+      setBusy(false)
+    }
+  }
+
   if (state === 'loading') {
     return <main className="page"><SkeletonRows n={3} /></main>
   }
@@ -206,7 +240,7 @@ export default function ScheduledKelabo() {
         </p>
       </div>
 
-      {kelabo.isHost && (live || scheduled) && !editing && (
+      {kelabo.isHost && (live || scheduled) && !editing && !editingInvitees && (
         <div className="action-row action-row-start">
           <Button variant="primary" onClick={start} disabled={starting}>
             {live ? 'Rejoin' : starting ? 'Starting…' : 'Start now'}
@@ -215,6 +249,9 @@ export default function ScheduledKelabo() {
             <>
               <Button variant="outline" onClick={openReschedule} disabled={busy}>
                 <Icon name="calendar" size={14} />Reschedule
+              </Button>
+              <Button variant="outline" onClick={openInvitees} disabled={busy}>
+                <Icon name="user-plus" size={14} />Edit invitees
               </Button>
               <Button variant="outline-danger" onClick={cancel} disabled={busy}>
                 <Icon name="x" size={14} />Cancel
@@ -251,6 +288,24 @@ export default function ScheduledKelabo() {
           <div className="action-row action-row-start">
             <Button variant="primary" onClick={saveReschedule} disabled={busy}>Save changes</Button>
             <Button variant="ghost" onClick={() => setEditing(false)} disabled={busy}>Discard</Button>
+          </div>
+        </div>
+      )}
+
+      {kelabo.isHost && scheduled && editingInvitees && (
+        <div className="panel-inset">
+          <div className="section-title">Edit invitees</div>
+          <div className="field">
+            <span className="label">Invited</span>
+            <EmailPicker value={invitees} onChange={setInvitees} disabled={busy} />
+          </div>
+          <p className="form-note">
+            A new address is emailed the invitation; removing someone is emailed that they no longer need to come.
+            The kelabo itself is unaffected either way.
+          </p>
+          <div className="action-row action-row-start">
+            <Button variant="primary" onClick={saveInvitees} disabled={busy}>Save changes</Button>
+            <Button variant="ghost" onClick={() => setEditingInvitees(false)} disabled={busy}>Discard</Button>
           </div>
         </div>
       )}

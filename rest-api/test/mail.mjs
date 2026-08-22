@@ -18,7 +18,7 @@ import { dirname, join } from "node:path";
 import { createMailer, mailSettingsFromConfig, MAIL_PROVIDERS } from "../src/mail/index.js";
 import { createMailerSendTransport } from "../src/mail/mailersend.js";
 import { createSesTransport } from "../src/mail/ses.js";
-import { otpMessage, inviteMessage, cancellationMessage, rescheduleMessage } from "../src/mail/messages.js";
+import { otpMessage, inviteMessage, cancellationMessage, rescheduleMessage, uninviteMessage } from "../src/mail/messages.js";
 import { loadConfig } from "../../config/loadConfig.mjs";
 
 let passed = 0;
@@ -108,6 +108,12 @@ await test("the scheduling mails carry the time, the link, and no inline part", 
   assert.equal(moved.subject, "Rescheduled: Roadmap");
   // Both times, because "moved to 3pm" is unreadable without knowing from what.
   assert.ok(moved.text.includes("Was:") && moved.text.includes("Now:"), moved.text);
+
+  const removed = uninviteMessage({ hostName: "R", title: "Roadmap", scheduledAt: at });
+  assert.equal(removed.subject, "Removed: Roadmap");
+  // Distinct from cancellationMessage: the kelabo itself is still happening.
+  assert.ok(removed.text.includes("still happening"), removed.text);
+  assert.deepEqual(removed.inline, []);
 });
 
 await test("a title from a participant cannot inject markup into the HTML body", async () => {
@@ -159,8 +165,9 @@ await test("the mailer supplies the from address, so no call site has to remembe
   await mailer.sendInvite({ to: "b@example.com", hostName: "R", title: "T", scheduledAt: 0, inviteUrl: "u" });
   await mailer.sendCancellation({ to: "c@example.com", hostName: "R", title: "T", scheduledAt: 0 });
   await mailer.sendReschedule({ to: "d@example.com", hostName: "R", title: "T", scheduledAt: 1, previousScheduledAt: 0, inviteUrl: "u" });
-  assert.deepEqual(sends.map((s) => s.from), Array(4).fill("otp@example.com"));
-  assert.deepEqual(sends.map((s) => s.to), ["a@example.com", "b@example.com", "c@example.com", "d@example.com"]);
+  await mailer.sendUninvite({ to: "f@example.com", hostName: "R", title: "T", scheduledAt: 0 });
+  assert.deepEqual(sends.map((s) => s.from), Array(5).fill("otp@example.com"));
+  assert.deepEqual(sends.map((s) => s.to), ["a@example.com", "b@example.com", "c@example.com", "d@example.com", "f@example.com"]);
 
   // An explicit one still wins, so a caller that needs a different sender can.
   await mailer.sendOtp({ to: "e@example.com", code: "1", from: "other@example.com" });
@@ -192,7 +199,8 @@ await test("the stub seam still stands in for every kind of mail", async () => {
   await mailer.sendInvite({ to: "b@example.com" });
   await mailer.sendCancellation({ to: "c@example.com" });
   await mailer.sendReschedule({ to: "d@example.com" });
-  assert.equal(seen.length, 4);
+  await mailer.sendUninvite({ to: "f@example.com" });
+  assert.equal(seen.length, 5);
 });
 
 // --- SES --------------------------------------------------------------------

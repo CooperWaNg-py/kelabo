@@ -68,6 +68,7 @@ const sentEmails = [];
 const sentInvites = [];
 const sentCancellations = [];
 const sentReschedules = [];
+const sentUninvites = [];
 // Stands in for `createMailer` — the same four methods, no transport. `from` is
 // no longer passed by the callers (the mailer defaults it), so it arrives
 // undefined here and the assertions below are about `to` and the content.
@@ -86,6 +87,9 @@ const mailer = {
   },
   sendReschedule: async (msg) => {
     sentReschedules.push(msg);
+  },
+  sendUninvite: async (msg) => {
+    sentUninvites.push(msg);
   },
 };
 const internalCalls = [];
@@ -1522,6 +1526,135 @@ await test("reschedule with an empty body is nothing_to_change", async () => {
   assert.equal(res.statusCode, 400);
   assert.equal(res.json.error, "nothing_to_change");
   await db.updateKelaboMeta(id, { status: "ended", tenantStatus: null });
+});
+
+// --- add/remove invitees (docs 18 §3.5) ------------------------------------
+
+await test("POST /kelabos/:id/invitees — adds new addresses, emails only them", async () => {
+  const id = await scheduleFresh(); // matt@example.com already invited
+  const before = sentInvites.length;
+
+  const anon = await call("POST", `/kelabos/${id}/invitees`, { body: { invitees: ["matt@example.com"] } });
+  assert.equal(anon.statusCode, 401);
+
+  const res = await call("POST", `/kelabos/${id}/invitees`, {
+    body: { invitees: ["matt@example.com", "priya@example.com"] },
+    cookies: sessionCookies,
+  });
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(res.json.removed, []);
+  assert.equal(res.json.added.length, 1);
+  assert.equal(res.json.added[0].email, "priya@example.com");
+  assert.equal(res.json.added[0].sent, true);
+  assert.equal(res.json.failed.length, 0);
+
+  // Matt was already invited — no second email to him, only Priya's.
+  assert.equal(sentInvites.length, before + 1);
+  assert.equal(sentInvites.at(-1).to, "priya@example.com");
+  assert.equal((await db.getInvite(id, "priya@example.com")).response, "pending");
+});
+
+await test("POST /kelabos/:id/invitees — removes an address, emails the removed person, not the kelabo", async () => {
+  const id = await scheduleFresh(); // matt@example.com invited
+  const before = sentUninvites.length;
+
+  const res = await call("POST", `/kelabos/${id}/invitees`, { body: { invitees: [] }, cookies: sessionCookies });
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(res.json.added, []);
+  assert.equal(res.json.removed.length, 1);
+  assert.equal(res.json.removed[0].email, "matt@example.com");
+
+  assert.equal(sentUninvites.length, before + 1);
+  assert.equal(sentUninvites.at(-1).to, "matt@example.com");
+  assert.equal(await db.getInvite(id, "matt@example.com"), null, "the invite row is gone, not just marked");
+
+  // The kelabo itself is untouched.
+  const meta = await db.getKelaboMeta(id);
+  assert.equal(meta.status, "scheduled");
+  // The host's own auto-RSVP survives a removal request that never named it.
+  assert.equal((await db.getInvite(id, "host@example.com")).response, "accepted");
+});
+
+await test("POST /kelabos/:id/invitees — add and remove in the same call", async () => {
+  const id = await scheduleFresh(); // matt@example.com invited
+  const res = await call("POST", `/kelabos/${id}/invitees`, {
+    body: { invitees: ["priya@example.com"] }, // drops matt, adds priya
+    cookies: sessionCookies,
+  });
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.json.added.length, 1);
+  assert.equal(res.json.removed.length, 1);
+  assert.equal(res.json.added[0].email, "priya@example.com");
+  assert.equal(res.json.removed[0].email, "matt@example.com");
+});
+
+await test("POST /kelabos/:id/invitees — the same list back is nothing_to_change", async () => {
+  const id = await scheduleFresh();
+  const res = await call("POST", `/kelabos/${id}/invitees`, {
+    body: { invitees: ["matt@example.com"] },
+    cookies: sessionCookies,
+  });
+  assert.equal(res.statusCode, 400);
+  assert.equal(res.json.error, "nothing_to_change");
+});
+
+await test("POST /kelabos/:id/invitees — the host's own address is never added or removed through here", async () => {
+  const id = await scheduleFresh();
+  const res = await call("POST", `/kelabos/${id}/invitees`, {
+    // Matt dropped, host's own email listed (as if a client echoed it back) —
+    // neither adds nor removes the host, who was never in the diff's domain.
+    body: { invitees: ["host@example.com"] },
+    cookies: sessionCookies,
+  });
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.json.removed.length, 1);
+  assert.equal(res.json.removed[0].email, "matt@example.com");
+  assert.equal((await db.getInvite(id, "host@example.com")).response, "accepted", "host's own row is untouched");
+});
+
+await test("POST /kelabos/:id/invitees — a guest's link RSVP is not something this route can remove", async () => {
+  const id = await scheduleFresh();
+  // A guest answered the link directly — no email the host ever typed.
+  await db.putInvite(id, { inviteKey: "g:abc123", displayName: "Guest Gary", isGuest: true, response: "accepted", invitedAt: Date.now() });
+  const res = await call("POST", `/kelabos/${id}/invitees`, {
+    body: { invitees: ["matt@example.com"] }, // unchanged from what scheduleFresh already set
+    cookies: sessionCookies,
+  });
+  assert.equal(res.statusCode, 400, "matt is unchanged and the guest row is outside this diff, so there is nothing to change");
+  assert.equal(res.json.error, "nothing_to_change");
+  assert.notEqual(await db.getInvite(id, "g:abc123"), null, "the guest's RSVP survives untouched");
+});
+
+await test("POST /kelabos/:id/invitees — not the host is forbidden", async () => {
+  const id = await scheduleFresh();
+
+  // A second, genuinely different signed-in identity — not the host, and not
+  // an invitee either, which is what makes 403 the right answer rather than
+  // some read-only view.
+  await call("POST", "/auth/otp/request", { body: { email: "colleague@example.com" } });
+  const code = sentEmails.at(-1).code;
+  const ver = await call("POST", "/auth/otp/verify", { body: { email: "colleague@example.com", code } });
+  const otherCookies = { kelabo_session: cookieValue(ver, "kelabo_session"), kelabo_refresh: cookieValue(ver, "kelabo_refresh") };
+
+  const res = await call("POST", `/kelabos/${id}/invitees`, { body: { invitees: [] }, cookies: otherCookies });
+  assert.equal(res.statusCode, 403);
+  assert.equal(res.json.error, "not_host");
+});
+
+await test("POST /kelabos/:id/invitees — refused once live, refused once cancelled", async () => {
+  const live = await scheduleFresh();
+  await call("POST", `/kelabos/${live}/start-scheduled`, { cookies: sessionCookies });
+  const onLive = await call("POST", `/kelabos/${live}/invitees`, { body: { invitees: [] }, cookies: sessionCookies });
+  assert.equal(onLive.statusCode, 409);
+  assert.equal(onLive.json.error, "already_active");
+  await db.updateKelaboMeta(live, { status: "ended", tenantStatus: null });
+  await db.deleteHostGuard("host@example.com");
+
+  const cancelled = await scheduleFresh();
+  await call("POST", `/kelabos/${cancelled}/cancel`, { cookies: sessionCookies });
+  const onCancelled = await call("POST", `/kelabos/${cancelled}/invitees`, { body: { invitees: [] }, cookies: sessionCookies });
+  assert.equal(onCancelled.statusCode, 409);
+  assert.equal(onCancelled.json.error, "kelabo_cancelled");
 });
 
 // --- agent bridge pairing (docs 16 §6) -------------------------------------

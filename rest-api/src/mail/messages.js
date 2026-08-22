@@ -138,6 +138,28 @@ export function cancellationMessage({ hostName, title, scheduledAt, reason }) {
   return { subject: `Cancelled: ${title}`, text, html, inline: [] };
 }
 
+/**
+ * Removed from a scheduled kelabo that is otherwise still happening (docs 18
+ * §3.5) — distinct from `cancellationMessage`, which is the whole kelabo
+ * going away. Deliberately short: nothing is being asked of the recipient,
+ * only told.
+ */
+export function uninviteMessage({ hostName, title, scheduledAt }) {
+  const when = formatWhen(scheduledAt);
+  const text = [
+    `${hostName} removed you from "${title}".`,
+    "",
+    `It is still happening, at ${when} — just without you.`,
+    "No action is needed.",
+  ].join("\n");
+  const html = [
+    `<p><strong>${esc(hostName)}</strong> removed you from &ldquo;${esc(title)}&rdquo;.</p>`,
+    `<p>It is still happening, at ${esc(when)} — just without you.</p>`,
+    `<p style="color:#666;font-size:13px">No action is needed.</p>`,
+  ].join("");
+  return { subject: `Removed: ${title}`, text, html, inline: [] };
+}
+
 /** A scheduled kelabo moved to a new time (docs 18 §3.3). */
 export function rescheduleMessage({ hostName, title, scheduledAt, previousScheduledAt, durationMinutes, inviteUrl }) {
   const nowWhen = formatWhen(scheduledAt, durationMinutes);

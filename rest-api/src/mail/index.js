@@ -22,7 +22,7 @@
  */
 import { createSesTransport } from "./ses.js";
 import { createMailerSendTransport } from "./mailersend.js";
-import { otpMessage, inviteMessage, cancellationMessage, rescheduleMessage } from "./messages.js";
+import { otpMessage, inviteMessage, cancellationMessage, rescheduleMessage, uninviteMessage } from "./messages.js";
 
 export const MAIL_PROVIDERS = ["ses", "mailersend"];
 
@@ -67,6 +67,7 @@ export function createMailer({ resolve, sendEmail, factories = FACTORIES } = {})
       sendInvite: sendEmail,
       sendCancellation: sendEmail,
       sendReschedule: sendEmail,
+      sendUninvite: sendEmail,
     };
   }
   if (typeof resolve !== "function") throw new Error("createMailer: needs `resolve` or `sendEmail`");
@@ -98,5 +99,6 @@ export function createMailer({ resolve, sendEmail, factories = FACTORIES } = {})
     sendInvite: ({ to, from, ...rest }) => deliver(to, from, inviteMessage(rest)),
     sendCancellation: ({ to, from, ...rest }) => deliver(to, from, cancellationMessage(rest)),
     sendReschedule: ({ to, from, ...rest }) => deliver(to, from, rescheduleMessage(rest)),
+    sendUninvite: ({ to, from, ...rest }) => deliver(to, from, uninviteMessage(rest)),
   };
 }

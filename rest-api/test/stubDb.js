@@ -93,6 +93,9 @@ export function createDb() {
     async getInvite(kelaboId, inviteKey) {
       return kelabos.get(mkey(`KELABO#${kelaboId}`, `INVITE#${inviteKey}`)) || null;
     },
+    async removeInvite(kelaboId, inviteKey) {
+      kelabos.delete(mkey(`KELABO#${kelaboId}`, `INVITE#${inviteKey}`));
+    },
     async listInvites(kelaboId) {
       return [...kelabos.values()].filter(
         (i) => i.PK === `KELABO#${kelaboId}` && String(i.SK).startsWith("INVITE#")

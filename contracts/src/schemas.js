@@ -290,6 +290,16 @@ export const rescheduleKelaboBodySchema = z.object({
   note: z.string().max(500).optional(),
 });
 
+// Add or remove invitees on a scheduled kelabo (docs 18 §3.5) — the route
+// `ScheduledKelabo.jsx`'s reschedule form named and deferred. The *full*
+// desired list, same field as `scheduleKelaboBodySchema`'s own `invitees`:
+// the handler diffs it against who is currently invited rather than the
+// caller tracking an add list and a remove list separately, which is also
+// what lets the SPA hand it `EmailPicker`'s value unchanged.
+export const updateInviteesBodySchema = z.object({
+  invitees: z.array(z.string().email().max(160)).max(50),
+});
+
 // Huddle / ring (docs 18 §6). Start an instant kelabo and ring online contacts
 // into it. `invitees` are emails (same-org colleagues or accepted contacts);
 // bounded because each is a live push.

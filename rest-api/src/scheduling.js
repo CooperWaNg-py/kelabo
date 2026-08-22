@@ -371,6 +371,92 @@ export function createScheduling({ config, db, mailer, internal }) {
   }
 
   /**
+   * Add or remove invitees on a scheduled kelabo (docs 18 §3.5). Host-only,
+   * scheduled-only — the same guard cancel and reschedule use. Takes the
+   * *full* desired list rather than an add list and a remove list, both
+   * because that is what `EmailPicker`'s controlled `value` already is on the
+   * SPA side, and because a client-computed diff can be wrong (a chip removed
+   * and re-added in the same edit, a race with another tab) in a way a
+   * server-computed one cannot.
+   *
+   * The host and any guest-only RSVP (`inviteKey` starting `g:`, someone who
+   * answered the link without an account) are outside this diff entirely:
+   * neither was ever something the host "invited" by typing an address, so
+   * neither can be added or removed through this route.
+   */
+  async function updateInvitees({ kelaboId, identity, displayName, body }) {
+    const meta = await db.getKelaboMeta(kelaboId);
+    if (!meta) throw err(404, "kelabo_not_found");
+    if (meta.hostIdentity !== identity) throw err(403, "not_host");
+    if (meta.status === "active") throw err(409, "already_active");
+    if (meta.status === "cancelled") throw err(409, "kelabo_cancelled");
+    if (meta.status !== "scheduled") throw err(409, "not_scheduled");
+
+    const desired = new Set(
+      (body.invitees || []).map((e) => e.trim().toLowerCase()).filter((e) => e && e !== identity)
+    );
+    const invites = await db.listInvites(kelaboId);
+    const current = new Set(invites.filter((i) => i.email && !i.isGuest && !i.isHost).map((i) => i.email));
+
+    const toAdd = [...desired].filter((e) => !current.has(e));
+    const toRemove = [...current].filter((e) => !desired.has(e));
+    if (toAdd.length === 0 && toRemove.length === 0) throw err(400, "nothing_to_change");
+
+    const now = Date.now();
+    const inviteUrl = config.inviteUrl(kelaboId);
+    const hostName = displayName || identity;
+
+    // Added first, removed second — an address moved between the two lists
+    // by mistake (typo'd, fixed, re-typed) ends up simply invited, not
+    // invited-then-immediately-uninvited.
+    const added = [];
+    for (const email of toAdd) {
+      await db.putInvite(kelaboId, { inviteKey: email, email, isGuest: false, response: "pending", invitedAt: now });
+      let sent = true;
+      let reason;
+      try {
+        await mailer.sendInvite({
+          to: email,
+          hostName,
+          title: meta.title,
+          scheduledAt: meta.scheduledAt,
+          durationMinutes: meta.durationMinutes,
+          note: meta.note,
+          inviteUrl,
+        });
+      } catch (e) {
+        sent = false;
+        reason = e.code || e.name || "send_failed";
+      }
+      added.push({ email, sent, ...(reason ? { reason } : {}) });
+    }
+
+    const removed = [];
+    for (const email of toRemove) {
+      await db.removeInvite(kelaboId, email);
+      let sent = true;
+      let reason;
+      try {
+        await mailer.sendUninvite({ to: email, hostName, title: meta.title, scheduledAt: meta.scheduledAt });
+      } catch (e) {
+        sent = false;
+        reason = e.code || e.name || "send_failed";
+      }
+      removed.push({ email, sent, ...(reason ? { reason } : {}) });
+    }
+
+    return {
+      status: 200,
+      body: {
+        kelaboId,
+        added,
+        removed,
+        failed: [...added, ...removed].filter((r) => !r.sent).map((r) => r.email),
+      },
+    };
+  }
+
+  /**
    * What an invitee sees before they answer. Deliberately readable without a
    * session — the whole point of the link is that it reaches people who have no
    * account — and deliberately thin: a title, a time, who is asking. Not the
@@ -475,5 +561,16 @@ export function createScheduling({ config, db, mailer, internal }) {
     };
   }
 
-  return { schedule, listScheduled, getScheduled, start, cancel, reschedule, getInvitation, rsvp, suggestPeople };
+  return {
+    schedule,
+    listScheduled,
+    getScheduled,
+    start,
+    cancel,
+    reschedule,
+    updateInvitees,
+    getInvitation,
+    rsvp,
+    suggestPeople,
+  };
 }

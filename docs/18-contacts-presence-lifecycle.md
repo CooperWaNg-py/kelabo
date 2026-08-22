@@ -241,8 +241,45 @@ non-host row clear `respondedAt` and set `response: "pending"`, preserving
 
 `ScheduledKelabo.jsx`: a **Reschedule** button next to Cancel, opening a small
 inline form that reuses `DateTimePicker.jsx` — the same fields as `Schedule.jsx`
-minus invitees. (Adding invitees after scheduling is a separate future route,
-`POST /kelabos/:id/invitees`, out of scope here.)
+minus invitees. Editing invitees is a separate button and a separate route
+(§3.5), not folded into this form: they are different questions with
+different blast radius, and a host fixing a title typo should not be shown a
+list of people they could accidentally drop.
+
+### 3.5 Add and remove invitees
+
+The route named and deferred above, now built: `POST /kelabos/:id/invitees`,
+host-only, scheduled-only — the same guard §2 and §3 use. New
+`updateInviteesBodySchema` in contracts.
+
+**Shape: the full desired list, not an add list and a remove list.** The body
+is `{ invitees: [...] }`, the same field `scheduleKelaboBodySchema` already
+has. `scheduling.js` diffs it against `listInvites`, so the caller — in
+practice, `EmailPicker`'s controlled `value`, the same chip input
+`Schedule.jsx` already uses — never has to track what changed, only what the
+list looks like now. A client-computed diff can also be wrong in a way a
+server-computed one cannot (a chip removed and re-added in the same edit, a
+race with another open tab); a full-list PUT-shaped body sidesteps that
+entirely.
+
+The diff excludes the host's own row and any guest-only RSVP (`inviteKey`
+starting `g:`, someone who answered the link directly without an account):
+neither was ever something the host typed an address for, so neither is
+addable or removable here. Sending the host's own address back in the list is
+harmless, not an error — it is simply outside the set this route touches.
+
+**Added** addresses get exactly the create-time `putInvite` + `sendInvite`
+(`inviteMessage`) — a new invitee added after the fact is not a different kind
+of invitee. **Removed** addresses get `db.removeInvite` (an actual delete, the
+first place this partition needs one — `putInvite` had always been an
+unconditional full `Put` until now) and a new, deliberately short mail,
+`uninviteMessage`/`sendUninvite`: *"`{host}` removed you from `{title}`. It is
+still happening, just without you."* Distinct from `cancellationMessage` on
+purpose — the kelabo is not going away, only this person's place in it, and a
+cancellation-shaped email would say the wrong thing.
+
+An empty diff (the same list handed back) is `nothing_to_change`, same as an
+empty reschedule.
 
 ---
 

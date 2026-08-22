@@ -248,6 +248,15 @@ export function createDb({ config, client } = {}) {
     return res.Item || null;
   }
 
+  /** Drop one invitation (docs 18 §3.5) — the host removing someone from a
+   *  kelabo that has not started yet, as opposed to `cancelScheduledKelabo`
+   *  which drops everyone by ending the kelabo itself. */
+  async function removeInvite(kelaboId, inviteKey) {
+    await doc.send(
+      new DeleteCommand({ TableName: T.kelabos, Key: { PK: `KELABO#${kelaboId}`, SK: `INVITE#${inviteKey}` } })
+    );
+  }
+
   async function listInvites(kelaboId) {
     const res = await doc.send(
       new QueryCommand({
@@ -808,6 +817,7 @@ export function createDb({ config, client } = {}) {
     resetInviteResponses,
     putInvite,
     getInvite,
+    removeInvite,
     listInvites,
     listUsersByTenant,
     listFavourites,

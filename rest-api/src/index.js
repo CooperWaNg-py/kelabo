@@ -8,6 +8,7 @@ import {
   scheduleKelaboBodySchema,
   cancelKelaboBodySchema,
   rescheduleKelaboBodySchema,
+  updateInviteesBodySchema,
   huddleBodySchema,
   ringBodySchema,
   ringAnswerBodySchema,
@@ -582,6 +583,22 @@ export function createApp(deps) {
         const session = await requireSession(req);
         const body = rescheduleKelaboBodySchema.parse(req.body || {});
         return scheduling.reschedule({ kelaboId: req.params.id, identity: session.identity, body });
+      },
+    },
+    {
+      // Add or remove invitees on a kelabo that has not started yet (docs 18
+      // §3.5) — host-only, scheduled-only, the same guard reschedule uses.
+      method: "POST",
+      pattern: "/kelabos/:id/invitees",
+      handle: async (req) => {
+        const session = await requireSession(req);
+        const body = updateInviteesBodySchema.parse(req.body || {});
+        return scheduling.updateInvitees({
+          kelaboId: req.params.id,
+          identity: session.identity,
+          displayName: session.displayName,
+          body,
+        });
       },
     },
     {

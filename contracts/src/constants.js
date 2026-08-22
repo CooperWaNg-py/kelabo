@@ -144,7 +144,7 @@ export const ERROR_CODES = [
   "not_kelabo_member",
   "board_message_not_found",
   "document_not_found",
-  "already_removed",
+  "already_archived",
   "report_not_found",
 ];
 

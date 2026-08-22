@@ -332,8 +332,9 @@ export const framePingSchema = z.object({
 // than one and no journeyId was given — `journeys` lists the candidates),
 // or "journey_not_found" (an explicit journeyId that is not one of this
 // kelabo's links). `journey_posted` adds two outcomes of its own: the
-// `aiCanPost` gate, and an edit naming a message that does not exist or was
-// removed.
+// `aiCanPost` gate, and an edit naming a message that does not exist or is
+// archived — the agent bridge can create or edit a message, never archive
+// or unarchive one; that stays a human action via the SPA/REST.
 const journeyRef = z.object({ journeyId: z.string(), title: z.string() });
 
 export const frameJourneyInfoSchema = z.object({
@@ -417,7 +418,7 @@ export const frameJourneyPostedSchema = z.object({
     "journey_not_found",
     "ai_posting_disabled",
     "message_not_found",
-    "already_removed",
+    "already_archived",
   ]),
   journeys: z.array(journeyRef).default([]),
   msgId: z.string().optional(),

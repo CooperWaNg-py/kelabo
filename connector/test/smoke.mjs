@@ -134,6 +134,8 @@ wss.on("connection", (ws) => {
         ws.send(JSON.stringify({ type: "journey_posted", requestId: frame.requestId, kelaboId: frame.kelaboId, resolved: "ai_posting_disabled", journeys: [] }));
       } else if (frame.msgId === "missing") {
         ws.send(JSON.stringify({ type: "journey_posted", requestId: frame.requestId, kelaboId: frame.kelaboId, resolved: "message_not_found", journeys: [] }));
+      } else if (frame.msgId === "archived-msg") {
+        ws.send(JSON.stringify({ type: "journey_posted", requestId: frame.requestId, kelaboId: frame.kelaboId, resolved: "already_archived", journeys: [] }));
       } else {
         ws.send(JSON.stringify({
           type: "journey_posted", requestId: frame.requestId, kelaboId: frame.kelaboId, resolved: "ok", journeys: [],
@@ -332,7 +334,13 @@ await test("kelabo_journey_post is refused while aiCanPost is off, then succeeds
   assert.match(edited, /edited \(version 2\)/);
 
   const missing = await tools.journeyPost({ content: "x", msgId: "missing" });
-  assert.match(missing, /may have been removed/);
+  assert.match(missing, /may have been archived or never existed/);
+
+  // Previously untested: the agent bridge can never archive or unarchive a
+  // message itself, but must still be told plainly when it tries to edit
+  // one that already is.
+  const archived = await tools.journeyPost({ content: "x", msgId: "archived-msg" });
+  assert.match(archived, /is archived and cannot be edited until it is unarchived/);
 });
 
 await test("kelabo_working puts an in-progress card up before there is an answer", async () => {

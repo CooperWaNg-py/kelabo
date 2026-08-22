@@ -49,7 +49,7 @@ export async function latestDescription(c, journeyId) {
 
 export async function activeBoardMessages(c, journeyId, limit = 10) {
   const heads = (await queryJourneyItems(c, journeyId, "BOARDMSG#")).filter(
-    (i) => !String(i.SK).includes("#V#") && !i.removed
+    (i) => !String(i.SK).includes("#V#") && !i.archived
   );
   return heads.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0)).slice(0, limit);
 }
@@ -389,7 +389,9 @@ export async function postJourneyBoardMessage(c, journeyId, { content, msgId, id
     );
     const head = existing.Item;
     if (!head) return { ok: false, reason: "not_found" };
-    if (head.removed) return { ok: false, reason: "already_removed" };
+    // Archived is frozen, same rule as documents: unarchive first (a human
+    // action via the SPA/REST — this tool never archives or unarchives).
+    if (head.archived) return { ok: false, reason: "already_archived" };
     const version = (head.version || 1) + 1;
     await c.db.send(
       new PutCommand({
@@ -405,7 +407,7 @@ export async function postJourneyBoardMessage(c, journeyId, { content, msgId, id
     );
     await putJourneyTimelineRow(c, journeyId, {
       type: "board_message",
-      summary: "Board message edited (by the attached agent)",
+      summary: `Message edited: ${clip(content, 80)} (by the attached agent)`,
       actor: identity,
       at: now,
       detail: { msgId, action: "edited" },
@@ -416,7 +418,7 @@ export async function postJourneyBoardMessage(c, journeyId, { content, msgId, id
   await c.db.send(
     new PutCommand({
       TableName: journeysTable(c),
-      Item: { PK: journeyPk(journeyId), SK: `BOARDMSG#${newId}`, msgId: newId, content, createdBy: identity, createdAt: now, version: 1, removed: false },
+      Item: { PK: journeyPk(journeyId), SK: `BOARDMSG#${newId}`, msgId: newId, content, createdBy: identity, createdAt: now, version: 1, archived: false },
       ConditionExpression: "attribute_not_exists(SK)",
     })
   );
@@ -436,7 +438,7 @@ export async function postJourneyBoardMessage(c, journeyId, { content, msgId, id
   );
   await putJourneyTimelineRow(c, journeyId, {
     type: "board_message",
-    summary: "Board message added (by the attached agent)",
+    summary: `Message added: ${clip(content, 80)} (by the attached agent)`,
     actor: identity,
     at: now,
     detail: { msgId: newId, action: "created" },

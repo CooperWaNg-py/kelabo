@@ -192,6 +192,26 @@ await test("list: mine / accessible / public are three distinct, non-overlapping
   assert.equal(colleague.mine.length, 0);
 });
 
+await test("list: a completed private journey never appears in `accessible`, even for an accessor who stays one", async () => {
+  // `mine`/`public` cannot leak a completed journey by construction — the
+  // GSI's own partition key (tenantStatus) makes it unreachable. `accessible`
+  // has no such guarantee (accessor-index is keyed on identity alone), so
+  // this is the one bucket that needs its own explicit filter.
+  const priv = await journeys.createJourney({ identity: OWNER, body: { title: "Owned+private", visibility: "private" } });
+  await journeys.addAccessor({ journeyId: priv.journeyId, identity: OWNER, body: { identity: COLLEAGUE } });
+  const before = await journeys.listJourneys({ identity: COLLEAGUE });
+  assert.ok(before.accessible.some((m) => m.journeyId === priv.journeyId), "visible while active");
+
+  await journeys.completeJourney({ journeyId: priv.journeyId, identity: OWNER });
+  // Completing never touches ACCESSOR# rows — COLLEAGUE is still one.
+  const after = await journeys.listJourneys({ identity: COLLEAGUE });
+  assert.equal(
+    after.accessible.some((m) => m.journeyId === priv.journeyId),
+    false,
+    "a completed journey must never be offered as a link target, even to an accessor who never lost access",
+  );
+});
+
 // --- patch (owner-only) ------------------------------------------------------
 
 await test("patch: non-owner is refused even with member-level access", async () => {
@@ -545,7 +565,7 @@ await test("timeline: backward pagination — `before` returns strictly older en
 
 // --- message board -----------------------------------------------------------
 
-await test("board: add/edit/remove, versioned, member-writable, removed message stays visible but frozen", async () => {
+await test("board: add/edit/archive/unarchive, versioned, member-writable, archived message stays visible but frozen", async () => {
   const j = await journeys.createJourney({ identity: OWNER, body: { title: "T", visibility: "public" } });
   const added = await journeys.addBoardMessage({ journeyId: j.journeyId, identity: COLLEAGUE, body: { content: "Kickoff notes" } });
   assert.equal(added.version, 1);
@@ -559,24 +579,40 @@ await test("board: add/edit/remove, versioned, member-writable, removed message 
   assert.equal(listed.messages[0].version, 2);
   assert.equal((await journeys.getJourney({ journeyId: j.journeyId, identity: OWNER })).boardMessageCount, 1);
 
-  await journeys.removeBoardMessage({ journeyId: j.journeyId, identity: COLLEAGUE, msgId: added.msgId });
-  const afterRemove = await journeys.listBoardMessages({ journeyId: j.journeyId, identity: OWNER });
-  assert.equal(afterRemove.messages.length, 1, "removed message stays visible, marked removed");
-  assert.equal(afterRemove.messages[0].removed, true);
+  await journeys.archiveBoardMessage({ journeyId: j.journeyId, identity: COLLEAGUE, msgId: added.msgId });
+  const afterArchive = await journeys.listBoardMessages({ journeyId: j.journeyId, identity: OWNER });
+  assert.equal(afterArchive.messages.length, 1, "archived message stays visible (in the full list), marked archived — the SPA hides it by default, this endpoint does not");
+  assert.equal(afterArchive.messages[0].archived, true);
+  assert.equal(afterArchive.messages[0].content, "Kickoff notes (updated)", "content is untouched by archiving, unlike the old destructive-looking remove");
   assert.equal((await journeys.getJourney({ journeyId: j.journeyId, identity: OWNER })).boardMessageCount, 0, "the active count drops");
 
-  // Frozen once removed: no further edit.
+  // Frozen while archived: no edit until unarchived.
   await assert.rejects(
     journeys.editBoardMessage({ journeyId: j.journeyId, identity: OWNER, msgId: added.msgId, body: { content: "nope" } }),
-    (e) => e.status === 409 && e.code === "already_removed",
+    (e) => e.status === 409 && e.code === "already_archived",
   );
-  // Removing again is idempotent, not an error.
-  const again = await journeys.removeBoardMessage({ journeyId: j.journeyId, identity: OWNER, msgId: added.msgId });
-  assert.equal(again.removed, true);
+  // Archiving again is idempotent, not an error.
+  const again = await journeys.archiveBoardMessage({ journeyId: j.journeyId, identity: OWNER, msgId: added.msgId });
+  assert.equal(again.archived, true);
+
+  // Reversible: unarchive brings it back, and re-enables editing.
+  const unarchived = await journeys.unarchiveBoardMessage({ journeyId: j.journeyId, identity: OWNER, msgId: added.msgId });
+  assert.equal(unarchived.archived, false);
+  assert.equal((await journeys.getJourney({ journeyId: j.journeyId, identity: OWNER })).boardMessageCount, 1, "the active count is restored");
+  const afterUnarchive = await journeys.listBoardMessages({ journeyId: j.journeyId, identity: OWNER });
+  assert.equal(afterUnarchive.messages[0].archived, false);
+  assert.equal(afterUnarchive.messages[0].archivedBy, undefined, "stale archive metadata is dropped, not left behind");
+  await journeys.editBoardMessage({ journeyId: j.journeyId, identity: OWNER, msgId: added.msgId, body: { content: "editable again" } });
+  // Unarchiving again is idempotent too.
+  const againUnarchived = await journeys.unarchiveBoardMessage({ journeyId: j.journeyId, identity: OWNER, msgId: added.msgId });
+  assert.equal(againUnarchived.archived, false);
 
   const history = await journeys.getBoardMessageHistory({ journeyId: j.journeyId, identity: OWNER, msgId: added.msgId });
-  assert.equal(history.versions.length, 3, "created, edited, removed");
-  assert.deepEqual(history.versions.map((v) => v.action), ["removed", "edited", "created"]);
+  assert.deepEqual(
+    history.versions.map((v) => v.action),
+    ["edited", "unarchived", "archived", "edited", "created"],
+    "every state change is kept, newest first",
+  );
 });
 
 await test("board: a stranger cannot read or write it; frozen once the journey is completed", async () => {
@@ -778,8 +814,10 @@ await test("HTTP: board message and document round-trip through the real route t
   const edited = await call("PATCH", `/journeys/${id}/board/${msg.json.msgId}`, { body: { content: "hello, edited" }, cookies });
   assert.equal(edited.statusCode, 200);
   assert.equal(edited.json.version, 2);
-  const removed = await call("DELETE", `/journeys/${id}/board/${msg.json.msgId}`, { cookies });
-  assert.equal(removed.statusCode, 200);
+  const archived = await call("POST", `/journeys/${id}/board/${msg.json.msgId}/archive`, { cookies });
+  assert.equal(archived.statusCode, 200);
+  const unarchived = await call("POST", `/journeys/${id}/board/${msg.json.msgId}/unarchive`, { cookies });
+  assert.equal(unarchived.statusCode, 200);
 
   const doc = await call("POST", `/journeys/${id}/documents`, { body: { title: "d", content: "text" }, cookies });
   assert.equal(doc.statusCode, 200);

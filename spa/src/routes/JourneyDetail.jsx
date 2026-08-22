@@ -500,6 +500,12 @@ function KelabosTab({ journeyId, isMember, isActive }) {
       {isMember && isActive && (
         <div className="action-row action-row-start">
           <Button onClick={() => setShowAdd(true)}><Icon name="plus" size={14} />Add a kelabo</Button>
+          <Button as={Link} variant="outline" to={`/new?journeyId=${journeyId}`}>
+            <Icon name="plus" size={14} />New kelabo
+          </Button>
+          <Button as={Link} variant="outline" to={`/schedule?journeyId=${journeyId}`}>
+            <Icon name="calendar" size={14} />Schedule kelabo
+          </Button>
         </div>
       )}
       {items === null && <SkeletonRows n={2} />}
@@ -587,7 +593,9 @@ function BoardTab({ journeyId, isMember, isActive }) {
   const [showAdd, setShowAdd] = useState(false)
   const [editing, setEditing] = useState(null)
   const [historyFor, setHistoryFor] = useState(null)
-  const confirm = useConfirm()
+  // Archived messages are hidden by default (they are no longer important,
+  // not outstanding — but never erased) and revealed here on demand.
+  const [showArchived, setShowArchived] = useState(false)
   const toast = useToast()
 
   const load = () => api.listJourneyBoard(journeyId).then(d => setItems(d.messages || [])).catch(() => setItems([]))
@@ -595,11 +603,43 @@ function BoardTab({ journeyId, isMember, isActive }) {
 
   const add = async content => { await api.addJourneyBoardMessage(journeyId, content); toast('Message added'); load() }
   const edit = async content => { await api.editJourneyBoardMessage(journeyId, editing.msgId, content); toast('Message updated'); load() }
-  const remove = async m => {
-    const ok = await confirm({ title: 'Remove this message?', body: 'It stays visible, marked removed — nothing here is ever erased.', confirmLabel: 'Remove', danger: false })
-    if (!ok) return
-    try { await api.removeJourneyBoardMessage(journeyId, m.msgId); load() } catch { toast('Could not remove that message') }
+  // Reversible and low-stakes, so no confirmation dialog — Unarchive is one
+  // click away on the same row once revealed.
+  const archive = async m => {
+    try { await api.archiveJourneyBoardMessage(journeyId, m.msgId); toast('Message archived'); load() } catch { toast('Could not archive that message') }
   }
+  const unarchive = async m => {
+    try { await api.unarchiveJourneyBoardMessage(journeyId, m.msgId); toast('Message unarchived'); load() } catch { toast('Could not unarchive that message') }
+  }
+
+  const active = (items || []).filter(m => !m.archived)
+  const archived = (items || []).filter(m => m.archived)
+
+  const renderRow = m => (
+    <div className={'con' + (m.archived ? ' con-skipped' : '')} data-kind="note" key={m.msgId}>
+      <div className="con-head">
+        <span className="con-mark"><Icon name="message-square" size={14} /></span>
+        <span className="con-title">{m.content}</span>
+      </div>
+      <div className="con-sub">
+        <span title={fmtFullAt(m.updatedAt || m.createdAt)}>{m.createdBy}{m.updatedBy ? ` (edited by ${m.updatedBy})` : ''} · {timeAgo(m.updatedAt || m.createdAt)}</span>
+      </div>
+      {isMember && (
+        <div className="hstack">
+          <Button size="sm" onClick={() => setHistoryFor(m.msgId)}>History</Button>
+          {isActive && !m.archived && (
+            <>
+              <Button size="sm" onClick={() => setEditing(m)}>Edit</Button>
+              <Button size="sm" variant="danger-ghost" onClick={() => archive(m)}>Archive</Button>
+            </>
+          )}
+          {isActive && m.archived && (
+            <Button size="sm" onClick={() => unarchive(m)}><Icon name="rotate-ccw" size={13} />Unarchive</Button>
+          )}
+        </div>
+      )}
+    </div>
+  )
 
   return (
     <section className="anim-in vstack-sm">
@@ -610,28 +650,16 @@ function BoardTab({ journeyId, isMember, isActive }) {
       )}
       {items === null && <SkeletonRows n={2} />}
       {items && items.length === 0 && <div className="empty">No pinned messages yet.</div>}
-      {(items || []).map(m => (
-        <div className={'con' + (m.removed ? ' con-skipped' : '')} data-kind="note" key={m.msgId}>
-          <div className="con-head">
-            <span className="con-mark"><Icon name="message-square" size={14} /></span>
-            <span className="con-title">{m.removed ? 'Removed message' : m.content}</span>
-          </div>
-          <div className="con-sub">
-            <span title={fmtFullAt(m.updatedAt || m.createdAt)}>{m.createdBy}{m.updatedBy ? ` (edited by ${m.updatedBy})` : ''} · {timeAgo(m.updatedAt || m.createdAt)}</span>
-          </div>
-          {isMember && (
-            <div className="hstack">
-              <Button size="sm" onClick={() => setHistoryFor(m.msgId)}>History</Button>
-              {isActive && !m.removed && (
-                <>
-                  <Button size="sm" onClick={() => setEditing(m)}>Edit</Button>
-                  <Button size="sm" variant="danger-ghost" onClick={() => remove(m)}>Remove</Button>
-                </>
-              )}
-            </div>
-          )}
+      {active.map(renderRow)}
+      {archived.length > 0 && (
+        <div className="action-row action-row-start">
+          <Button size="sm" variant="ghost" onClick={() => setShowArchived(v => !v)}>
+            <Icon name={showArchived ? 'chevron-down' : 'chevron-right'} size={13} />
+            {showArchived ? 'Hide' : 'Show'} archived ({archived.length})
+          </Button>
         </div>
-      ))}
+      )}
+      {showArchived && archived.map(renderRow)}
       {showAdd && <BoardMessageModal onClose={() => setShowAdd(false)} onSave={add} />}
       {editing && <BoardMessageModal initial={editing.content} onClose={() => setEditing(null)} onSave={edit} />}
       {historyFor && <BoardMessageHistoryModal journeyId={journeyId} msgId={historyFor} onClose={() => setHistoryFor(null)} />}
@@ -713,7 +741,7 @@ function DocumentsTab({ journeyId, isMember, isActive }) {
             </div>
             <div className="row-sub">
               {d.addedBy} · {(d.sizeBytes / 1024).toFixed(1)} KB
-              {open === d.docId && <div style={{ marginTop: 6, whiteSpace: 'pre-wrap' }}>{d.content}</div>}
+              {open === d.docId && <div style={{ marginTop: 6 }}><Markdown text={d.content} /></div>}
             </div>
           </div>
           <span className="row-meta">{timeAgo(d.addedAt)}</span>

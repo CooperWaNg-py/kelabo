@@ -775,7 +775,7 @@ export function createTunnel(c) {
           type: "journey_posted",
           requestId,
           kelaboId,
-          resolved: result.reason === "already_removed" ? "already_removed" : "message_not_found",
+          resolved: result.reason === "already_archived" ? "already_archived" : "message_not_found",
           journeys: [],
         });
         return;

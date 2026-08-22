@@ -416,8 +416,12 @@ export function RoomShell({
             )}
             {/* Stated in the room, not buried in the host's settings. The
                 assistant can quote a kelabo some people here did not attend,
-                and the only honest place to say so is where they are. */}
-            {kelabo?.historyEnabled && (
+                and the only honest place to say so is where they are.
+                Mutually exclusive with the journey chip below, not just
+                visually — the Gateway suppresses historyEnabled's own push
+                the moment any journey is linked (docs 20 §12.1), so showing
+                both here would claim a source that is not actually active. */}
+            {kelabo?.historyEnabled && !(kelabo?.journeys?.length > 0) && (
               <span
                 className="chip chip-dev"
                 title="The host let the assistant read the minutes of their own past kelabos, so it can answer questions that reach back to them."
@@ -430,7 +434,8 @@ export function RoomShell({
                 reach the assistant with no opt-in of its own — linking this
                 kelabo into a journey was already the deliberate act. Named
                 generically ("journey"/"N journeys"), not by title, so a long
-                title cannot blow out this strip — the tooltip carries them. */}
+                title cannot blow out this strip — the tooltip carries them.
+                Takes over from the chip above rather than joining it. */}
             {Array.isArray(kelabo?.journeys) && kelabo.journeys.length > 0 && (
               <span
                 className="chip chip-dev"

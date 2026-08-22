@@ -1134,14 +1134,33 @@ export function createApp(deps) {
         };
       },
     },
+    // Archive/unarchive (docs 20 §7) — a state change, not a deletion, so
+    // these are POST sub-resources rather than DELETE, the same shape
+    // /journeys/:id/complete and /journeys/:id/reopen already use for a
+    // reversible status transition.
     {
-      method: "DELETE",
-      pattern: "/journeys/:id/board/:msgId",
+      method: "POST",
+      pattern: "/journeys/:id/board/:msgId/archive",
       handle: async (req) => {
         const session = await requireSession(req);
         return {
           status: 200,
-          body: await journeys.removeBoardMessage({
+          body: await journeys.archiveBoardMessage({
+            journeyId: req.params.id,
+            identity: session.identity,
+            msgId: req.params.msgId,
+          }),
+        };
+      },
+    },
+    {
+      method: "POST",
+      pattern: "/journeys/:id/board/:msgId/unarchive",
+      handle: async (req) => {
+        const session = await requireSession(req);
+        return {
+          status: 200,
+          body: await journeys.unarchiveBoardMessage({
             journeyId: req.params.id,
             identity: session.identity,
             msgId: req.params.msgId,

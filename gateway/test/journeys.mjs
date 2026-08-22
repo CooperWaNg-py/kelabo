@@ -13,7 +13,7 @@ import {
   bumpJourneyContributor,
   settleKelaboJoin,
 } from "../src/journeys.js";
-import { loadJourneyContext } from "../src/agent/journeyContext.js";
+import { loadJourneyContext, historyStillApplies } from "../src/agent/journeyContext.js";
 import { mainAgentSystemPrompt } from "../src/agent/persona.js";
 
 function makeStore(seed = {}) {
@@ -160,9 +160,9 @@ await test("success: assembles description + linked kelabo minutes + board into 
   const seed = baseSeed(journeyId);
   seed[`${journeyPk(journeyId)}|DESC#000001`] = { PK: journeyPk(journeyId), SK: "DESC#000001", version: 1, markdown: "This project ships the Q3 redesign." };
   seed[`${journeyPk(journeyId)}|LINK#k1`] = { PK: journeyPk(journeyId), SK: "LINK#k1", kelaboId: "k1", titleSnapshot: "Kickoff", linkedAt: 1 };
-  seed[`${journeyPk(journeyId)}|BOARDMSG#m1`] = { PK: journeyPk(journeyId), SK: "BOARDMSG#m1", msgId: "m1", content: "Ship date is fixed", removed: false, createdAt: 1 };
-  // A removed message must never reach the prompt.
-  seed[`${journeyPk(journeyId)}|BOARDMSG#m2`] = { PK: journeyPk(journeyId), SK: "BOARDMSG#m2", msgId: "m2", content: "SECRET stale note", removed: true, createdAt: 2 };
+  seed[`${journeyPk(journeyId)}|BOARDMSG#m1`] = { PK: journeyPk(journeyId), SK: "BOARDMSG#m1", msgId: "m1", content: "Ship date is fixed", archived: false, createdAt: 1 };
+  // An archived message must never reach the prompt.
+  seed[`${journeyPk(journeyId)}|BOARDMSG#m2`] = { PK: journeyPk(journeyId), SK: "BOARDMSG#m2", msgId: "m2", content: "SECRET stale note", archived: true, createdAt: 2 };
   seed["KELABO#k1|MINUTES"] = { PK: "KELABO#k1", SK: "MINUTES", kelaboId: "k1", summary: "Decided to use React.", decisions: ["Use React"], actionItems: [] };
   const store = makeStore(seed);
 
@@ -176,7 +176,7 @@ await test("success: assembles description + linked kelabo minutes + board into 
 
   assert.ok(promptSeen.includes("This project ships the Q3 redesign"), "description reached the prompt");
   assert.ok(promptSeen.includes("Ship date is fixed"), "active board message reached the prompt");
-  assert.equal(promptSeen.includes("SECRET stale note"), false, "a removed board message must not reach the prompt");
+  assert.equal(promptSeen.includes("SECRET stale note"), false, "an archived board message must not reach the prompt");
   assert.ok(promptSeen.includes("Decided to use React"), "the linked kelabo's minutes reached the prompt");
   assert.ok(promptSeen.includes("health=yellow"), "health/progress reached the prompt");
 
@@ -226,7 +226,7 @@ await test("loadJourneyContext: reduces the journey to title/description/status/
     [`KELABO#${liveKelaboId}|JOURNEY#${journeyId}`]: { PK: `KELABO#${liveKelaboId}`, SK: `JOURNEY#${journeyId}`, journeyId },
     [`${journeyPk(journeyId)}|META`]: { PK: journeyPk(journeyId), SK: "META", title: "Q3 Launch", health: "green", progress: 80 },
     [`${journeyPk(journeyId)}|DESC#000001`]: { PK: journeyPk(journeyId), SK: "DESC#000001", version: 1, markdown: "Ship the redesign." },
-    [`${journeyPk(journeyId)}|BOARDMSG#m1`]: { PK: journeyPk(journeyId), SK: "BOARDMSG#m1", msgId: "m1", content: "Freeze is Friday", removed: false, createdAt: 1 },
+    [`${journeyPk(journeyId)}|BOARDMSG#m1`]: { PK: journeyPk(journeyId), SK: "BOARDMSG#m1", msgId: "m1", content: "Freeze is Friday", archived: false, createdAt: 1 },
     // The journey also links the live kelabo itself, and one other kelabo
     // with minutes, and one with none at all.
     [`${journeyPk(journeyId)}|LINK#${liveKelaboId}`]: { PK: journeyPk(journeyId), SK: `LINK#${liveKelaboId}`, kelaboId: liveKelaboId, titleSnapshot: "This very kelabo", linkedAt: 1 },
@@ -249,6 +249,23 @@ await test("loadJourneyContext: reduces the journey to title/description/status/
   assert.equal(j.kelabos.length, 1, "only the other, summarised kelabo — never itself, never the empty one");
   assert.equal(j.kelabos[0].title, "Kickoff");
   assert.ok(j.kelabos[0].summary.includes("React"));
+});
+
+await test("historyStillApplies: a journey link supersedes historyEnabled rather than stacking with it", () => {
+  // Off in the first place: nothing to supersede.
+  assert.equal(historyStillApplies({ historyEnabled: false }, []), false);
+  assert.equal(historyStillApplies(undefined, []), false, "no META at all reads the same as off");
+  // On, and no journey in the way: applies exactly as it always has.
+  assert.equal(historyStillApplies({ historyEnabled: true }, []), true);
+  // On, but a journey link exists: superseded, even though historyEnabled
+  // itself was never turned off.
+  assert.equal(historyStillApplies({ historyEnabled: true }, [{ title: "Q3 Launch" }]), false);
+  // A dangling/unreachable link that loadJourneyContext could not actually
+  // resolve into anything reduces to an empty array — the same as no link
+  // at all — so historyEnabled falls back on, rather than the kelabo
+  // getting neither source (docs 20 §12.1's "best-effort, never total
+  // silence" posture).
+  assert.equal(historyStillApplies({ historyEnabled: true }, []), true);
 });
 
 await test("mainAgentSystemPrompt: journeys render a JOURNEY CONTEXT section, additive to (not replacing) EARLIER KELABOS", async () => {
@@ -352,7 +369,7 @@ await test("submitJourneyReport: stores a ready report with no LLM, bumps report
   assert.equal(timelineRows[0].actor, "alice@example.com");
 });
 
-await test("postJourneyBoardMessage: creates, versions an edit, and refuses a missing or removed message", async () => {
+await test("postJourneyBoardMessage: creates, versions an edit, and refuses a missing or archived message", async () => {
   const journeyId = "j-post";
   const store = makeStore({ [`${journeyPk(journeyId)}|META`]: { PK: journeyPk(journeyId), SK: "META", journeyId } });
   const c = makeContainer({ store });
@@ -377,9 +394,9 @@ await test("postJourneyBoardMessage: creates, versions an edit, and refuses a mi
   assert.deepEqual(missing, { ok: false, reason: "not_found" });
 
   await postJourneyBoardMessage(c, journeyId, { content: "x", msgId: created.msgId, identity: "bob@example.com" }); // v3
-  store.items.get(`${journeyPk(journeyId)}|BOARDMSG#${created.msgId}`).removed = true;
-  const onRemoved = await postJourneyBoardMessage(c, journeyId, { content: "y", msgId: created.msgId, identity: "bob@example.com" });
-  assert.deepEqual(onRemoved, { ok: false, reason: "already_removed" }, "matches §8.2's rule for documents: nothing about a removed one can be edited afterward");
+  store.items.get(`${journeyPk(journeyId)}|BOARDMSG#${created.msgId}`).archived = true;
+  const onArchived = await postJourneyBoardMessage(c, journeyId, { content: "y", msgId: created.msgId, identity: "bob@example.com" });
+  assert.deepEqual(onArchived, { ok: false, reason: "already_archived" }, "the agent bridge can create or edit, never archive or unarchive — that stays a human action, matching §8.2's rule for documents that nothing about a frozen one can be edited");
 });
 
 await test("settleKelaboJoin: bumps kelaboJoinCount once per participant, and is a no-op if called again for the same kelabo", async () => {

@@ -299,7 +299,7 @@ test("journey resolution responses distinguish ok/no_journey/ambiguous/journey_n
 test("journey_posted carries the aiCanPost gate and edit-target failures as resolved outcomes, not errors", () => {
   assert.equal(down({ type: "journey_posted", requestId: "r", kelaboId: "m", resolved: "ai_posting_disabled" }).ok, true);
   assert.equal(down({ type: "journey_posted", requestId: "r", kelaboId: "m", resolved: "message_not_found" }).ok, true);
-  assert.equal(down({ type: "journey_posted", requestId: "r", kelaboId: "m", resolved: "already_removed" }).ok, true);
+  assert.equal(down({ type: "journey_posted", requestId: "r", kelaboId: "m", resolved: "already_archived" }).ok, true);
   const ok = down({ type: "journey_posted", requestId: "r", kelaboId: "m", resolved: "ok", msgId: "msg1", version: 2 });
   assert.equal(ok.ok, true);
   assert.equal(ok.frame.version, 2);

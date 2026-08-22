@@ -143,7 +143,7 @@ here needs a special guest rule, it falls out of the identity shape.
 | View, search, read timeline | yes | yes |
 | Edit description | yes | yes |
 | Set health/progress (§5) | yes | yes |
-| Add/edit/remove board message | yes | yes |
+| Add/edit/archive/unarchive board message | yes | yes |
 | Add/remove document | yes | yes |
 | Link a kelabo (must be host/participant of *that* kelabo) | yes | yes |
 | Unlink a kelabo | yes | yes |
@@ -177,8 +177,8 @@ never auto-expires; every removal in this document is an explicit write.
 | `ACCESSOR#<identity>` | Private-journey roster entry | `identity, displayName, avatarVariant, addedBy, addedAt` |
 | `LINK#<kelaboId>` | Kelabo membership (forward) | `kelaboId, titleSnapshot, hostIdentitySnapshot, linkedBy, linkedAt, statusSnapshot` |
 | `REPORT#<reportId>` | One report, append-only — §6 | `reportId, question, requestedBy, requestedAt, status(pending\|ready\|failed), answer?, generatedAt?, error?` |
-| `BOARDMSG#<msgId>` | Board message, current head — §7 | `msgId, content, createdBy, createdAt, updatedBy?, updatedAt?, version, removed, removedBy?, removedAt?` |
-| `BOARDMSG#<msgId>#V#<pad(version,6)>` | Board message version | `msgId, version, content, action, actor, at` |
+| `BOARDMSG#<msgId>` | Board message, current head — §7 | `msgId, content, createdBy, createdAt, updatedBy?, updatedAt?, version, archived, archivedBy?, archivedAt?` |
+| `BOARDMSG#<msgId>#V#<pad(version,6)>` | Board message version | `msgId, version, content, action(created\|edited\|archived\|unarchived), actor, at` |
 | `DOC#<docId>` | Document, current head — §8 | `docId, title, content \| s3Key+excerpt, sizeBytes, addedBy, addedAt, removed, removedBy?, removedAt?` |
 | `CONTRIBUTOR#<identity>` | Per-person rollup — §10 | `contributorIdentity, kelaboJoinCount, reportRequestCount, firstSeenAt, lastActiveAt` |
 | `TL#<pad(at,13)>#<rand6>` | Timeline projection row — §9 | `type, refSk, summary, actor, at` |
@@ -377,9 +377,25 @@ message is edited in place, but every edit is kept: the
 items are the immutable chain behind it, mirroring `DESC#`/`STATUS#`
 versioning.
 
-Removal is soft: `removed:true` on the head, the version chain up to that
-point stays intact and readable, and **nothing about a removed message can
-be edited afterward** — matching the same rule documents follow (§8.2).
+Removal is soft and reversible, called **archiving**, not deletion — a
+deliberate departure from documents' one-way removal (§8.2), corrected
+after building it once the other way. `archived:true`/`archivedBy`/
+`archivedAt` go on the head; the version chain up to that point stays
+intact and readable regardless. **Nothing about an archived message can
+be edited until it is unarchived** — `POST .../unarchive` clears
+`archivedBy`/`archivedAt` (stale once no longer true) and restores
+editing, keeping the full fact of every past archive/unarchive in the
+version chain (`action: "archived"|"unarchived"`) either way.
+`boardMessageCount` on META is bidirectional: it drops on archive and
+rises again on unarchive, always reflecting the current, visible count.
+
+Archiving means "no longer important, not outstanding — not gone." The
+SPA hides an archived message from the board's default view and offers
+to reveal it (a "Show archived (N)" toggle), showing its real content
+when revealed rather than a placeholder — there is nothing secret about
+it. `POST .../board/:msgId/archive` and `.../unarchive` are state
+transitions, not deletions, the same reason `/journeys/:id/complete` and
+`/journeys/:id/reopen` are `POST`, not `DELETE`.
 
 `aiCanPost` (META boolean, default off, owner-controlled) gates whether an
 attached agent may write to the board on its own initiative
@@ -422,6 +438,13 @@ alongside its own item, `type` one of
 `description | status | kelabo_linked | kelabo_unlinked | report |
 board_message | document`. Reading the timeline is one query against this
 prefix, never a fan-out union across six item types.
+
+A `board_message` entry's `summary` carries the message's own content
+(clipped to 80 characters, no ellipsis — the same convention `report`
+entries already use for their question), not a content-free label —
+`Message added: <content>` / `edited:` / `archived:` / `unarchived:`.
+`detail.action` on the same entry is one of those four words, matching
+the version chain's own `action` field exactly.
 
 ### 9.2 Pagination
 
@@ -511,7 +534,9 @@ as `kelabos.js`/`records.js`.
 | GET | `/journeys/:id/description/history` | member | Version list |
 | POST | `/journeys/:id/status` | member | `{health?, progress?, note?}` — §5 |
 | GET | `/journeys/:id/status/history` | member | Version list |
-| GET/POST/PATCH/DELETE | `/journeys/:id/board[/:msgId]` | member | Pinned messages — §7 |
+| GET/POST/PATCH | `/journeys/:id/board[/:msgId]` | member | Pinned messages — §7 |
+| POST | `/journeys/:id/board/:msgId/archive` | member | Hide by default, reversible — §7 |
+| POST | `/journeys/:id/board/:msgId/unarchive` | member | Reverse of the above |
 | GET | `/journeys/:id/board/:msgId/history` | member | Version list |
 | GET/POST/DELETE | `/journeys/:id/documents[/:docId]` | member | §8 |
 | POST | `/journeys/:id/reports` | member | `{question}` → synchronous report — §6 |
@@ -539,10 +564,31 @@ vs. pull (`kelabo_history` tool) split.
 ### 12.1 Push — system-prompt injection — **built**
 
 `gateway/src/agent/journeyContext.js`, sibling to `history.js`, called
-from `runner.js`'s `ensureContext()` alongside the existing
-`loadKelaboHistory()` call — always attempted, no opt-in flag, because
-linking a kelabo into a journey is already the deliberate, visible act
-`historyEnabled` exists to gate for a fully automatic record.
+from `runner.js`'s `ensureContext()` — always attempted, no opt-in flag,
+because linking a kelabo into a journey is already the deliberate,
+visible act `historyEnabled` exists to gate for a fully automatic record.
+
+**Supersedes `historyEnabled` rather than joining it.** The two used to
+load independently — a kelabo could have both, on the reasoning that
+plausibly wanting both is not the same as one making the other pointless.
+In practice a journey already *is* the narrower, deliberately-linked
+version of the same continuity `historyEnabled` provides more diffusely,
+and holding both in the prompt at once serves nobody. `journeyContext.js`
+exports `historyStillApplies(meta, journeys)` — `false` the moment
+`journeys` (the *reduced, reachable* result of `loadJourneyContext`, not
+the raw link count) is non-empty — and `runner.js`'s `ensureContext()`
+now loads journey context first and gates `loadKelaboHistory()` on that
+result. Checking the reduced result, not the raw links, is deliberate: a
+dangling or momentarily-unreachable journey link falls back to
+`historyEnabled` if the host opted into it, rather than leaving the
+assistant with neither source — this pipeline's existing "best-effort,
+never total silence" posture. Evaluated fresh every turn, so a kelabo
+linked to a journey *after* `historyEnabled` was already turned on for it
+loses the broader record the moment the link exists, not at some later
+recompute. The SPA reflects this: `NewKelabo.jsx`/`Schedule.jsx` hide (and
+reset to `false`, not just hide) the `historyEnabled` toggle once a
+journey is picked, and `RoomShell.jsx`'s two disclosure chips (below) are
+mutually exclusive for the same reason.
 
 For each journey the live kelabo is linked to (`JOURNEY_LIMIT = 3`,
 found via the same mirror §4.3 describes — `queryKelaboItems(c, kelaboId,
@@ -625,7 +671,10 @@ recorded here rather than silently:
   "off is an answer, not an error." Both frame pairs carry a `resolved`
   field for exactly this — `ok`, `no_journey`, `ambiguous`,
   `journey_not_found`, plus `ai_posting_disabled` /
-  `message_not_found` / `already_removed` on `journey_posted` alone.
+  `message_not_found` / `already_archived` on `journey_posted` alone. The
+  agent can create or edit a message through this tool; it can never
+  archive or unarchive one — that stays a human action via the SPA/REST
+  (§7), so there is no `kelabo_journey_archive` tool and none planned.
 
 (The original plan's `report_submit` also carried `suggestedHealth`/
 `suggestedProgress` — dropped from the row here too, matching §5/§6: that
@@ -659,14 +708,24 @@ exists.
 - **`/journeys/:id`:** header (avatar + re-roll if owner, title, status
   chip, health/progress, owner + accessor-count), `Tabs`: **Overview**
   (description, contributor table, status update, action buttons) ·
-  **Timeline** (§9.3) · **Kelabos** (linked list, add/remove) ·
-  **Reports** (list + "Ask a question" modal, suggested-status apply
-  button) · **Board** (§7, per-message history) · **Documents** (§8) ·
-  **Accessors** (private only, owner-managed).
+  **Timeline** (§9.3) · **Kelabos** (linked list, add/remove, plus **New
+  kelabo**/**Schedule kelabo** shortcuts — `?journeyId=` to `/new`/
+  `/schedule`, pre-filling this journey in the picker below, removable
+  before submitting; hidden on a completed journey, same guard as "Add a
+  kelabo") · **Reports** (list + "Ask a question" modal — no
+  suggested-status apply button; that whole flow is out of scope, §5/§17,
+  not merely unbuilt UI) · **Board** (§7, per-message history, a
+  "Show archived (N)" reveal toggle, Unarchive) · **Documents** (§8,
+  content rendered through the same `Markdown` component descriptions and
+  reports already use) · **Accessors** (private only, owner-managed).
 - **Breadcrumb on existing pages:** `Kelabo.jsx`, `RecordDetail.jsx`,
   `ScheduledKelabo.jsx` show "Part of: `<journey chips>`" when linked.
-- **Creation-time linking:** `NewKelabo.jsx` / `Schedule.jsx` gain an
-  optional multi-select against the user's journeys.
+- **Creation-time linking — built:** `NewKelabo.jsx` / `Schedule.jsx` gain
+  `JourneyPicker` (`spa/src/components/JourneyPicker.jsx`), a chip-list +
+  modal picker over `api.listJourneys()` (which cannot return a completed
+  journey — §11), capped at 10 (`journeyIds`, `contracts/src/schemas.js`).
+  `historyEnabled` hides and resets to `false` the moment one is picked
+  (§12.1's supersession rule) rather than staying offered pointlessly.
 - **Global search:** `SearchDialog.jsx` gains a third tab, following the
   exact seam already built for two (`TABS` array, a third
   `Promise.allSettled` arm, `api.searchJourneys(q)`).
@@ -730,8 +789,12 @@ The checkable list.
    host-purged (§14.3) until every mirror row is gone.
 6. Deleting a journey never deletes, ends, or otherwise mutates any
    kelabo it was linked to.
-7. A removed document or board message is never returned by the context
-   assembly in §6.2/§12.1, and is never editable again.
+7. A removed document or an archived board message is never returned by
+   the context assembly in §6.2/§12.1. A removed document is never
+   editable again (§8.2); an archived board message is not editable
+   *while* archived, but unarchiving restores it exactly (§7) — the one
+   deliberate difference between the two soft-delete flows in this
+   document.
 8. `kelaboJoinCount`/`reportRequestCount` never decrease.
 9. Every `TL#` row's `refSk` resolves to an item that either still exists
    or is a recorded soft-delete — the timeline never references something

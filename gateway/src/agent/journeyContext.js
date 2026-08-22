@@ -1,9 +1,15 @@
 // What the assistant is told about the journey(s) a live kelabo belongs to
 // (docs 20 §12.1) — the PUSH half, pinned into the system prompt the same
 // way agent/history.js already pins a host's own past-kelabo minutes.
-// Independent and additive to that: a kelabo can have historyEnabled on,
-// be linked to a journey, both, or neither (docs 20 §1). The PULL half
-// (dev-mode MCP tools for deeper, on-demand reads) is not built.
+//
+// Not independent of that, despite an earlier version of this comment
+// saying otherwise: `historyStillApplies()` below is how `runner.js`
+// decides that a kelabo linked to any journey gets that journey's context
+// instead of `historyEnabled`'s broader, host-scoped one, not alongside
+// it — a journey is the narrower, deliberately-linked record for exactly
+// the continuity `historyEnabled` exists to provide more diffusely, and
+// having the assistant hold both at once serves nobody. See runner.js's
+// own comment at the call site for the reasoning in full.
 //
 // Reuses gateway/src/journeys.js's own reducers — the same rows a journey
 // report reads — rather than a second copy of the same reduction.
@@ -54,4 +60,18 @@ export async function loadJourneyContext(c, kelaboId) {
     })
   );
   return journeys.filter(Boolean);
+}
+
+/**
+ * Whether `historyEnabled`'s push should still run for this turn (docs 20
+ * §12.1) — `false` the moment `journeys` (the *reduced, reachable* result
+ * of `loadJourneyContext`, not the raw link count) is non-empty. Checking
+ * the reduced result rather than the raw links is deliberate: a dangling
+ * or momentarily-unreachable journey link should fall back to
+ * `historyEnabled` if the host opted into it, rather than leaving the
+ * assistant with neither source — the same "best-effort, never total
+ * silence" posture the rest of this pipeline already keeps.
+ */
+export function historyStillApplies(meta, journeys) {
+  return !!meta?.historyEnabled && journeys.length === 0;
 }

@@ -398,10 +398,10 @@ export function createTools({ tunnel, binding, adapter, api, log = () => {}, now
       return "The journey's owner has not turned on assistant posting for this journey (aiCanPost is off). Nothing was posted.";
     }
     if (res.resolved === "message_not_found") {
-      return "No such board message on this journey — it may have been removed.";
+      return "No such board message on this journey — it may have been archived or never existed.";
     }
-    if (res.resolved === "already_removed") {
-      return "That board message was already removed and cannot be edited.";
+    if (res.resolved === "already_archived") {
+      return "That board message is archived and cannot be edited until it is unarchived.";
     }
     const explained = explainJourneyResolution(res);
     if (explained) return explained;

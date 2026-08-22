@@ -127,11 +127,19 @@ export function createJourneys({ config, db, internal }) {
     const mine = tenantActive.filter((m) => m.ownerIdentity === identity).map(toSummary);
     const mineIds = new Set(mine.map((m) => m.journeyId));
 
+    // Unlike `mine`/`publicJourneys` above, `accessor-index` is keyed only
+    // on identity — nothing about `status` participates in it, and
+    // completing a journey never touches its `ACCESSOR#` rows — so a
+    // completed private journey the caller remains an accessor of would
+    // otherwise leak in here (found while adding a picker that must never
+    // offer one as a link target, docs 20 §11): filtered explicitly,
+    // rather than relying on the GSI to have done it for free the way it
+    // does for the other two buckets.
     const accessorMetas = await Promise.all(
       accessorLinks.map((l) => db.getJourneyMeta(String(l.PK).slice("JOURNEY#".length)))
     );
     const accessible = accessorMetas
-      .filter((m) => m && !mineIds.has(m.journeyId))
+      .filter((m) => m && m.status === "active" && !mineIds.has(m.journeyId))
       .map(toSummary);
 
     const publicJourneys = tenantActive
@@ -479,13 +487,13 @@ export function createJourneys({ config, db, internal }) {
       createdBy: identity,
       createdAt: now,
       version: 1,
-      removed: false,
+      archived: false,
     });
     await db.putBoardMessageVersion(journeyId, { msgId, version: 1, content, action: "created", actor: identity, at: now });
     await db.updateJourneyMeta(journeyId, { boardMessageCount: (meta.boardMessageCount || 0) + 1, updatedAt: now });
     await db.putJourneyTimelineEntry(journeyId, {
       type: "board_message",
-      summary: "Board message added",
+      summary: `Message added: ${content.slice(0, 80)}`,
       actor: identity,
       at: now,
       detail: { msgId, action: "created" },
@@ -499,7 +507,7 @@ export function createJourneys({ config, db, internal }) {
     requireActive(meta);
     const head = await db.getBoardMessageHead(journeyId, msgId);
     if (!head) throw err(404, "board_message_not_found");
-    if (head.removed) throw err(409, "already_removed");
+    if (head.archived) throw err(409, "already_archived");
     const version = head.version + 1;
     const now = Date.now();
     const content = body.content.trim();
@@ -507,7 +515,7 @@ export function createJourneys({ config, db, internal }) {
     await db.putBoardMessageVersion(journeyId, { msgId, version, content, action: "edited", actor: identity, at: now });
     await db.putJourneyTimelineEntry(journeyId, {
       type: "board_message",
-      summary: "Board message edited",
+      summary: `Message edited: ${content.slice(0, 80)}`,
       actor: identity,
       at: now,
       detail: { msgId, action: "edited" },
@@ -515,36 +523,74 @@ export function createJourneys({ config, db, internal }) {
     return { journeyId, msgId, version };
   }
 
-  async function removeBoardMessage({ journeyId, identity, msgId }) {
+  /**
+   * Archive a board message (docs 20 §7): hidden from the default view,
+   * kept in history, reversible — deliberately not a deletion. `content`
+   * is untouched; only `archived`/`archivedBy`/`archivedAt` change, so an
+   * unarchive can restore exactly what was there. `editBoardMessage`
+   * still refuses to touch an archived message (§7): unarchive first.
+   */
+  async function archiveBoardMessage({ journeyId, identity, msgId }) {
     const meta = await requireJourney(journeyId);
     await requireMember(meta, identity);
     requireActive(meta);
     const head = await db.getBoardMessageHead(journeyId, msgId);
     if (!head) throw err(404, "board_message_not_found");
-    // Idempotent: removing an already-removed message lands on the same
+    // Idempotent: archiving an already-archived message lands on the same
     // state rather than an error, and must not post a second timeline entry.
-    if (head.removed) return { journeyId, msgId, removed: true };
+    if (head.archived) return { journeyId, msgId, archived: true };
     const version = head.version + 1;
     const now = Date.now();
-    await db.putBoardMessageHead(journeyId, { ...head, removed: true, removedBy: identity, removedAt: now, version });
-    await db.putBoardMessageVersion(journeyId, { msgId, version, content: head.content, action: "removed", actor: identity, at: now });
+    await db.putBoardMessageHead(journeyId, { ...head, archived: true, archivedBy: identity, archivedAt: now, version });
+    await db.putBoardMessageVersion(journeyId, { msgId, version, content: head.content, action: "archived", actor: identity, at: now });
     await db.updateJourneyMeta(journeyId, {
       boardMessageCount: Math.max(0, (meta.boardMessageCount || 0) - 1),
       updatedAt: now,
     });
     await db.putJourneyTimelineEntry(journeyId, {
       type: "board_message",
-      summary: "Board message removed",
+      summary: `Message archived: ${head.content.slice(0, 80)}`,
       actor: identity,
       at: now,
-      detail: { msgId, action: "removed" },
+      detail: { msgId, action: "archived" },
     });
-    return { journeyId, msgId, removed: true };
+    return { journeyId, msgId, archived: true };
   }
 
-  /** Every message, removed ones included — a removed message stays
-   *  visible (struck through by the caller) rather than vanishing; only
-   *  `boardMessageCount` on META reflects the current, active count. */
+  /** The reverse of `archiveBoardMessage` — brings a message back into the
+   *  default view with its content untouched. `archivedBy`/`archivedAt`
+   *  are dropped rather than kept stale, since they describe a state this
+   *  message is no longer in; the version chain (`action: "archived"`)
+   *  keeps the full fact regardless. */
+  async function unarchiveBoardMessage({ journeyId, identity, msgId }) {
+    const meta = await requireJourney(journeyId);
+    await requireMember(meta, identity);
+    requireActive(meta);
+    const head = await db.getBoardMessageHead(journeyId, msgId);
+    if (!head) throw err(404, "board_message_not_found");
+    // Idempotent, same reasoning as archiveBoardMessage.
+    if (!head.archived) return { journeyId, msgId, archived: false };
+    const { archivedBy, archivedAt, ...rest } = head;
+    const version = head.version + 1;
+    const now = Date.now();
+    await db.putBoardMessageHead(journeyId, { ...rest, archived: false, version, updatedBy: identity, updatedAt: now });
+    await db.putBoardMessageVersion(journeyId, { msgId, version, content: head.content, action: "unarchived", actor: identity, at: now });
+    await db.updateJourneyMeta(journeyId, { boardMessageCount: (meta.boardMessageCount || 0) + 1, updatedAt: now });
+    await db.putJourneyTimelineEntry(journeyId, {
+      type: "board_message",
+      summary: `Message unarchived: ${head.content.slice(0, 80)}`,
+      actor: identity,
+      at: now,
+      detail: { msgId, action: "unarchived" },
+    });
+    return { journeyId, msgId, archived: false };
+  }
+
+  /** Every message, archived ones included — an archived message is kept,
+   *  never erased; only `boardMessageCount` on META reflects the current,
+   *  non-archived count. The caller (the SPA) hides archived ones by
+   *  default and offers to reveal them, rather than this endpoint doing
+   *  the filtering — the collection is small and unpaginated either way. */
   async function listBoardMessages({ journeyId, identity }) {
     const meta = await requireJourney(journeyId);
     await requireMember(meta, identity);
@@ -762,7 +808,8 @@ export function createJourneys({ config, db, internal }) {
     getTimeline,
     addBoardMessage,
     editBoardMessage,
-    removeBoardMessage,
+    archiveBoardMessage,
+    unarchiveBoardMessage,
     listBoardMessages,
     getBoardMessageHistory,
     addDocument,

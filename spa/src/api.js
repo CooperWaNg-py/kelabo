@@ -54,6 +54,10 @@ export const api = {
         ...(opts.rtcMode ? { rtcMode: opts.rtcMode } : {}),
         // Opt-in, so it is only ever sent when true — the server's default is no.
         ...(opts.historyEnabled ? { historyEnabled: true } : {}),
+        // Link into one or more journeys at creation time (docs 20 §11) —
+        // the field already exists server-side; this call just used to
+        // silently drop it.
+        ...(opts.journeyIds?.length ? { journeyIds: opts.journeyIds } : {}),
       },
     }),
   getKelabo: id => apiRequest(`/kelabos/${id}`),
@@ -170,7 +174,8 @@ export const api = {
   addJourneyBoardMessage: (id, content) => apiRequest(`/journeys/${id}/board`, { method: 'POST', body: { content } }),
   editJourneyBoardMessage: (id, msgId, content) =>
     apiRequest(`/journeys/${id}/board/${msgId}`, { method: 'PATCH', body: { content } }),
-  removeJourneyBoardMessage: (id, msgId) => apiRequest(`/journeys/${id}/board/${msgId}`, { method: 'DELETE' }),
+  archiveJourneyBoardMessage: (id, msgId) => apiRequest(`/journeys/${id}/board/${msgId}/archive`, { method: 'POST' }),
+  unarchiveJourneyBoardMessage: (id, msgId) => apiRequest(`/journeys/${id}/board/${msgId}/unarchive`, { method: 'POST' }),
   getJourneyBoardMessageHistory: (id, msgId) => apiRequest(`/journeys/${id}/board/${msgId}/history`),
 
   listJourneyDocuments: id => apiRequest(`/journeys/${id}/documents`),

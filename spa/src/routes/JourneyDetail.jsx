@@ -134,9 +134,9 @@ function DescriptionHistoryModal({ id, onClose }) {
 
 const HEALTH_OPTIONS = [
   { value: null, label: 'Clear' },
-  { value: 'green', label: 'On track' },
-  { value: 'yellow', label: 'At risk' },
-  { value: 'red', label: 'Off track' },
+  { value: 'green', label: 'Full Steam' },
+  { value: 'yellow', label: 'Shoal Waters' },
+  { value: 'red', label: 'Anchored' },
 ]
 
 function StatusModal({ journey, onClose, onSaved }) {
@@ -306,7 +306,7 @@ function OverviewTab({ journey, isOwner, isMember, reload }) {
           <Avatar id={journey.ownerIdentity} size={28} />
           <div className="row-main">
             <div className="row-title">{journey.ownerIdentity}</div>
-            <div className="row-sub">Owner · creator</div>
+            <div className="row-sub">Lead · creator</div>
           </div>
         </div>
         {/* Contributor rollups (docs 20 §10) — cumulative, never live: how
@@ -352,7 +352,7 @@ function timelineIcon(type) {
   return 'clock'
 }
 
-function TimelineTab({ journeyId, isMember }) {
+function TimelineTab({ journeyId, isMember, onOpenDocument }) {
   const [type, setType] = useState('')
   const [entries, setEntries] = useState(null)
   const [nextBefore, setNextBefore] = useState(undefined)
@@ -389,19 +389,35 @@ function TimelineTab({ journeyId, isMember }) {
 
       {entries === null && <SkeletonRows n={4} />}
       {entries && entries.length === 0 && <div className="empty">Nothing here yet.</div>}
-      {entries && annotateDays(entries, e => e.at).map(({ item: e, divider }, i) => (
-        <Fragment key={`${e.at}-${i}`}>
-          {divider && <div className="day-divider" role="separator">{divider}</div>}
-          <div className="row">
-            <Icon name={timelineIcon(e.type)} size={15} className="kind-icon" />
-            <div className="row-main">
-              <div className="row-title">{e.summary}</div>
-              <div className="row-sub">{e.actor}</div>
-            </div>
-            <span className="row-meta" title={fmtFullAt(e.at)}>{fmtTime(e.at)}</span>
-          </div>
-        </Fragment>
-      ))}
+      {entries && annotateDays(entries, e => e.at).map(({ item: e, divider }, i) => {
+        // Link straight to the kelabo (same /kelabos/:id shape the Kelabos
+        // tab already uses — note that shape only really resolves once the
+        // kelabo has ended; a still-live/scheduled one 404s there today,
+        // a pre-existing gap this reuses rather than silently fixing here).
+        // A document has no page of its own, so its click instead switches
+        // to the Documents tab and opens that document inline there.
+        const kelaboId = (e.type === 'kelabo_linked' || e.type === 'kelabo_unlinked') ? e.detail?.kelaboId : null
+        const docId = e.type === 'document' ? e.detail?.docId : null
+        const RowTag = kelaboId ? Link : 'div'
+        const rowProps = kelaboId
+          ? { to: `/kelabos/${kelaboId}` }
+          : docId
+            ? { onClick: () => onOpenDocument(docId), style: { cursor: 'pointer' } }
+            : {}
+        return (
+          <Fragment key={`${e.at}-${i}`}>
+            {divider && <div className="day-divider" role="separator">{divider}</div>}
+            <RowTag className="row" {...rowProps}>
+              <Icon name={timelineIcon(e.type)} size={15} className="kind-icon" />
+              <div className="row-main">
+                <div className="row-title">{e.summary}</div>
+                <div className="row-sub">{e.actor}</div>
+              </div>
+              <span className="row-meta" title={fmtFullAt(e.at)}>{fmtTime(e.at)}</span>
+            </RowTag>
+          </Fragment>
+        )
+      })}
       {nextBefore !== undefined && (
         <div className="action-row action-row-start">
           <Button size="sm" disabled={loadingMore} onClick={() => { setLoadingMore(true); load(nextBefore) }}>
@@ -705,10 +721,14 @@ function AddDocumentModal({ onClose, onSave }) {
   )
 }
 
-function DocumentsTab({ journeyId, isMember, isActive }) {
+function DocumentsTab({ journeyId, isMember, isActive, initialOpenDocId }) {
   const [items, setItems] = useState(null)
   const [showAdd, setShowAdd] = useState(false)
-  const [open, setOpen] = useState(null)
+  // Seeded from a Timeline click-through (docs 20 §9), if that's how this
+  // tab got mounted — safe as a plain useState initializer because this
+  // component unmounts and remounts fresh on every tab switch (it never
+  // receives a changed prop while already mounted).
+  const [open, setOpen] = useState(initialOpenDocId || null)
   const confirm = useConfirm()
   const toast = useToast()
 
@@ -887,6 +907,18 @@ export default function JourneyDetail() {
   const [error, setError] = useState(null)
   const [tab, setTab] = useState('overview')
   const [accessors, setAccessors] = useState(null)
+  // A Timeline "document" entry switches to the Documents tab and opens
+  // that document there (documents have no page of their own to link to).
+  // Cleared right after the switch, not on some later user action: it only
+  // needs to be correct at the instant DocumentsTab mounts and reads it as
+  // its own initial state (see DocumentsTab's own comment) — leaving it set
+  // would re-open the same document every time the user returns to this
+  // tab by any other route.
+  const [focusDocId, setFocusDocId] = useState(null)
+  const openDocument = docId => { setFocusDocId(docId); setTab('documents') }
+  useEffect(() => {
+    if (tab === 'documents' && focusDocId) setFocusDocId(null)
+  }, [tab]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const reload = () => api.getJourney(id).then(setJourney).catch(e => setError(e.status === 403 || e.status === 401 ? 'forbidden' : e.status === 404 ? 'not_found' : 'error'))
   useEffect(() => { reload() }, [id]) // eslint-disable-line react-hooks/exhaustive-deps
@@ -948,7 +980,7 @@ export default function JourneyDetail() {
 
       {error && (
         <Banner kind={error === 'forbidden' ? 'danger' : 'warn'}>
-          {error === 'forbidden' && 'This journey is only visible to its owner, its accessors, or your tenant if it is public.'}
+          {error === 'forbidden' && 'This journey is only visible to its lead, its accessors, or your tenant if it is public.'}
           {error === 'not_found' && "This journey doesn't exist — it may have been deleted."}
           {error === 'error' && "Couldn't load this journey — check your connection and reload."}
         </Banner>
@@ -971,7 +1003,7 @@ export default function JourneyDetail() {
             <JourneyHealthChip health={journey.health} />
           </div>
           <p className="page-sub">
-            Owner: {journey.ownerIdentity} · {journey.kelaboCount} kelabo{journey.kelaboCount === 1 ? '' : 's'}
+            Lead: {journey.ownerIdentity} · {journey.kelaboCount} kelabo{journey.kelaboCount === 1 ? '' : 's'}
             {typeof journey.progress === 'number' ? ` · ${journey.progress}% complete` : ''}
           </p>
 
@@ -994,11 +1026,11 @@ export default function JourneyDetail() {
           />
 
           {tab === 'overview' && <OverviewTab journey={journey} isOwner={isOwner} isMember={isMember} reload={reload} />}
-          {tab === 'timeline' && <TimelineTab journeyId={id} isMember={isMember} />}
+          {tab === 'timeline' && <TimelineTab journeyId={id} isMember={isMember} onOpenDocument={openDocument} />}
           {tab === 'kelabos' && <KelabosTab journeyId={id} isMember={isMember} isActive={isActive} />}
           {tab === 'reports' && <ReportsTab journeyId={id} isMember={isMember} isActive={isActive} />}
           {tab === 'board' && <BoardTab journeyId={id} isMember={isMember} isActive={isActive} />}
-          {tab === 'documents' && <DocumentsTab journeyId={id} isMember={isMember} isActive={isActive} />}
+          {tab === 'documents' && <DocumentsTab journeyId={id} isMember={isMember} isActive={isActive} initialOpenDocId={focusDocId} />}
           {tab === 'accessors' && journey.visibility === 'private' && (
             <section className="anim-in">
               {isOwner && isActive && (

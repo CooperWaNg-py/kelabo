@@ -12,6 +12,7 @@ import { Menu, MenuItem } from './ui/Menu'
 import { StartingSoon } from './StartingSoon'
 import { SearchDialog } from './SearchDialog'
 import { CallDialog } from './CallDialog'
+import { NewJourneyModal } from './NewJourneyModal'
 import { kelaboKindIcon } from '../kelaboKind'
 import { useToast } from './Toaster'
 import { useConfirm } from './ConfirmDialog'
@@ -75,6 +76,7 @@ export function AppShell({ children }) {
   const [collapsed, setCollapsed] = useState(() => localStorage.getItem(SIDEBAR_KEY) === '1')
   const [mobileOpen, setMobileOpen] = useState(false)
   const [searchOpen, setSearchOpen] = useState(false)
+  const [newJourneyOpen, setNewJourneyOpen] = useState(false)
   // A contact picked from the search dialog to call — hands over to CallDialog.
   const [callTo, setCallTo] = useState(null)
   const [icon, setIcon] = useState(themeIcon())
@@ -389,13 +391,14 @@ export function AppShell({ children }) {
             </div>
           </div>
 
-          {/* The two things that CREATE a kelabo, in their own block. They were
-              four identical rows before — New kelabo, Schedule, Home, Kelabos
-              — and nothing said which two started something and which two went
-              somewhere, so the pair read as the top of the nav list rather than
-              as a group (notes #10). A tinted, bordered block and a rule beneath
-              it say it once, without giving either row a colour loud enough to
-              compete with the filled button on the page it opens. */}
+          {/* The things that CREATE something, in their own block. They were
+              identical nav rows before — New kelabo, Schedule, Home, Kelabos
+              — and nothing said which ones started something and which ones
+              went somewhere, so the group read as the top of the nav list
+              rather than as its own thing (notes #10). A tinted, bordered
+              block and a rule beneath it say it once, without giving any row
+              a colour loud enough to compete with the filled button on the
+              page it opens. */}
           <div className="sidebar-actions">
             <Link className="sidebar-item sidebar-new" to="/new" title="New kelabo">
               <Icon name="plus" />
@@ -413,6 +416,20 @@ export function AppShell({ children }) {
               <Icon name="arrow-right" />
               <span className="sidebar-label">Join</span>
             </Link>
+            {/* A journey is created, not joined or scheduled, but it belongs in
+                this action block for the same reason the three above do —
+                reachable from anywhere, not just from /journeys itself. No
+                route to navigate to (creation is a modal, docs 20 §11), so a
+                button rather than a Link, styled identically either way. */}
+            <button
+              type="button"
+              className="sidebar-item sidebar-new sidebar-new-alt"
+              onClick={() => setNewJourneyOpen(true)}
+              title="New journey"
+            >
+              <Icon name="plus" />
+              <span className="sidebar-label">New journey</span>
+            </button>
           </div>
 
           <nav className="sidebar-nav">
@@ -553,6 +570,12 @@ export function AppShell({ children }) {
           />
         )}
         {callTo && <CallDialog initial={callTo} onClose={() => setCallTo(null)} />}
+        {newJourneyOpen && (
+          <NewJourneyModal
+            onClose={() => setNewJourneyOpen(false)}
+            onCreated={id => { setNewJourneyOpen(false); navigate(`/journeys/${id}`) }}
+          />
+        )}
 
         <div className="shell-main">
           <div className="shell-mobilebar">

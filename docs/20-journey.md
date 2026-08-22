@@ -699,25 +699,60 @@ exists.
 
 ## 13. SPA / UI
 
+**Display-vocabulary note, read once, applies throughout this section:**
+two purely cosmetic SPA renames sit on top of an unchanged mechanism.
+`ownerIdentity`/`isOwner`/`requireOwner`/`myRole:"owner"`/
+`not_journey_owner` (§3, §4.1, §11) are unchanged everywhere they are an
+identifier rather than a word a person reads — the SPA alone displays the
+role as **"Lead"** (`JourneyDetail.jsx`'s "Lead · creator" / "Lead: "
+labels). Likewise `health`'s stored values stay `"green"|"yellow"|"red"`
+(§5's own contract, unchanged) — only the chip/option labels read
+**"Full Steam"** / **"Shoal Waters"** / **"Anchored"**
+(`Journeys.jsx`'s `HEALTH_LABEL`, `JourneyDetail.jsx`'s `HEALTH_OPTIONS`).
+The one place this needed a non-SPA fix rather than just a label swap:
+`writeStatusVersion`'s own Timeline sentence (`rest-api/src/journeys.js`)
+used to interpolate the raw stored word directly ("Status updated
+(health: yellow)"), which would have read as a bug sitting next to a chip
+that now says "Shoal Waters" — it renders through the same three words
+now, kept local to that one function rather than shared with the SPA's
+own label map (this codebase already carries two independent copies of
+the bare `green|yellow|red` enum, in `contracts/src/schemas.js` and
+`contracts/src/frames.js`; a third, human-prose copy is no worse). Journey
+context fed to an LLM or a `kelabo_journey_info` MCP reply (§6.2, §12.1,
+§12.2) is deliberately untouched — the raw enum word is arguably *better*
+there than a metaphor the model would have to already know to parse.
+
 - **Nav:** new `Journeys` entry in `AppShell.jsx`'s sidebar, beside
-  Kelabos.
+  Kelabos. **New journey** is a sidebar action beside New kelabo/
+  Schedule/Join, not a button on `/journeys` itself — a `<button>`
+  (there's no route to navigate to; creation is a modal) styled
+  identically to its `Link`-based siblings via one small reset
+  (`button.sidebar-item`, `kelabo.css`), opening the same
+  `NewJourneyModal` (now `spa/src/components/NewJourneyModal.jsx`, shared
+  rather than owned by the list page) from wherever the user already is.
 - **`/journeys`:** list, `{mine, accessible, public}` sections, reusing
   `Records.jsx`'s bucketed-sections-plus-search pattern. Each row: avatar,
   title, status chip, health dot, progress badge, kelabo count, last
-  activity.
-- **`/journeys/:id`:** header (avatar + re-roll if owner, title, status
-  chip, health/progress, owner + accessor-count), `Tabs`: **Overview**
+  activity. No create action on this page (see Nav, above).
+- **`/journeys/:id`:** header (avatar + re-roll if lead, title, status
+  chip, health/progress, lead + accessor-count), `Tabs`: **Overview**
   (description, contributor table, status update, action buttons) ·
-  **Timeline** (§9.3) · **Kelabos** (linked list, add/remove, plus **New
-  kelabo**/**Schedule kelabo** shortcuts — `?journeyId=` to `/new`/
-  `/schedule`, pre-filling this journey in the picker below, removable
-  before submitting; hidden on a completed journey, same guard as "Add a
-  kelabo") · **Reports** (list + "Ask a question" modal — no
-  suggested-status apply button; that whole flow is out of scope, §5/§17,
-  not merely unbuilt UI) · **Board** (§7, per-message history, a
-  "Show archived (N)" reveal toggle, Unarchive) · **Documents** (§8,
-  content rendered through the same `Markdown` component descriptions and
-  reports already use) · **Accessors** (private only, owner-managed).
+  **Timeline** (§9.3; a `kelabo_linked`/`kelabo_unlinked` entry links
+  straight to that kelabo — the same `/kelabos/:id` shape the Kelabos tab
+  already uses, inheriting its one known gap: that shape only really
+  resolves once the kelabo has ended, so a still-live/scheduled one 404s;
+  a `document` entry switches to the Documents tab and opens that
+  document inline there instead, since a document has no page of its own)
+  · **Kelabos** (linked list, add/remove, plus **New kelabo**/**Schedule
+  kelabo** shortcuts — `?journeyId=` to `/new`/`/schedule`, pre-filling
+  this journey in the picker below, removable before submitting; hidden
+  on a completed journey, same guard as "Add a kelabo") · **Reports**
+  (list + "Ask a question" modal — no suggested-status apply button; that
+  whole flow is out of scope, §5/§17, not merely unbuilt UI) · **Board**
+  (§7, per-message history, a "Show archived (N)" reveal toggle,
+  Unarchive) · **Documents** (§8, content rendered through the same
+  `Markdown` component descriptions and reports already use) ·
+  **Accessors** (private only, lead-managed).
 - **Breadcrumb on existing pages:** `Kelabo.jsx`, `RecordDetail.jsx`,
   `ScheduledKelabo.jsx` show "Part of: `<journey chips>`" when linked.
 - **Creation-time linking — built:** `NewKelabo.jsx` / `Schedule.jsx` gain

@@ -390,6 +390,15 @@ export function createJourneys({ config, db, internal }) {
 
   // --- health/progress status (docs 20 §5) ------------------------------------
 
+  // Timeline prose only — the stored/API value stays "green"/"yellow"/"red"
+  // (docs 20 §5's contract, unchanged) everywhere except this one sentence a
+  // person actually reads. Kept local rather than shared with the SPA's own
+  // HEALTH_LABEL (Journeys.jsx): the two have never shared a source of
+  // truth (contracts/src/schemas.js and frames.js already carry two
+  // independent copies of the bare enum), and a human-readable timeline
+  // sentence is a different job from a chip's short label.
+  const HEALTH_PROSE = { green: "Full Steam", yellow: "Shoal Waters", red: "Anchored" };
+
   /**
    * One combined snapshot per update — health and progress are reported
    * together, not as two independently-drifting fields. An omitted field
@@ -419,7 +428,7 @@ export function createJourneys({ config, db, internal }) {
       updatedAt: now,
     });
     const parts = [];
-    if (health !== undefined) parts.push(`health: ${resolvedHealth ?? "cleared"}`);
+    if (health !== undefined) parts.push(`health: ${resolvedHealth ? HEALTH_PROSE[resolvedHealth] || resolvedHealth : "cleared"}`);
     if (progress !== undefined) parts.push(`progress: ${resolvedProgress ?? "cleared"}`);
     await db.putJourneyTimelineEntry(meta.journeyId, {
       type: "status",

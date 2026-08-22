@@ -424,6 +424,10 @@ export function AppShell({ children }) {
               <Icon name="archive" />
               <span className="sidebar-label">Kelabos</span>
             </NavLink>
+            <NavLink to="/journeys" className={({ isActive }) => 'sidebar-item' + (isActive ? ' active' : '')} title="Journeys">
+              <Icon name="book-open" />
+              <span className="sidebar-label">Journeys</span>
+            </NavLink>
             <NavLink to="/contacts" className={({ isActive }) => 'sidebar-item' + (isActive ? ' active' : '')} title="Contacts">
               <Icon name="users" />
               <span className="sidebar-label">Contacts</span>

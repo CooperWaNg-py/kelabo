@@ -2519,7 +2519,10 @@ h5.md-h, h6.md-h { font-size: var(--text-sm); color: var(--text-2); }
   animation: menu-in .12s ease-out both;
 }
 .dtp-presets { display: flex; gap: 6px; margin-bottom: var(--space-3); }
-.dtp-presets .chip-btn.is-on { background: var(--accent); color: var(--accent-on); border-color: transparent; }
+/* Generalised rather than scoped to .dtp-presets: any chip-btn toggle (the
+   journey timeline's type filter, docs 20 §9.3) gets the same "selected"
+   look, not a second one. */
+.chip-btn.is-on { background: var(--accent); color: var(--accent-on); border-color: transparent; }
 
 .dtp-body { display: flex; gap: var(--space-3); }
 .dtp-cal { width: 15.75rem; }

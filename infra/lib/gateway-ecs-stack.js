@@ -64,12 +64,18 @@ export class GatewayEcsStack extends Stack {
       clusterName: `${cfg.app}-${cfg.endpoint}`,
     });
 
-    // Same reason as the Lambda's: the pattern would otherwise create this
-    // group with no expiry. The Gateway logs every join, caption append and
-    // agent attach, each carrying the participant's identity, so leaving it
-    // unset keeps a permanent index of who was in which room.
+    // Same reason as the Lambda's: the pattern would otherwise create this group
+    // with a generated name and no expiry. The Gateway logs every join, caption
+    // append and agent attach, each carrying the participant's identity, so
+    // leaving it unset keeps a permanent index of who was in which room.
+    //
+    // Named to match the Lambda's, so both halves of the service are in one
+    // place under `/kelabo/<env>/` rather than one under `/aws/lambda` and one
+    // under a random construct id. The pattern's own generated group is
+    // abandoned by this change and can be deleted once nothing needs its
+    // history.
     const logGroup = new logs.LogGroup(this, "GatewayLogs", {
-      logGroupName: `/aws/ecs/${cfg.app}-${cfg.endpoint}-gateway`,
+      logGroupName: `/${cfg.app}/${cfg.endpoint}/gateway`,
       retention: logRetention(cfg.logRetentionDays),
       removalPolicy: RemovalPolicy.RETAIN,
     });

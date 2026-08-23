@@ -22,10 +22,23 @@ export class LambdaStack extends Stack {
     // retention is an unbounded record of who used the service and when,
     // outliving the kelabos it describes by any margin.
     //
+    // **Deliberately not `/aws/lambda/<function>`.** That is where Lambda puts
+    // logs by itself, so on any environment that has ever served a request the
+    // group already exists and is not owned by CloudFormation — and declaring
+    // it fails the whole changeset with `already exists`, before anything is
+    // deployed. A change made for hygiene must not break every existing
+    // deployment's next deploy, so it takes a name of ours instead.
+    //
+    // Consequence worth knowing: after this ships, the old `/aws/lambda/…`
+    // group stops receiving anything, because the function's logging config
+    // points here. It keeps whatever it already had and can be deleted whenever
+    // convenient — there is no race, because Lambda only auto-creates the group
+    // it is configured to use.
+    //
     // `RETAIN` on destroy: losing the stack must not also lose the log of what
     // happened to it, which is exactly when it is wanted.
     const logGroup = new logs.LogGroup(this, "RestApiLogs", {
-      logGroupName: `/aws/lambda/${cfg.app}-${cfg.endpoint}-rest-api`,
+      logGroupName: `/${cfg.app}/${cfg.endpoint}/rest-api`,
       retention: logRetention(cfg.logRetentionDays),
       removalPolicy: RemovalPolicy.RETAIN,
     });

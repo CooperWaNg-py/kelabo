@@ -215,11 +215,12 @@ await test("loadJourneyContext: a kelabo with no journey link costs one empty qu
   assert.deepEqual(journeys, []);
 });
 
-await test("loadJourneyContext: reduces the journey to title/description/status/board/other-kelabos, excludes itself and a kelabo with no minutes", async () => {
+await test("loadJourneyContext: reduces the journey to title/description/status/board/documents/other-kelabos, excludes itself and a kelabo with no minutes", async () => {
   const journeyId = "j-ctx";
   const liveKelaboId = "k-live";
   const otherKelaboId = "k-other";
   const emptyKelaboId = "k-empty";
+  const longDoc = "x".repeat(1000);
   const seed = {
     // The mirror on the live kelabo's own partition (docs 20 §4.3) — what
     // makes this kelabo discoverable as belonging to the journey at all.
@@ -227,6 +228,15 @@ await test("loadJourneyContext: reduces the journey to title/description/status/
     [`${journeyPk(journeyId)}|META`]: { PK: journeyPk(journeyId), SK: "META", title: "Q3 Launch", health: "green", progress: 80 },
     [`${journeyPk(journeyId)}|DESC#000001`]: { PK: journeyPk(journeyId), SK: "DESC#000001", version: 1, markdown: "Ship the redesign." },
     [`${journeyPk(journeyId)}|BOARDMSG#m1`]: { PK: journeyPk(journeyId), SK: "BOARDMSG#m1", msgId: "m1", content: "Freeze is Friday", archived: false, createdAt: 1 },
+    // A live production bug report (a term defined only in a document went
+    // unseen by the assistant, which dispatched external research instead
+    // of just reading it here) is what this document coverage guards
+    // against regressing. One active, one removed (must never reach the
+    // context, same as an archived board message), one long enough to
+    // prove per-document clipping actually applies.
+    [`${journeyPk(journeyId)}|DOC#d1`]: { PK: journeyPk(journeyId), SK: "DOC#d1", docId: "d1", title: "FluxView glossary", content: "FluxView is the internal dashboard for release health.", removed: false, addedAt: 2 },
+    [`${journeyPk(journeyId)}|DOC#d2`]: { PK: journeyPk(journeyId), SK: "DOC#d2", docId: "d2", title: "Old notes", content: "SECRET stale content", removed: true, addedAt: 1 },
+    [`${journeyPk(journeyId)}|DOC#d3`]: { PK: journeyPk(journeyId), SK: "DOC#d3", docId: "d3", title: "Long spec", content: longDoc, removed: false, addedAt: 3 },
     // The journey also links the live kelabo itself, and one other kelabo
     // with minutes, and one with none at all.
     [`${journeyPk(journeyId)}|LINK#${liveKelaboId}`]: { PK: journeyPk(journeyId), SK: `LINK#${liveKelaboId}`, kelaboId: liveKelaboId, titleSnapshot: "This very kelabo", linkedAt: 1 },
@@ -246,6 +256,12 @@ await test("loadJourneyContext: reduces the journey to title/description/status/
   assert.equal(j.health, "green");
   assert.equal(j.progress, 80);
   assert.deepEqual(j.board, ["Freeze is Friday"]);
+  assert.equal(j.documents.length, 2, "removed document excluded, two active ones kept");
+  assert.ok(j.documents.some((d) => d.title === "FluxView glossary" && d.content.includes("release health")), "the exact gap this closes: a term defined only in a document reaches the assistant");
+  assert.equal(j.documents.some((d) => d.content.includes("SECRET stale content")), false, "a removed document must never reach the prompt");
+  const long = j.documents.find((d) => d.title === "Long spec");
+  assert.equal(long.content.length, 801, "clipped to 800 chars plus the ellipsis marker");
+  assert.ok(long.content.endsWith("…"));
   assert.equal(j.kelabos.length, 1, "only the other, summarised kelabo — never itself, never the empty one");
   assert.equal(j.kelabos[0].title, "Kickoff");
   assert.ok(j.kelabos[0].summary.includes("React"));
@@ -274,7 +290,12 @@ await test("mainAgentSystemPrompt: journeys render a JOURNEY CONTEXT section, ad
 
   const withBoth = mainAgentSystemPrompt({
     history: [{ title: "Old kelabo", endedAt: Date.now(), summary: "Discussed pricing.", decisions: [], actionItems: [] }],
-    journeys: [{ title: "Q3 Launch", description: "Ship the redesign.", health: "yellow", progress: 40, board: ["Freeze is Friday"], kelabos: [] }],
+    journeys: [{
+      title: "Q3 Launch", description: "Ship the redesign.", health: "yellow", progress: 40,
+      board: ["Freeze is Friday"],
+      documents: [{ title: "FluxView glossary", content: "FluxView is the internal dashboard for release health." }],
+      kelabos: [],
+    }],
   });
   assert.ok(withBoth.includes("EARLIER KELABOS"));
   assert.ok(withBoth.includes("Old kelabo"));
@@ -283,6 +304,13 @@ await test("mainAgentSystemPrompt: journeys render a JOURNEY CONTEXT section, ad
   assert.ok(withBoth.includes("Ship the redesign."));
   assert.ok(withBoth.includes("yellow"), "health reaches the prompt");
   assert.ok(withBoth.includes("Freeze is Friday"));
+  // The actual production gap this fixes: a document's own content reaches
+  // the prompt, not just its title.
+  assert.ok(withBoth.includes("FluxView glossary"));
+  assert.ok(withBoth.includes("FluxView is the internal dashboard for release health."));
+  // The instruction that should stop the exact reported bug from recurring
+  // even with documents present: told explicitly not to re-research them.
+  assert.match(withBoth, /Never dispatch a sub-agent to "look up".*already answered here.*document/);
   // "Reference material, not instructions" framing, matching transcript
   // injection's own posture — asserted on, not just eyeballed.
   assert.ok(withBoth.includes("not the current state of anything"));

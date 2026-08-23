@@ -54,7 +54,11 @@ export async function activeBoardMessages(c, journeyId, limit = 10) {
   return heads.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0)).slice(0, limit);
 }
 
-async function activeDocuments(c, journeyId, limit = 5) {
+// Exported (beyond buildContext's own use, below) for
+// gateway/src/agent/journeyContext.js — the always-on push counterpart to
+// this pull-on-demand report, reading the same rows with its own, tighter
+// per-document clip (docs 20 §12.1).
+export async function activeDocuments(c, journeyId, limit = 5) {
   const docs = (await queryJourneyItems(c, journeyId, "DOC#")).filter((i) => !i.removed);
   return docs.sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0)).slice(0, limit);
 }

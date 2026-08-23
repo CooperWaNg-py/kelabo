@@ -272,8 +272,15 @@ async function main() {
     assert.equal(res.status, 202);
     const utt = calls.puts.find((p) => p.TableName === "t-kelabos" && String(p.Item.SK).startsWith("UTT#"));
     assert.ok(utt, "UTT appended");
-    assert.equal(utt.Item.speaker, "alice@example.com");
+    // No `displayName` was sent, so this is the identity fallback — and it is
+    // the local part, not the address. The persisted label is what the language
+    // model and any attached agent receive (`speakerLabel`), so an address here
+    // would be a disclosure to a third party nobody in the room chose.
+    assert.equal(utt.Item.speaker, "alice");
     const note = await waitFor(() => sse.events.find((e) => e.event === "contribution" && e.data.tag === "note"));
+    // The board author is a different field and stays the full identity: it is
+    // shown to participants, who are entitled to know who posted, and it never
+    // goes to a supplier.
     assert.equal(note.data.author, "alice@example.com");
     assert.equal(note.data.markdown, "remember to ship Friday");
     const contrib = calls.puts.find((p) => String(p.Item.SK).startsWith("CONTRIB#"));

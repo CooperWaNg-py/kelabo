@@ -143,8 +143,10 @@ here needs a special guest rule, it falls out of the identity shape.
 | View, search, read timeline | yes | yes |
 | Edit description | yes | yes |
 | Set health/progress (§5) | yes | yes |
-| Add/edit/archive/unarchive board message | yes | yes |
-| Add/remove document | yes | yes |
+| Add/edit/unarchive board message | yes | yes |
+| Archive a board message | poster only | yes |
+| Add document | yes | yes |
+| Remove a document | poster only | yes |
 | Link a kelabo (must be host/participant of *that* kelabo) | yes | yes |
 | Unlink a kelabo | yes | yes |
 | Request a report | yes | yes |
@@ -389,6 +391,13 @@ version chain (`action: "archived"|"unarchived"`) either way.
 `boardMessageCount` on META is bidirectional: it drops on archive and
 rises again on unarchive, always reflecting the current, visible count.
 
+Archiving is narrower than the general write access §3.3 grants every
+member: only the message's own poster (`createdBy`) or the journey's lead
+(`ownerIdentity`) may archive it — `403 not_message_author_or_lead`
+otherwise. Add/edit/unarchive stay open to every member; only the
+removal-shaped action is restricted, the same reasoning as documents
+(§8.2).
+
 Archiving means "no longer important, not outstanding — not gone." The
 SPA hides an archived message from the board's default view and offers
 to reveal it (a "Show archived (N)" toggle), showing its real content
@@ -428,6 +437,12 @@ removed, but the record can't be changed" — once removed, that document's
 timeline entry is permanent and its content is excluded from future
 report/agent context assembly; there is no un-remove and no further edit.
 A document someone wants back is re-added as a new one.
+
+Narrower than the general write access §3.3 grants every member: only the
+document's own poster (`addedBy`) or the journey's lead (`ownerIdentity`)
+may remove it — `403 not_document_owner_or_lead` otherwise. Adding stays
+open to every member; only removal is restricted, the same reasoning as
+board messages (§7).
 
 ## 9. Timeline
 
@@ -721,8 +736,10 @@ two purely cosmetic SPA renames sit on top of an unchanged mechanism.
 `ownerIdentity`/`isOwner`/`requireOwner`/`myRole:"owner"`/
 `not_journey_owner` (§3, §4.1, §11) are unchanged everywhere they are an
 identifier rather than a word a person reads — the SPA alone displays the
-role as **"Lead"** (`JourneyDetail.jsx`'s "Lead · creator" / "Lead: "
-labels). Likewise `health`'s stored values stay `"green"|"yellow"|"red"`
+role as **"Lead"** (`JourneyDetail.jsx`'s People-list and header "Lead: "
+labels — the People list originally also read "Lead · creator"; the
+second word was dropped as redundant with the field's own label).
+Likewise `health`'s stored values stay `"green"|"yellow"|"red"`
 (§5's own contract, unchanged) — only the chip/option labels read
 **"Full Steam"** / **"Shoal Waters"** / **"Anchored"**
 (`Journeys.jsx`'s `HEALTH_LABEL`, `JourneyDetail.jsx`'s `HEALTH_OPTIONS`).
@@ -755,11 +772,14 @@ there than a metaphor the model would have to already know to parse.
   chip, health/progress, lead + accessor-count), `Tabs`: **Overview**
   (description, contributor table, status update, action buttons) ·
   **Timeline** (§9.3; a `kelabo_linked`/`kelabo_unlinked` entry links
-  straight to that kelabo — the same `/kelabos/:id` shape the Kelabos tab
-  already uses, inheriting its one known gap: that shape only really
-  resolves once the kelabo has ended, so a still-live/scheduled one 404s;
-  a `document` entry switches to the Documents tab and opens that
-  document inline there instead, since a document has no page of its own)
+  straight to that kelabo, routed by its `statusSnapshot` — `kelaboHref()`
+  in `JourneyDetail.jsx`, shared with the Kelabos tab below — since
+  `/kelabos/:id` only ever resolves once archived: `active` goes to
+  `/join/:id`, `ended` to `/kelabos/:id`, anything else (including a stale
+  snapshot) to `/scheduled/:id`, which does its own live fetch and
+  self-corrects to whatever the kelabo's status actually is now; a
+  `document` entry switches to the Documents tab and opens that document
+  inline there instead, since a document has no page of its own)
   · **Kelabos** (linked list, add/remove, plus **New kelabo**/**Schedule
   kelabo** shortcuts — `?journeyId=` to `/new`/`/schedule`, pre-filling
   this journey in the picker below, removable before submitting; hidden
@@ -767,8 +787,11 @@ there than a metaphor the model would have to already know to parse.
   (list + "Ask a question" modal — no suggested-status apply button; that
   whole flow is out of scope, §5/§17, not merely unbuilt UI) · **Board**
   (§7, per-message history, a "Show archived (N)" reveal toggle,
-  Unarchive) · **Documents** (§8, content rendered through the same
-  `Markdown` component descriptions and reports already use) ·
+  Unarchive) · **Documents** (§8, a "Show removed (N)" reveal toggle
+  mirroring Board's, content rendered through the same `Markdown`
+  component descriptions and reports already use, with `hardBreaks`:
+  pasted text is not LLM-authored prose, so a single newline is kept as a
+  visible line break instead of Markdown's normal soft-wrap-to-space) ·
   **Accessors** (private only, lead-managed).
 - **Breadcrumb on existing pages:** `Kelabo.jsx`, `RecordDetail.jsx`,
   `ScheduledKelabo.jsx` show "Part of: `<journey chips>`" when linked.

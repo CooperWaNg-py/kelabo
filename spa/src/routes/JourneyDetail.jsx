@@ -1,6 +1,7 @@
 import { Fragment, useEffect, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { api } from '../api'
+import { useAuth } from '../auth'
 import { useAppData } from '../components/AppShell'
 import { useConfirm } from '../components/ConfirmDialog'
 import { usePrompt } from '../components/PromptDialog'
@@ -17,6 +18,20 @@ import { Markdown } from '../components/Markdown'
 import { JourneyHealthChip } from './Journeys'
 import { annotateDays, fmtFullAt, fmtTime } from '../time'
 import { timeAgo } from '../timeAgo'
+
+// A journey link (docs 20 §9.3) persists a kelabo's status only as a
+// point-in-time snapshot, not live, so this can be stale once that kelabo's
+// real status has moved on. It only needs to distinguish "already
+// archived" (the one shape `/kelabos/:id` actually resolves) from
+// everything else: `/scheduled/:id` does its own live fetch and renders
+// whatever the current status actually is (live, cancelled, or still
+// scheduled), so staleness there self-corrects on load rather than 404ing
+// the way a hard-coded `/kelabos/:id` did for anything not yet archived.
+function kelaboHref(kelaboId, status) {
+  if (status === 'active') return `/join/${kelaboId}`
+  if (status === 'ended') return `/kelabos/${kelaboId}`
+  return `/scheduled/${kelaboId}`
+}
 
 const TABS = [
   { id: 'overview', label: 'Overview' },
@@ -133,7 +148,6 @@ function DescriptionHistoryModal({ id, onClose }) {
 }
 
 const HEALTH_OPTIONS = [
-  { value: null, label: 'Clear' },
   { value: 'green', label: 'Full Steam' },
   { value: 'yellow', label: 'Shoal Waters' },
   { value: 'red', label: 'Anchored' },
@@ -306,7 +320,7 @@ function OverviewTab({ journey, isOwner, isMember, reload }) {
           <Avatar id={journey.ownerIdentity} size={28} />
           <div className="row-main">
             <div className="row-title">{journey.ownerIdentity}</div>
-            <div className="row-sub">Lead · creator</div>
+            <div className="row-sub">Lead</div>
           </div>
         </div>
         {/* Contributor rollups (docs 20 §10) — cumulative, never live: how
@@ -373,7 +387,7 @@ function TimelineTab({ journeyId, isMember, onOpenDocument }) {
   if (!isMember) return <div className="empty">You don't have access to this journey's timeline.</div>
 
   return (
-    <section className="anim-in">
+    <section className="anim-in vstack-sm journey-tab">
       <div className="hstack" style={{ flexWrap: 'wrap' }}>
         {TIMELINE_TYPES.map(t => (
           <button
@@ -390,17 +404,17 @@ function TimelineTab({ journeyId, isMember, onOpenDocument }) {
       {entries === null && <SkeletonRows n={4} />}
       {entries && entries.length === 0 && <div className="empty">Nothing here yet.</div>}
       {entries && annotateDays(entries, e => e.at).map(({ item: e, divider }, i) => {
-        // Link straight to the kelabo (same /kelabos/:id shape the Kelabos
-        // tab already uses — note that shape only really resolves once the
-        // kelabo has ended; a still-live/scheduled one 404s there today,
-        // a pre-existing gap this reuses rather than silently fixing here).
+        // Link straight to the kelabo, routed by its status snapshot at the
+        // time of this event (kelaboHref, above) rather than always
+        // /kelabos/:id — that shape only ever resolves once archived, so a
+        // still-live/scheduled one used to 404 there.
         // A document has no page of its own, so its click instead switches
         // to the Documents tab and opens that document inline there.
         const kelaboId = (e.type === 'kelabo_linked' || e.type === 'kelabo_unlinked') ? e.detail?.kelaboId : null
         const docId = e.type === 'document' ? e.detail?.docId : null
         const RowTag = kelaboId ? Link : 'div'
         const rowProps = kelaboId
-          ? { to: `/kelabos/${kelaboId}` }
+          ? { to: kelaboHref(kelaboId, e.detail?.statusSnapshot) }
           : docId
             ? { onClick: () => onOpenDocument(docId), style: { cursor: 'pointer' } }
             : {}
@@ -512,7 +526,7 @@ function KelabosTab({ journeyId, isMember, isActive }) {
   }
 
   return (
-    <section className="anim-in">
+    <section className="anim-in vstack-sm journey-tab">
       {isMember && isActive && (
         <div className="action-row action-row-start">
           <Button onClick={() => setShowAdd(true)}><Icon name="plus" size={14} />Add a kelabo</Button>
@@ -527,7 +541,7 @@ function KelabosTab({ journeyId, isMember, isActive }) {
       {items === null && <SkeletonRows n={2} />}
       {items && items.length === 0 && <div className="empty">No kelabos linked yet.</div>}
       {(items || []).map(k => (
-        <Link className="row row-removable" to={`/kelabos/${k.kelaboId}`} key={k.kelaboId}>
+        <Link className="row row-removable" to={kelaboHref(k.kelaboId, k.statusSnapshot)} key={k.kelaboId}>
           <Icon name="archive" size={15} className="kind-icon" />
           <div className="row-main">
             <div className="row-title">{k.title}</div>
@@ -604,7 +618,7 @@ function BoardMessageHistoryModal({ journeyId, msgId, onClose }) {
   )
 }
 
-function BoardTab({ journeyId, isMember, isActive }) {
+function BoardTab({ journeyId, isMember, isActive, isOwner }) {
   const [items, setItems] = useState(null)
   const [showAdd, setShowAdd] = useState(false)
   const [editing, setEditing] = useState(null)
@@ -612,6 +626,7 @@ function BoardTab({ journeyId, isMember, isActive }) {
   // Archived messages are hidden by default (they are no longer important,
   // not outstanding — but never erased) and revealed here on demand.
   const [showArchived, setShowArchived] = useState(false)
+  const { identity } = useAuth()
   const toast = useToast()
 
   const load = () => api.listJourneyBoard(journeyId).then(d => setItems(d.messages || [])).catch(() => setItems([]))
@@ -631,6 +646,10 @@ function BoardTab({ journeyId, isMember, isActive }) {
   const active = (items || []).filter(m => !m.archived)
   const archived = (items || []).filter(m => m.archived)
 
+  // Archiving is narrower than the general write access every member has:
+  // only the message's own poster or the journey's lead may archive it.
+  const canArchive = m => identity?.email === m.createdBy || isOwner
+
   const renderRow = m => (
     <div className={'con' + (m.archived ? ' con-skipped' : '')} data-kind="note" key={m.msgId}>
       <div className="con-head">
@@ -646,7 +665,7 @@ function BoardTab({ journeyId, isMember, isActive }) {
           {isActive && !m.archived && (
             <>
               <Button size="sm" onClick={() => setEditing(m)}>Edit</Button>
-              <Button size="sm" variant="danger-ghost" onClick={() => archive(m)}>Archive</Button>
+              {canArchive(m) && <Button size="sm" variant="danger-ghost" onClick={() => archive(m)}>Archive</Button>}
             </>
           )}
           {isActive && m.archived && (
@@ -658,7 +677,7 @@ function BoardTab({ journeyId, isMember, isActive }) {
   )
 
   return (
-    <section className="anim-in vstack-sm">
+    <section className="anim-in vstack-sm journey-tab">
       {isMember && isActive && (
         <div className="action-row action-row-start">
           <Button onClick={() => setShowAdd(true)}><Icon name="plus" size={14} />Add message</Button>
@@ -721,7 +740,7 @@ function AddDocumentModal({ onClose, onSave }) {
   )
 }
 
-function DocumentsTab({ journeyId, isMember, isActive, initialOpenDocId }) {
+function DocumentsTab({ journeyId, isMember, isActive, isOwner, initialOpenDocId }) {
   const [items, setItems] = useState(null)
   const [showAdd, setShowAdd] = useState(false)
   // Seeded from a Timeline click-through (docs 20 §9), if that's how this
@@ -729,6 +748,11 @@ function DocumentsTab({ journeyId, isMember, isActive, initialOpenDocId }) {
   // component unmounts and remounts fresh on every tab switch (it never
   // receives a changed prop while already mounted).
   const [open, setOpen] = useState(initialOpenDocId || null)
+  // Removed documents are hidden by default (gone from future report/agent
+  // context, but never erased from the record) and revealed here on
+  // demand — same pattern as the Board tab's archived-messages toggle.
+  const [showRemoved, setShowRemoved] = useState(false)
+  const { identity } = useAuth()
   const confirm = useConfirm()
   const toast = useToast()
 
@@ -742,8 +766,36 @@ function DocumentsTab({ journeyId, isMember, isActive, initialOpenDocId }) {
     try { await api.removeJourneyDocument(journeyId, d.docId); load() } catch { toast('Could not remove that document') }
   }
 
+  const active = (items || []).filter(d => !d.removed)
+  const removed = (items || []).filter(d => d.removed)
+  // Removal is narrower than the general write access every member has:
+  // only the document's own poster or the journey's lead may remove it.
+  const canRemove = d => identity?.email === d.addedBy || isOwner
+
+  const renderRow = d => (
+    <div className="row row-removable" key={d.docId} onClick={() => setOpen(open === d.docId ? null : d.docId)} style={{ cursor: 'pointer' }}>
+      <Icon name="file-text" size={15} className="kind-icon" />
+      <div className="row-main">
+        <div className="row-title">
+          {d.title}
+          {d.removed && <span className="chip chip-ended">removed</span>}
+        </div>
+        <div className="row-sub">
+          {d.addedBy} · {(d.sizeBytes / 1024).toFixed(1)} KB
+          {open === d.docId && <div style={{ marginTop: 6 }}><Markdown text={d.content} hardBreaks /></div>}
+        </div>
+      </div>
+      <span className="row-meta">{timeAgo(d.addedAt)}</span>
+      {isMember && isActive && !d.removed && canRemove(d) && (
+        <button className="remove-btn" onClick={e => { e.stopPropagation(); remove(d) }} title={`Remove ${d.title}`} aria-label={`Remove ${d.title}`}>
+          <Icon name="x" size={15} />
+        </button>
+      )}
+    </div>
+  )
+
   return (
-    <section className="anim-in vstack-sm">
+    <section className="anim-in vstack-sm journey-tab">
       {isMember && isActive && (
         <div className="action-row action-row-start">
           <Button onClick={() => setShowAdd(true)}><Icon name="plus" size={14} />Add document</Button>
@@ -751,27 +803,16 @@ function DocumentsTab({ journeyId, isMember, isActive, initialOpenDocId }) {
       )}
       {items === null && <SkeletonRows n={2} />}
       {items && items.length === 0 && <div className="empty">No documents yet.</div>}
-      {(items || []).map(d => (
-        <div className="row row-removable" key={d.docId} onClick={() => setOpen(open === d.docId ? null : d.docId)} style={{ cursor: 'pointer' }}>
-          <Icon name="file-text" size={15} className="kind-icon" />
-          <div className="row-main">
-            <div className="row-title">
-              {d.title}
-              {d.removed && <span className="chip chip-ended">removed</span>}
-            </div>
-            <div className="row-sub">
-              {d.addedBy} · {(d.sizeBytes / 1024).toFixed(1)} KB
-              {open === d.docId && <div style={{ marginTop: 6 }}><Markdown text={d.content} /></div>}
-            </div>
-          </div>
-          <span className="row-meta">{timeAgo(d.addedAt)}</span>
-          {isMember && isActive && !d.removed && (
-            <button className="remove-btn" onClick={e => { e.stopPropagation(); remove(d) }} title={`Remove ${d.title}`} aria-label={`Remove ${d.title}`}>
-              <Icon name="x" size={15} />
-            </button>
-          )}
+      {active.map(renderRow)}
+      {removed.length > 0 && (
+        <div className="action-row action-row-start">
+          <Button size="sm" variant="ghost" onClick={() => setShowRemoved(v => !v)}>
+            <Icon name={showRemoved ? 'chevron-down' : 'chevron-right'} size={13} />
+            {showRemoved ? 'Hide' : 'Show'} removed ({removed.length})
+          </Button>
         </div>
-      ))}
+      )}
+      {showRemoved && removed.map(renderRow)}
       {showAdd && <AddDocumentModal onClose={() => setShowAdd(false)} onSave={add} />}
     </section>
   )
@@ -818,7 +859,7 @@ function ReportRow({ r }) {
   const [open, setOpen] = useState(false)
   const pending = r.status === 'pending'
   return (
-    <div className={'con' + (r.status === 'failed' ? ' con-skipped' : '')} data-kind="answer">
+    <div className={'con' + (open ? ' open' : '') + (r.status === 'failed' ? ' con-skipped' : '')} data-kind="answer">
       <div className="con-head" onClick={() => !pending && setOpen(o => !o)} style={{ cursor: pending ? 'default' : 'pointer' }}>
         {pending
           ? <span className="con-spinner" aria-hidden="true"></span>
@@ -862,7 +903,7 @@ function ReportsTab({ journeyId, isMember, isActive }) {
   }
 
   return (
-    <section className="anim-in vstack-sm">
+    <section className="anim-in vstack-sm journey-tab">
       {isMember && isActive && (
         <div className="action-row action-row-start">
           <Button onClick={() => setShowAsk(true)}><Icon name="help" size={14} />Ask a question</Button>
@@ -1029,10 +1070,10 @@ export default function JourneyDetail() {
           {tab === 'timeline' && <TimelineTab journeyId={id} isMember={isMember} onOpenDocument={openDocument} />}
           {tab === 'kelabos' && <KelabosTab journeyId={id} isMember={isMember} isActive={isActive} />}
           {tab === 'reports' && <ReportsTab journeyId={id} isMember={isMember} isActive={isActive} />}
-          {tab === 'board' && <BoardTab journeyId={id} isMember={isMember} isActive={isActive} />}
-          {tab === 'documents' && <DocumentsTab journeyId={id} isMember={isMember} isActive={isActive} initialOpenDocId={focusDocId} />}
+          {tab === 'board' && <BoardTab journeyId={id} isMember={isMember} isActive={isActive} isOwner={isOwner} />}
+          {tab === 'documents' && <DocumentsTab journeyId={id} isMember={isMember} isActive={isActive} isOwner={isOwner} initialOpenDocId={focusDocId} />}
           {tab === 'accessors' && journey.visibility === 'private' && (
-            <section className="anim-in">
+            <section className="anim-in vstack-sm journey-tab">
               {isOwner && isActive && (
                 <div className="action-row action-row-start">
                   <Button onClick={addAccessor}><Icon name="user-plus" size={14} />Add accessor</Button>

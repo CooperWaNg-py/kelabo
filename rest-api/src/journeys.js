@@ -315,7 +315,10 @@ export function createJourneys({ config, db, internal }) {
       summary: `Linked kelabo: ${kelaboMeta.title}`,
       actor: identity,
       at: now,
-      detail: { kelaboId },
+      // statusSnapshot lets the SPA route a click at the right shape
+      // (docs 20 §9.3/§13) — a point-in-time snapshot, same as the link
+      // record's own, not a live value.
+      detail: { kelaboId, statusSnapshot: kelaboMeta.status },
     });
     // Contributor stats (docs 20 §10) settle immediately for a kelabo that
     // has already ended — its participant list is final. A kelabo linked
@@ -344,7 +347,7 @@ export function createJourneys({ config, db, internal }) {
       summary: `Unlinked kelabo: ${link.titleSnapshot}`,
       actor: identity,
       at: Date.now(),
-      detail: { kelaboId },
+      detail: { kelaboId, statusSnapshot: link.statusSnapshot },
     });
     return { journeyId, kelaboId, unlinked: true };
   }
@@ -545,6 +548,12 @@ export function createJourneys({ config, db, internal }) {
     requireActive(meta);
     const head = await db.getBoardMessageHead(journeyId, msgId);
     if (!head) throw err(404, "board_message_not_found");
+    // Only the message's own poster or the journey's lead may archive it —
+    // any member may still post/read, but removal is narrower than the
+    // general write access §3.3 grants everyone else.
+    if (identity !== head.createdBy && identity !== meta.ownerIdentity) {
+      throw err(403, "not_message_author_or_lead");
+    }
     // Idempotent: archiving an already-archived message lands on the same
     // state rather than an error, and must not post a second timeline entry.
     if (head.archived) return { journeyId, msgId, archived: true };
@@ -659,6 +668,11 @@ export function createJourneys({ config, db, internal }) {
     requireActive(meta);
     const document = await db.getDocument(journeyId, docId);
     if (!document) throw err(404, "document_not_found");
+    // Only the document's own poster or the journey's lead may remove it —
+    // same narrowing as archiveBoardMessage, for the same reason.
+    if (identity !== document.addedBy && identity !== meta.ownerIdentity) {
+      throw err(403, "not_document_owner_or_lead");
+    }
     if (document.removed) return { journeyId, docId, removed: true }; // idempotent
     const now = Date.now();
     await db.putDocument(journeyId, { ...document, removed: true, removedBy: identity, removedAt: now });

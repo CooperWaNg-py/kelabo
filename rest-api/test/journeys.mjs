@@ -615,6 +615,23 @@ await test("board: add/edit/archive/unarchive, versioned, member-writable, archi
   );
 });
 
+await test("board: only the message's own poster or the journey's lead may archive it", async () => {
+  const j = await journeys.createJourney({ identity: OWNER, body: { title: "T", visibility: "public" } });
+  const added = await journeys.addBoardMessage({ journeyId: j.journeyId, identity: COLLEAGUE, body: { content: "Kickoff notes" } });
+  await assert.rejects(
+    journeys.archiveBoardMessage({ journeyId: j.journeyId, identity: "dave@example.com", msgId: added.msgId }),
+    (e) => e.status === 403 && e.code === "not_message_author_or_lead",
+    "a same-tenant member who is neither the poster nor the lead cannot archive",
+  );
+  // The poster can archive their own message...
+  const archived = await journeys.archiveBoardMessage({ journeyId: j.journeyId, identity: COLLEAGUE, msgId: added.msgId });
+  assert.equal(archived.archived, true);
+  await journeys.unarchiveBoardMessage({ journeyId: j.journeyId, identity: OWNER, msgId: added.msgId });
+  // ...and so can the journey's lead, even for someone else's message.
+  const archivedByLead = await journeys.archiveBoardMessage({ journeyId: j.journeyId, identity: OWNER, msgId: added.msgId });
+  assert.equal(archivedByLead.archived, true);
+});
+
 await test("board: a stranger cannot read or write it; frozen once the journey is completed", async () => {
   const j = await journeys.createJourney({ identity: OWNER, body: { title: "T", visibility: "private" } });
   await assert.rejects(
@@ -652,6 +669,24 @@ await test("documents: add/remove, member-writable, no edit exists, removed docu
   // Idempotent re-removal.
   const again = await journeys.removeDocument({ journeyId: j.journeyId, identity: OWNER, docId: added.docId });
   assert.equal(again.removed, true);
+});
+
+await test("documents: only the document's own poster or the journey's lead may remove it", async () => {
+  const j = await journeys.createJourney({ identity: OWNER, body: { title: "T", visibility: "public" } });
+  const added = await journeys.addDocument({ journeyId: j.journeyId, identity: COLLEAGUE, body: { title: "Spec v1", content: "text" } });
+  await assert.rejects(
+    journeys.removeDocument({ journeyId: j.journeyId, identity: "dave@example.com", docId: added.docId }),
+    (e) => e.status === 403 && e.code === "not_document_owner_or_lead",
+    "a same-tenant member who is neither the poster nor the lead cannot remove",
+  );
+  // The poster can remove their own document...
+  const removed = await journeys.removeDocument({ journeyId: j.journeyId, identity: COLLEAGUE, docId: added.docId });
+  assert.equal(removed.removed, true);
+
+  const added2 = await journeys.addDocument({ journeyId: j.journeyId, identity: COLLEAGUE, body: { title: "Spec v2", content: "text" } });
+  // ...and so can the journey's lead, even for someone else's document.
+  const removedByLead = await journeys.removeDocument({ journeyId: j.journeyId, identity: OWNER, docId: added2.docId });
+  assert.equal(removedByLead.removed, true);
 });
 
 await test("documents: unknown id is 404; a stranger cannot add one", async () => {

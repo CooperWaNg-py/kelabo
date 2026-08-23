@@ -287,6 +287,31 @@ export function loadConfig(env,   configPath = join(here, "kelabo.json")) {
     ...(block.joinCode ?? {}),
   };
 
+  // How long CloudWatch keeps the Lambda's and the Gateway's application logs.
+  //
+  // Set explicitly because the AWS default is **never expire**, and these logs
+  // are not anonymous: they record the identity performing an action, which for
+  // a signed-in person is their email address. Everything else the product
+  // stores has a stated lifetime — a kelabo 30 days, usage counters 90,
+  // financial records 5.5 years — and logs quietly outliving all of them is not
+  // a decision anyone made.
+  //
+  // 120 days is longer than `retentionDays` on purpose: a log's job is to
+  // explain an incident, and an incident is often reported well after the
+  // kelabo it concerns has expired. Long enough to investigate one, short
+  // enough that it is not a second, permanent copy of who spoke to whom.
+  //
+  // Not `retentionDays`: that is a promise to the person whose kelabo it is,
+  // this is an operational window. Tying them together would mean a deployment
+  // that wanted longer forensics silently keeping everyone's transcripts longer
+  // too.
+  const logRetentionDays = Number(block.logRetentionDays ?? 120);
+  if (!Number.isInteger(logRetentionDays) || logRetentionDays <= 0) {
+    throw new Error(
+      `kelabo config: env "${env}" sets logRetentionDays "${block.logRetentionDays}"; it must be a positive whole number of days`,
+    );
+  }
+
   // What this deployment calls itself, shown to people and used for nothing
   // else: the sign-in sentence and the browser tab. Strictly cosmetic —
   // tenancy is the verified email domain (`allowedEmailDomain`), and this must
@@ -360,6 +385,7 @@ export function loadConfig(env,   configPath = join(here, "kelabo.json")) {
     contacts,
     auth,
     joinCode,
+    logRetentionDays,
     secrets: {
       ...block.secrets,
       // Same defaulting reason as `rtc` above: keep a pre-conference-audio

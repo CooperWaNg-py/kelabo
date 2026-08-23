@@ -1,10 +1,12 @@
-import { Stack, Duration, CfnOutput } from "aws-cdk-lib";
+import { Stack, Duration, CfnOutput, RemovalPolicy } from "aws-cdk-lib";
 import * as lambda from "aws-cdk-lib/aws-lambda";
 import { NodejsFunction, OutputFormat } from "aws-cdk-lib/aws-lambda-nodejs";
 import * as iam from "aws-cdk-lib/aws-iam";
+import * as logs from "aws-cdk-lib/aws-logs";
 import * as secretsmanager from "aws-cdk-lib/aws-secretsmanager";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { logRetention } from "./log-retention.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -14,7 +16,22 @@ export class LambdaStack extends Stack {
     const { cfg, tables, archiveBucket } = props;
     const names = cfg.tableNames;
 
+    // Declared rather than left to Lambda, which creates the group on first
+    // invocation with **no expiry**. These logs name the identity performing
+    // each action — an email address for a signed-in person — so an unset
+    // retention is an unbounded record of who used the service and when,
+    // outliving the kelabos it describes by any margin.
+    //
+    // `RETAIN` on destroy: losing the stack must not also lose the log of what
+    // happened to it, which is exactly when it is wanted.
+    const logGroup = new logs.LogGroup(this, "RestApiLogs", {
+      logGroupName: `/aws/lambda/${cfg.app}-${cfg.endpoint}-rest-api`,
+      retention: logRetention(cfg.logRetentionDays),
+      removalPolicy: RemovalPolicy.RETAIN,
+    });
+
     this.fn = new NodejsFunction(this, "RestApiFn", {
+      logGroup,
       functionName: `${cfg.app}-${cfg.endpoint}-rest-api`,
       entry: join(here, "../../rest-api/src/index.js"),
       handler: "handler",

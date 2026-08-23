@@ -1,14 +1,16 @@
-import { Stack, CfnOutput } from "aws-cdk-lib";
+import { Stack, CfnOutput, RemovalPolicy } from "aws-cdk-lib";
 import * as ec2 from "aws-cdk-lib/aws-ec2";
 import * as ecs from "aws-cdk-lib/aws-ecs";
 import * as ecr from "aws-cdk-lib/aws-ecr";
 import * as iam from "aws-cdk-lib/aws-iam";
+import * as logs from "aws-cdk-lib/aws-logs";
 import * as route53 from "aws-cdk-lib/aws-route53";
 import * as targets from "aws-cdk-lib/aws-route53-targets";
 import * as elbv2 from "aws-cdk-lib/aws-elasticloadbalancingv2";
 import * as secretsmanager from "aws-cdk-lib/aws-secretsmanager";
 import { ApplicationLoadBalancedFargateService } from "aws-cdk-lib/aws-ecs-patterns";
 import { execSync } from "node:child_process";
+import { logRetention } from "./log-retention.js";
 
 function credentialsAccount() {
   try {
@@ -62,6 +64,16 @@ export class GatewayEcsStack extends Stack {
       clusterName: `${cfg.app}-${cfg.endpoint}`,
     });
 
+    // Same reason as the Lambda's: the pattern would otherwise create this
+    // group with no expiry. The Gateway logs every join, caption append and
+    // agent attach, each carrying the participant's identity, so leaving it
+    // unset keeps a permanent index of who was in which room.
+    const logGroup = new logs.LogGroup(this, "GatewayLogs", {
+      logGroupName: `/aws/ecs/${cfg.app}-${cfg.endpoint}-gateway`,
+      retention: logRetention(cfg.logRetentionDays),
+      removalPolicy: RemovalPolicy.RETAIN,
+    });
+
     this.service = new ApplicationLoadBalancedFargateService(this, "GatewayService", {
       cluster,
       serviceName: `${cfg.app}-${cfg.endpoint}-gateway`,
@@ -88,6 +100,7 @@ export class GatewayEcsStack extends Stack {
       taskImageOptions: {
         image: ecs.ContainerImage.fromEcrRepository(this.repo, cfg.gateway.imageTag),
         containerPort: 8080,
+        logDriver: ecs.LogDrivers.awsLogs({ streamPrefix: "gateway", logGroup }),
         environment: {
           KELABO_ENV: cfg.endpoint,
           KELABO_REGION: cfg.region,

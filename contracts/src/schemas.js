@@ -595,8 +595,11 @@ export const retentionUnits = ["days", "weeks", "months", "years"];
 // destructive by omission is not acceptable here, so clients preview first.
 export const purgeRecordsBodySchema = z.object({
   // >= 1: `0 days` would mean "everything", which must be a deliberate choice
-  // made with an explicit age, not an accidental empty form field.
-  value: z.number().int().min(1).max(1000),
+  // made with an explicit age, not an accidental empty form field. <= 99
+  // regardless of unit — three digits' worth of typo (e.g. "999" meant to be
+  // "99") is exactly the kind of accidental over-broad purge this bound
+  // exists to catch before it reaches the confirmation step.
+  value: z.number().int().min(1).max(99),
   unit: z.enum(["days", "weeks", "months", "years"]),
   dryRun: z.boolean().optional(),
 });

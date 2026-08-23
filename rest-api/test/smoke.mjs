@@ -845,6 +845,8 @@ await test("cutoffFromAge uses calendar arithmetic for months and years", async 
   assert.equal(cutoffFromAge(2, "weeks", at("2026-03-15T00:00:00Z")), at("2026-03-01T00:00:00Z"));
   assert.equal(cutoffFromAge(3, "days", at("2026-03-15T00:00:00Z")), at("2026-03-12T00:00:00Z"));
   assert.throws(() => cutoffFromAge(0, "days"), /invalid retention value/);
+  assert.throws(() => cutoffFromAge(100, "days"), /invalid retention value/, "capped at 99 regardless of unit");
+  assert.equal(typeof cutoffFromAge(99, "years"), "number", "99 itself is still allowed");
   assert.throws(() => cutoffFromAge(1, "fortnights"), /invalid retention unit/);
 });
 
@@ -974,7 +976,7 @@ await test("POST /records/purge: hosted records are fully deleted, attended ones
 await test("POST /records/purge: validation and auth", async () => {
   const anon = await call("POST", "/records/purge", { body: { value: 1, unit: "days" } });
   assert.equal(anon.statusCode, 401);
-  for (const body of [{ value: 0, unit: "days" }, { value: 1, unit: "fortnights" }, { value: 1.5, unit: "days" }, {}]) {
+  for (const body of [{ value: 0, unit: "days" }, { value: 100, unit: "days" }, { value: 1, unit: "fortnights" }, { value: 1.5, unit: "days" }, {}]) {
     const bad = await call("POST", "/records/purge", { body, cookies: sessionCookies });
     assert.equal(bad.statusCode, 400, `rejects ${JSON.stringify(body)}`);
   }
